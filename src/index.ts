@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import authRouter from './routes/auth.routes';
 import healthRouter from './routes/health.routes';
+import batchRouter from './routes/batch.routes';
 
 // Load environment variables
 dotenv.config();
@@ -45,6 +46,7 @@ app.use(
 // Routes
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/batches', batchRouter);
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

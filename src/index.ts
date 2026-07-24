@@ -25,7 +25,11 @@ app.use(cookieParser());
 const allowedOrigins = ([
   process.env.FRONTEND_URL,
   'http://localhost:3000',
-  'http://localhost:3001'
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+  'http://127.0.0.1:3002'
 ].filter(Boolean) as string[]).map((url) => url.replace(/\/$/, ''));
 
 app.use(
@@ -69,7 +73,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`EduFlow Backend is running on port ${PORT}`);
 });
 

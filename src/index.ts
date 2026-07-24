@@ -15,10 +15,11 @@ const PORT = process.env.PORT || 5000;
 app.use(express.json());
 app.use(cookieParser());
 
-const allowedOrigins = [
+const allowedOrigins = ([
   process.env.FRONTEND_URL,
-  'http://localhost:3000'
-].filter(Boolean) as string[];
+  'http://localhost:3000',
+  'http://localhost:3001'
+].filter(Boolean) as string[]).map((url) => url.replace(/\/$/, ''));
 
 app.use(
   cors({
@@ -27,7 +28,12 @@ app.use(
       if (!origin) {
         return callback(null, true);
       }
-      if (allowedOrigins.includes(origin)) {
+      
+      const sanitizedOrigin = origin.replace(/\/$/, '');
+      if (
+        allowedOrigins.includes(sanitizedOrigin) || 
+        sanitizedOrigin.endsWith('.vercel.app')
+      ) {
         return callback(null, true);
       }
       return callback(null, false);

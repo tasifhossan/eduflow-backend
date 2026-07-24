@@ -1,0 +1,71 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  TEACHER
+  STUDENT
+  GUARDIAN
+}
+
+enum BatchType {
+  ACADEMIC
+  ADMISSION
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?
+  createdAt DateTime @default(now())
+  users     User[]
+  batches   Batch[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  phone     String?
+  password  String
+  role      Role
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Subject {
+  id       String    @id @default(cuid())
+  name     String
+  chapters Chapter[]
+  batches  Batch[]
+}
+
+model Chapter {
+  id        String  @id @default(cuid())
+  name      String
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+}
+
+model Batch {
+  id         String    @id @default(cuid())
+  name       String
+  type       BatchType
+  classLevel String?
+  subjectId  String
+  subject    Subject   @relation(fields: [subjectId], references: [id])
+  branchId   String
+  branch     Branch    @relation(fields: [branchId], references: [id])
+  createdAt  DateTime  @default(now())
+}

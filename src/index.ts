@@ -6,6 +6,9 @@ import authRouter from './routes/auth.routes';
 import healthRouter from './routes/health.routes';
 import batchRouter from './routes/batch.routes';
 import enrollmentRouter from './routes/enrollment.routes';
+import routineRouter from './routes/routine.routes';
+import attendanceRouter from './routes/attendance.routes';
+
 
 // Load environment variables
 dotenv.config();
@@ -49,6 +52,8 @@ app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/batches', batchRouter);
 app.use('/api/enrollments', enrollmentRouter);
+app.use('/api', routineRouter);
+app.use('/api', attendanceRouter);
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

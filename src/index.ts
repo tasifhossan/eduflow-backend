@@ -8,6 +8,8 @@ import batchRouter from './routes/batch.routes';
 import enrollmentRouter from './routes/enrollment.routes';
 import routineRouter from './routes/routine.routes';
 import attendanceRouter from './routes/attendance.routes';
+import subjectRouter from './routes/subject.routes';
+import userRouter from './routes/user.routes';
 
 
 // Load environment variables
@@ -54,6 +56,8 @@ app.use('/api/batches', batchRouter);
 app.use('/api/enrollments', enrollmentRouter);
 app.use('/api', routineRouter);
 app.use('/api', attendanceRouter);
+app.use('/api/subjects', subjectRouter);
+app.use('/api/users', userRouter);
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

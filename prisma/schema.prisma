@@ -58,6 +58,8 @@ model User {
   name              String
   email             String       @unique
   phone             String?
+  guardianName      String?
+  guardianPhone     String?
   password          String
   role              Role
   branchId          String

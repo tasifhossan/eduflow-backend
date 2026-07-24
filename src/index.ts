@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import authRouter from './routes/auth.routes';
 import healthRouter from './routes/health.routes';
 import batchRouter from './routes/batch.routes';
+import enrollmentRouter from './routes/enrollment.routes';
 
 // Load environment variables
 dotenv.config();
@@ -47,6 +48,7 @@ app.use(
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/batches', batchRouter);
+app.use('/api/enrollments', enrollmentRouter);
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

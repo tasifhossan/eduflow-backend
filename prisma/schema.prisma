@@ -23,6 +23,27 @@ enum BatchType {
   ADMISSION
 }
 
+enum EnrollmentStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum DayOfWeek {
+  SUNDAY
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+}
+
 model Branch {
   id        String   @id @default(cuid())
   name      String
@@ -33,15 +54,19 @@ model Branch {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  name      String
-  email     String   @unique
-  phone     String?
-  password  String
-  role      Role
-  branchId  String
-  branch    Branch   @relation(fields: [branchId], references: [id])
-  createdAt DateTime @default(now())
+  id                String       @id @default(cuid())
+  name              String
+  email             String       @unique
+  phone             String?
+  password          String
+  role              Role
+  branchId          String
+  branch            Branch       @relation(fields: [branchId], references: [id])
+  createdAt         DateTime     @default(now())
+  teachingBatches   Batch[]      @relation(name: "TeachingBatches")
+  enrollments       Enrollment[]
+  attendances       Attendance[] @relation(name: "StudentAttendances")
+  markedAttendances Attendance[] @relation(name: "MarkedAttendances")
 }
 
 model Subject {
@@ -59,13 +84,53 @@ model Chapter {
 }
 
 model Batch {
-  id         String    @id @default(cuid())
-  name       String
-  type       BatchType
-  classLevel String?
-  subjectId  String
-  subject    Subject   @relation(fields: [subjectId], references: [id])
-  branchId   String
-  branch     Branch    @relation(fields: [branchId], references: [id])
-  createdAt  DateTime  @default(now())
+  id           String        @id @default(cuid())
+  name         String
+  type         BatchType
+  classLevel   String?
+  subjectId    String
+  subject      Subject       @relation(fields: [subjectId], references: [id])
+  branchId     String
+  branch       Branch        @relation(fields: [branchId], references: [id])
+  createdAt    DateTime      @default(now())
+  teacherId    String?
+  teacher      User?         @relation(name: "TeachingBatches", fields: [teacherId], references: [id])
+  enrollments  Enrollment[]
+  routineSlots RoutineSlot[]
+  attendances  Attendance[]
+}
+
+model Enrollment {
+  id         String           @id @default(cuid())
+  studentId  String
+  student    User             @relation(fields: [studentId], references: [id])
+  batchId    String
+  batch      Batch            @relation(fields: [batchId], references: [id])
+  enrolledAt DateTime         @default(now())
+  status     EnrollmentStatus @default(ACTIVE)
+
+  @@unique([studentId, batchId])
+}
+
+model RoutineSlot {
+  id        String    @id @default(cuid())
+  batchId   String
+  batch     Batch     @relation(fields: [batchId], references: [id])
+  dayOfWeek DayOfWeek
+  startTime String
+  endTime   String
+}
+
+model Attendance {
+  id         String           @id @default(cuid())
+  studentId  String
+  student    User             @relation(name: "StudentAttendances", fields: [studentId], references: [id])
+  batchId    String
+  batch      Batch            @relation(fields: [batchId], references: [id])
+  date       DateTime
+  status     AttendanceStatus
+  markedById String
+  markedBy   User             @relation(name: "MarkedAttendances", fields: [markedById], references: [id])
+
+  @@unique([studentId, batchId, date])
 }

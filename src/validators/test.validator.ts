@@ -12,7 +12,7 @@ export const createTestSchema = z.object({
   testDate: z.string().datetime({ message: 'Test date must be a valid ISO date string' }),
 });
 
-export const createQuestionSchema = z.object({
+const questionBase = z.object({
   type: z.nativeEnum(QuestionType, { message: 'Invalid question type' }),
   text: z.string().min(3, 'Question text must be at least 3 characters long'),
   marks: z.number().positive('Question marks must be a positive number'),
@@ -23,7 +23,9 @@ export const createQuestionSchema = z.object({
       isCorrect: z.boolean().default(false),
     })
   ).optional().default([]),
-}).refine((data) => {
+});
+
+export const createQuestionSchema = questionBase.refine((data) => {
   if (data.type === QuestionType.MCQ) {
     if (!data.options || data.options.length === 0) {
       return false;
@@ -38,4 +40,18 @@ export const createQuestionSchema = z.object({
 });
 
 export const updateTestSchema = createTestSchema.partial();
-export const updateQuestionSchema = createQuestionSchema.partial();
+
+export const updateQuestionSchema = questionBase.partial().refine((data) => {
+  if (data.type === QuestionType.MCQ) {
+    if (!data.options || data.options.length === 0) {
+      return false;
+    }
+    const correctOptions = data.options.filter((o) => o?.isCorrect);
+    return correctOptions.length === 1;
+  }
+  return true;
+}, {
+  message: 'MCQ questions must have at least one option and exactly one correct option',
+  path: ['options'],
+});
+

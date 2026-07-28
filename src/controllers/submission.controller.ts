@@ -290,7 +290,7 @@ export async function getTestResults(req: Request, res: Response) {
       });
     }
 
-    // Retrieve results sorted by totalMarksObtained desc
+    // Retrieve results sorted by totalMarksObtained desc, including student and their answers for this test
     const results = await prisma.result.findMany({
       where: { testId },
       include: {
@@ -299,6 +299,21 @@ export async function getTestResults(req: Request, res: Response) {
             id: true,
             name: true,
             email: true,
+            studentAnswers: {
+              where: {
+                question: { testId },
+              },
+              include: {
+                question: {
+                  select: {
+                    id: true,
+                    type: true,
+                    text: true,
+                    marks: true,
+                  },
+                },
+              },
+            },
           },
         },
       },

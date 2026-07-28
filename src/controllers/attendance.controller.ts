@@ -250,3 +250,108 @@ export async function getAttendanceByStudent(req: Request, res: Response) {
     });
   }
 }
+
+export async function getTodayAttendanceSummary(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const branchId = req.user.branchId;
+    const { date } = req.query;
+    
+    let targetDate = new Date();
+    if (date && typeof date === 'string') {
+      const parsedDate = new Date(date);
+      if (!isNaN(parsedDate.getTime())) {
+        targetDate = parsedDate;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid date format',
+        });
+      }
+    }
+
+    const normalizedDate = new Date(targetDate.toISOString().split('T')[0] + 'T00:00:00.000Z');
+
+    const batches = await prisma.batch.findMany({
+      where: {
+        branchId,
+      },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        classLevel: true,
+        subject: {
+          select: {
+            name: true,
+          },
+        },
+        teacher: {
+          select: {
+            name: true,
+          },
+        },
+        _count: {
+          select: {
+            enrollments: true,
+          },
+        },
+        attendances: {
+          where: {
+            date: normalizedDate,
+          },
+          select: {
+            id: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    const summary = batches.map((batch) => {
+      const totalEnrolled = batch._count.enrollments;
+      const markedCount = batch.attendances.length;
+
+      let status: 'marked' | 'partial' | 'unmarked' = 'unmarked';
+      if (markedCount > 0) {
+        if (totalEnrolled > 0 && markedCount >= totalEnrolled) {
+          status = 'marked';
+        } else {
+          status = 'partial';
+        }
+      }
+
+      return {
+        id: batch.id,
+        name: batch.name,
+        type: batch.type,
+        classLevel: batch.classLevel,
+        subjectName: batch.subject.name,
+        teacherName: batch.teacher?.name || null,
+        totalEnrolled,
+        todayMarkedCount: markedCount,
+        status,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Today\'s attendance summary retrieved successfully',
+      data: summary,
+    });
+  } catch (error) {
+    console.error('Get today\'s attendance summary error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}

@@ -10,6 +10,7 @@ import routineRouter from './routes/routine.routes';
 import attendanceRouter from './routes/attendance.routes';
 import subjectRouter from './routes/subject.routes';
 import userRouter from './routes/user.routes';
+import studentRouter from './routes/student.routes';
 
 
 // Load environment variables
@@ -62,6 +63,7 @@ app.use('/api', routineRouter);
 app.use('/api', attendanceRouter);
 app.use('/api/subjects', subjectRouter);
 app.use('/api/users', userRouter);
+app.use('/api', studentRouter);
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

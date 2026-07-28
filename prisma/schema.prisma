@@ -54,21 +54,24 @@ model Branch {
 }
 
 model User {
-  id                String       @id @default(cuid())
+  id                String          @id @default(cuid())
   name              String
-  email             String       @unique
+  email             String          @unique
   phone             String?
   guardianName      String?
   guardianPhone     String?
   password          String
   role              Role
   branchId          String
-  branch            Branch       @relation(fields: [branchId], references: [id])
-  createdAt         DateTime     @default(now())
-  teachingBatches   Batch[]      @relation(name: "TeachingBatches")
+  branch            Branch          @relation(fields: [branchId], references: [id])
+  createdAt         DateTime        @default(now())
+  teachingBatches   Batch[]         @relation(name: "TeachingBatches")
   enrollments       Enrollment[]
-  attendances       Attendance[] @relation(name: "StudentAttendances")
-  markedAttendances Attendance[] @relation(name: "MarkedAttendances")
+  attendances       Attendance[]    @relation(name: "StudentAttendances")
+  markedAttendances Attendance[]    @relation(name: "MarkedAttendances")
+  createdTests      Test[]          @relation(name: "CreatedTests")
+  studentAnswers    StudentAnswer[]
+  results           Result[]
 }
 
 model Subject {
@@ -83,6 +86,7 @@ model Chapter {
   name      String
   subjectId String
   subject   Subject @relation(fields: [subjectId], references: [id])
+  tests     Test[]
 }
 
 model Batch {
@@ -100,6 +104,7 @@ model Batch {
   enrollments  Enrollment[]
   routineSlots RoutineSlot[]
   attendances  Attendance[]
+  tests        Test[]
 }
 
 model Enrollment {
@@ -135,4 +140,82 @@ model Attendance {
   markedBy   User             @relation(name: "MarkedAttendances", fields: [markedById], references: [id])
 
   @@unique([studentId, batchId, date])
+}
+
+enum TestType {
+  MCQ
+  WRITTEN
+  MIXED
+}
+
+enum QuestionType {
+  MCQ
+  WRITTEN
+}
+
+model Test {
+  id                   String     @id @default(cuid())
+  title                String
+  type                 TestType
+  batchId              String
+  batch                Batch      @relation(fields: [batchId], references: [id])
+  chapterId            String?
+  chapter              Chapter?   @relation(fields: [chapterId], references: [id])
+  totalMarks           Float
+  negativeMarkingValue Float      @default(0)
+  durationMinutes      Int?
+  testDate             DateTime
+  createdById          String
+  createdBy            User       @relation(name: "CreatedTests", fields: [createdById], references: [id])
+  createdAt            DateTime   @default(now())
+  questions            Question[]
+  results              Result[]
+}
+
+model Question {
+  id             String          @id @default(cuid())
+  testId         String
+  test           Test            @relation(fields: [testId], references: [id], onDelete: Cascade)
+  type           QuestionType
+  text           String
+  marks          Float
+  order          Int
+  options        Option[]
+  studentAnswers StudentAnswer[]
+}
+
+model Option {
+  id             String          @id @default(cuid())
+  questionId     String
+  question       Question        @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text           String
+  isCorrect      Boolean         @default(false)
+  studentAnswers StudentAnswer[]
+}
+
+model StudentAnswer {
+  id                String   @id @default(cuid())
+  studentId         String
+  student           User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  questionId        String
+  question          Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selectedOptionId  String?
+  selectedOption    Option?  @relation(fields: [selectedOptionId], references: [id])
+  writtenAnswerText String?
+  marksAwarded      Float?
+
+  @@unique([studentId, questionId])
+}
+
+model Result {
+  id                 String   @id @default(cuid())
+  studentId          String
+  student            User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  testId             String
+  test               Test     @relation(fields: [testId], references: [id], onDelete: Cascade)
+  totalMarksObtained Float
+  rank               Int?
+  submittedAt        DateTime
+
+  @@unique([studentId, testId])
 }

@@ -1,11 +1,11 @@
 import { Router } from 'express';
+import { Role } from '@prisma/client';
+import { authenticate, authorize } from '../middleware/auth.middleware';
 import { register, login } from '../controllers/auth.controller';
 
 const router = Router();
 
-// TODO: Protect this endpoint with `authenticate` and `authorize('ADMIN')` in the future.
-// Currently left open for initial admin registration and development ease.
-router.post('/register', register);
+router.post('/register', authenticate, authorize(Role.ADMIN), register);
 
 router.post('/login', login);
 

@@ -40,6 +40,16 @@ export async function markAttendance(req: Request, res: Response) {
     const parsedDate = new Date(date);
     const normalizedDate = new Date(parsedDate.toISOString().split('T')[0] + 'T00:00:00.000Z');
 
+    // Reject future attendance dates
+    const today = new Date();
+    const todayNormalized = new Date(today.toISOString().split('T')[0] + 'T00:00:00.000Z');
+    if (normalizedDate > todayNormalized) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot mark attendance for future dates',
+      });
+    }
+
     // Verify all students exist and belong to the same branch
     const studentIds = records.map((r) => r.studentId);
     const students = await prisma.user.findMany({

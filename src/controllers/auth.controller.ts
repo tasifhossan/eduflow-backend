@@ -158,3 +158,46 @@ export async function login(req: Request, res: Response) {
     });
   }
 }
+
+export async function me(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        branchId: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: User no longer exists',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'User details retrieved successfully',
+      data: user,
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+

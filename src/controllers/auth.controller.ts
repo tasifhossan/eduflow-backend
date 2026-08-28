@@ -63,9 +63,9 @@ export async function register(req: Request, res: Response) {
       branchId: user.branchId,
     });
 
-    // Set JWT in httpOnly cookie
+    // Set JWT in cookie (not httpOnly so client scripts can parse role/claims)
     res.cookie('token', token, {
-      httpOnly: true,
+      httpOnly: false,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
@@ -131,9 +131,9 @@ export async function login(req: Request, res: Response) {
       branchId: user.branchId,
     });
 
-    // Set JWT in httpOnly cookie
+    // Set JWT in cookie (not httpOnly so client scripts can parse role/claims)
     res.cookie('token', token, {
-      httpOnly: true,
+      httpOnly: false,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds

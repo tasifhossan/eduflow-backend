@@ -63,7 +63,7 @@ app.use(
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/batches', batchRouter);
-app.use('/api/enrollments', enrollmentRouter);
+app.use('/api', enrollmentRouter);
 app.use('/api', routineRouter);
 app.use('/api', attendanceRouter);
 app.use('/api/subjects', subjectRouter);

@@ -146,6 +146,7 @@ enum TestType {
   MCQ
   WRITTEN
   MIXED
+  OFFLINE
 }
 
 enum QuestionType {

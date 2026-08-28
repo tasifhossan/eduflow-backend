@@ -363,6 +363,100 @@ export async function getTestResults(req: Request, res: Response) {
   }
 }
 
+export async function saveBatchManualResults(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const testId = req.params.testId as string;
+    const branchId = req.user.branchId;
+    const { results } = req.body; // Array of { studentId: string, marksObtained: number }
+
+    if (!Array.isArray(results)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Results body must be an array of student marks',
+      });
+    }
+
+    const test = await prisma.test.findUnique({
+      where: { id: testId },
+      include: { batch: { select: { branchId: true } } },
+    });
+
+    if (!test || test.batch.branchId !== branchId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Test not found or access denied',
+      });
+    }
+
+    // Upsert each student result record
+    for (const item of results) {
+      if (typeof item.studentId === 'string' && typeof item.marksObtained === 'number') {
+        await prisma.result.upsert({
+          where: {
+            studentId_testId: {
+              studentId: item.studentId,
+              testId,
+            },
+          },
+          update: {
+            totalMarksObtained: item.marksObtained,
+            submittedAt: new Date(),
+          },
+          create: {
+            studentId: item.studentId,
+            testId,
+            totalMarksObtained: item.marksObtained,
+            submittedAt: new Date(),
+          },
+        });
+      }
+    }
+
+    // Recalculate ranks across all results for this test
+    const allResults = await prisma.result.findMany({
+      where: { testId },
+      orderBy: { totalMarksObtained: 'desc' },
+    });
+
+    let rank = 1;
+    const rankUpdates = [];
+
+    for (let i = 0; i < allResults.length; i++) {
+      if (i > 0 && allResults[i].totalMarksObtained < allResults[i - 1].totalMarksObtained) {
+        rank = i + 1;
+      }
+      rankUpdates.push(
+        prisma.result.update({
+          where: { id: allResults[i].id },
+          data: { rank },
+        })
+      );
+    }
+
+    if (rankUpdates.length > 0) {
+      await prisma.$transaction(rankUpdates);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Manual test results saved and ranked successfully',
+    });
+  } catch (error) {
+    console.error('Save manual results error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
 export async function getStudentResult(req: Request, res: Response) {
   try {
     if (!req.user) {

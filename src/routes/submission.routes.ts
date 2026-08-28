@@ -6,12 +6,14 @@ import {
   gradeWrittenAnswer,
   getTestResults,
   getStudentResult,
+  saveBatchManualResults,
 } from '../controllers/submission.controller';
 
 const router = Router();
 
 router.post('/tests/:testId/submit', authenticate, authorize(Role.STUDENT), submitTest);
 router.patch('/answers/:id/grade', authenticate, authorize(Role.ADMIN, Role.TEACHER), gradeWrittenAnswer);
+router.post('/tests/:testId/manual-results', authenticate, authorize(Role.ADMIN, Role.TEACHER), saveBatchManualResults);
 router.get('/tests/:testId/results', authenticate, authorize(Role.ADMIN, Role.TEACHER), getTestResults);
 router.get('/tests/:testId/my-result', authenticate, authorize(Role.STUDENT), getStudentResult);
 

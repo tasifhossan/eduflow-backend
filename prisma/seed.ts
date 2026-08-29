@@ -84,6 +84,42 @@ async function main() {
     }
   }
 
+  // Seed 5 default student accounts
+  const studentPassword = await bcrypt.hash('Student@123', 10);
+  const sampleStudents = [
+    { name: 'Tasif Hossain', email: 'tasif@eduflow.com', phone: '01712345678', guardianName: 'Mr. Hossain', guardianPhone: '01711111111' },
+    { name: 'Imran Khan', email: 'imran@eduflow.com', phone: '01812345678', guardianName: 'Mr. Khan', guardianPhone: '01811111111' },
+    { name: 'Nusrat Jahan', email: 'nusrat@eduflow.com', phone: '01912345678', guardianName: 'Mr. Jahan', guardianPhone: '01911111111' },
+    { name: 'Afsana Mimi', email: 'afsana@eduflow.com', phone: '01512345678', guardianName: 'Mr. Mimi', guardianPhone: '01511111111' },
+    { name: 'Sabbir Ahmed', email: 'sabbir@eduflow.com', phone: '01612345678', guardianName: 'Mr. Ahmed', guardianPhone: '01611111111' },
+  ];
+
+  for (const s of sampleStudents) {
+    const studentUser = await prisma.user.upsert({
+      where: { email: s.email },
+      update: {
+        name: s.name,
+        phone: s.phone,
+        password: studentPassword,
+        role: 'STUDENT',
+        branchId: branch.id,
+        guardianName: s.guardianName,
+        guardianPhone: s.guardianPhone,
+      },
+      create: {
+        name: s.name,
+        email: s.email,
+        phone: s.phone,
+        password: studentPassword,
+        role: 'STUDENT',
+        branchId: branch.id,
+        guardianName: s.guardianName,
+        guardianPhone: s.guardianPhone,
+      },
+    });
+    console.log(`Seeded student: ${studentUser.name} (${studentUser.email})`);
+  }
+
   console.log('Seeding complete.');
 }
 

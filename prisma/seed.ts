@@ -44,6 +44,29 @@ async function main() {
   });
 
   console.log(`Seeded admin user: ${adminUser.email} (${adminUser.id})`);
+
+  // Hash teacher password
+  const teacherPassword = await bcrypt.hash('Teacher@123', 10);
+
+  // Create or update teacher user
+  const teacherUser = await prisma.user.upsert({
+    where: { email: 'teacher@eduflow.com' },
+    update: {
+      name: 'Teacher User',
+      password: teacherPassword,
+      role: 'TEACHER',
+      branchId: branch.id,
+    },
+    create: {
+      name: 'Teacher User',
+      email: 'teacher@eduflow.com',
+      password: teacherPassword,
+      role: 'TEACHER',
+      branchId: branch.id,
+    },
+  });
+
+  console.log(`Seeded teacher user: ${teacherUser.email} (${teacherUser.id})`);
   console.log('Seeding complete.');
 }
 

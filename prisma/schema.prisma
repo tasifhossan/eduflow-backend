@@ -88,8 +88,22 @@ model User {
   createdTests      Test[]          @relation(name: "CreatedTests")
   studentAnswers    StudentAnswer[]
   results           Result[]
-  feePayments       FeePayment[]    @relation(name: "FeePayments")
-  recordedPayments  FeePayment[]    @relation(name: "RecordedPayments")
+  feePayments          FeePayment[]            @relation(name: "FeePayments")
+  recordedPayments     FeePayment[]            @relation(name: "RecordedPayments")
+  guardianChangeLogs   GuardianInfoChangeLog[] @relation(name: "GuardianChangeLogs")
+  adminGuardianChanges GuardianInfoChangeLog[] @relation(name: "AdminGuardianChanges")
+}
+
+model GuardianInfoChangeLog {
+  id          String   @id @default(cuid())
+  studentId   String
+  student     User     @relation(name: "GuardianChangeLogs", fields: [studentId], references: [id])
+  field       String
+  oldValue    String?
+  newValue    String?
+  changedById String
+  changedBy   User     @relation(name: "AdminGuardianChanges", fields: [changedById], references: [id])
+  changedAt   DateTime @default(now())
 }
 
 model Subject {

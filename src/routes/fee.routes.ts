@@ -11,11 +11,16 @@ import {
   getPaymentsByBatch,
   getPaymentsByStudent,
   getDueSummary,
+  getMyPayments,
 } from '../controllers/fee.controller';
 
 const router = Router();
 
+// Student self payment history
+router.get('/payments/my-payments', authenticate, authorize(Role.STUDENT), getMyPayments);
+
 // Batch fee configuration
+
 router.patch('/batches/:id/fee', authenticate, authorize(Role.ADMIN), updateBatchFee);
 
 // Enrollment fee & discount configuration

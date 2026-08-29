@@ -697,3 +697,43 @@ export async function getDueSummary(req: Request, res: Response) {
     });
   }
 }
+
+/**
+ * GET /payments/my-payments
+ * Allows logged-in student to view their own payment history across all batches.
+ */
+export async function getMyPayments(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const studentId = req.user.userId;
+
+    const payments = await prisma.feePayment.findMany({
+      where: { studentId },
+      include: {
+        batch: {
+          select: { id: true, name: true, type: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'My payments retrieved successfully',
+      data: payments,
+    });
+  } catch (error) {
+    console.error('Get my payments error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+

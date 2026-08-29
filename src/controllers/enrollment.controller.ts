@@ -221,8 +221,16 @@ export async function getStudentsByBatch(req: Request, res: Response) {
     return res.status(200).json({
       success: true,
       message: 'Students retrieved successfully',
-      data: enrollments.map((e) => e.student),
+      data: enrollments.map((e) => ({
+        ...e.student,
+        enrollmentId: e.id,
+        customFeeAmount: e.customFeeAmount,
+        discountType: e.discountType,
+        discountValue: e.discountValue,
+        discountReason: e.discountReason,
+      })),
     });
+
   } catch (error) {
     console.error('Get students by batch error:', error);
     return res.status(500).json({

@@ -321,3 +321,73 @@ export async function deleteBatch(req: Request, res: Response) {
     });
   }
 }
+
+export async function getBatchForStudent(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const id = req.params.id as string;
+    const studentId = req.user.userId;
+
+    // Verify requesting student has an ACTIVE enrollment in this batch
+    const enrollment = await prisma.enrollment.findUnique({
+      where: {
+        studentId_batchId: {
+          studentId,
+          batchId: id,
+        },
+      },
+    });
+
+    if (!enrollment || enrollment.status !== 'ACTIVE') {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You are not actively enrolled in this batch',
+      });
+    }
+
+    // Retrieve student-safe batch details (no feeAmount, no discount data, no student roster)
+    const batch = await prisma.batch.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        classLevel: true,
+        feeType: true,
+        createdAt: true,
+        subject: {
+          select: { id: true, name: true },
+        },
+        teacher: {
+          select: { id: true, name: true, email: true },
+        },
+      },
+    });
+
+    if (!batch) {
+      return res.status(404).json({
+        success: false,
+        message: 'Batch not found',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Batch details retrieved successfully',
+      data: batch,
+    });
+  } catch (error) {
+    console.error('Get batch for student error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+

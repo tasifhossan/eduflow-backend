@@ -44,6 +44,22 @@ enum AttendanceStatus {
   LATE
 }
 
+enum FeeType {
+  MONTHLY
+  ONE_TIME
+}
+
+enum DiscountType {
+  FIXED
+  PERCENTAGE
+}
+
+enum PaymentStatus {
+  DUE
+  PARTIAL
+  PAID
+}
+
 model Branch {
   id        String   @id @default(cuid())
   name      String
@@ -72,6 +88,8 @@ model User {
   createdTests      Test[]          @relation(name: "CreatedTests")
   studentAnswers    StudentAnswer[]
   results           Result[]
+  feePayments       FeePayment[]    @relation(name: "FeePayments")
+  recordedPayments  FeePayment[]    @relation(name: "RecordedPayments")
 }
 
 model Subject {
@@ -94,6 +112,8 @@ model Batch {
   name         String
   type         BatchType
   classLevel   String?
+  feeType      FeeType       @default(MONTHLY)
+  feeAmount    Float         @default(0)
   subjectId    String
   subject      Subject       @relation(fields: [subjectId], references: [id])
   branchId     String
@@ -105,16 +125,21 @@ model Batch {
   routineSlots RoutineSlot[]
   attendances  Attendance[]
   tests        Test[]
+  feePayments  FeePayment[]
 }
 
 model Enrollment {
-  id         String           @id @default(cuid())
-  studentId  String
-  student    User             @relation(fields: [studentId], references: [id])
-  batchId    String
-  batch      Batch            @relation(fields: [batchId], references: [id])
-  enrolledAt DateTime         @default(now())
-  status     EnrollmentStatus @default(ACTIVE)
+  id              String           @id @default(cuid())
+  studentId       String
+  student         User             @relation(fields: [studentId], references: [id])
+  batchId         String
+  batch           Batch            @relation(fields: [batchId], references: [id])
+  enrolledAt      DateTime         @default(now())
+  status          EnrollmentStatus @default(ACTIVE)
+  customFeeAmount Float?
+  discountType    DiscountType?
+  discountValue   Float?
+  discountReason  String?
 
   @@unique([studentId, batchId])
 }
@@ -220,3 +245,24 @@ model Result {
 
   @@unique([studentId, testId])
 }
+
+model FeePayment {
+  id           String        @id @default(cuid())
+  studentId    String
+  student      User          @relation(name: "FeePayments", fields: [studentId], references: [id])
+  batchId      String
+  batch        Batch         @relation(fields: [batchId], references: [id])
+  period       String
+  amountDue    Float
+  amountPaid   Float         @default(0)
+  status       PaymentStatus @default(DUE)
+  dueDate      DateTime?
+  paidAt       DateTime?
+  recordedById String
+  recordedBy   User          @relation(name: "RecordedPayments", fields: [recordedById], references: [id])
+  notes        String?
+  createdAt    DateTime      @default(now())
+
+  @@unique([studentId, batchId, period])
+}
+

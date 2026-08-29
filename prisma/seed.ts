@@ -67,6 +67,23 @@ async function main() {
   });
 
   console.log(`Seeded teacher user: ${teacherUser.email} (${teacherUser.id})`);
+
+  // Seed default subjects
+  const defaultSubjects = ['Physics', 'Chemistry', 'Higher Mathematics', 'Biology', 'English', 'ICT'];
+  for (const subjectName of defaultSubjects) {
+    const existing = await prisma.subject.findFirst({
+      where: { name: { equals: subjectName, mode: 'insensitive' } },
+    });
+    if (!existing) {
+      const created = await prisma.subject.create({
+        data: { name: subjectName },
+      });
+      console.log(`Seeded subject: ${created.name} (${created.id})`);
+    } else {
+      console.log(`Using existing subject: ${existing.name} (${existing.id})`);
+    }
+  }
+
   console.log('Seeding complete.');
 }
 

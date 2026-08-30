@@ -118,6 +118,11 @@ export async function updateStudent(req: Request, res: Response) {
 
     const existingStudent = await prisma.user.findUnique({
       where: { id },
+      include: {
+        studentGuardians: {
+          select: { id: true },
+        },
+      },
     });
 
     if (!existingStudent || existingStudent.branchId !== branchId) {
@@ -128,6 +133,20 @@ export async function updateStudent(req: Request, res: Response) {
     }
 
     const { name, phone, guardianName, guardianPhone } = parseResult.data;
+
+    // Block manual edits to guardian contact info if student is linked to a guardian account
+    if (existingStudent.studentGuardians.length > 0) {
+      const isEditingName = guardianName !== undefined && guardianName !== existingStudent.guardianName;
+      const isEditingPhone = guardianPhone !== undefined && guardianPhone !== existingStudent.guardianPhone;
+
+      if (isEditingName || isEditingPhone) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Guardian contact info is managed by the linked guardian account and cannot be edited directly. Update the guardian's own account instead, or unlink first.",
+        });
+      }
+    }
 
     // Detect guardian field changes for audit logging
     const logsToCreate: Array<{

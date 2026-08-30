@@ -4,6 +4,7 @@ import { authenticate, authorize } from '../middleware/auth.middleware';
 import {
   createGuardianAccount,
   linkGuardianToStudent,
+  unlinkGuardianFromStudent,
   getMyLinkedStudents,
   getLinkedStudentAttendance,
   getLinkedStudentResults,
@@ -24,6 +25,13 @@ router.post(
   authenticate,
   authorize(Role.ADMIN),
   linkGuardianToStudent
+);
+
+router.delete(
+  '/guardians/link/:id',
+  authenticate,
+  authorize(Role.ADMIN),
+  unlinkGuardianFromStudent
 );
 
 router.get(

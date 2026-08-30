@@ -126,36 +126,125 @@ export async function linkGuardianToStudent(req: Request, res: Response) {
       });
     }
 
-    const link = await prisma.guardianLink.create({
-      data: {
-        guardianId,
-        studentId,
-      },
+    // KNOWN LIMITATION: This sync occurs at link time only. If the guardian's own account info (name/phone)
+    // is updated later on, automatic re-sync to linked student records is out of scope for now.
+    const link = await prisma.$transaction(async (tx) => {
+      // 1. Create GuardianLink record
+      const createdLink = await tx.guardianLink.create({
+        data: {
+          guardianId,
+          studentId,
+        },
+        include: {
+          guardian: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+            },
+          },
+          student: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+      });
+
+      // 2. Audit log changes to guardianName and guardianPhone
+      if (guardian.name && guardian.name !== student.guardianName) {
+        await tx.guardianInfoChangeLog.create({
+          data: {
+            studentId,
+            field: 'guardianName',
+            oldValue: student.guardianName,
+            newValue: guardian.name,
+            changedById: req.user!.userId,
+          },
+        });
+      }
+
+      if (guardian.phone && guardian.phone !== student.guardianPhone) {
+        await tx.guardianInfoChangeLog.create({
+          data: {
+            studentId,
+            field: 'guardianPhone',
+            oldValue: student.guardianPhone,
+            newValue: guardian.phone,
+            changedById: req.user!.userId,
+          },
+        });
+      }
+
+      // 3. Sync guardianName and guardianPhone onto Student User record
+      await tx.user.update({
+        where: { id: studentId },
+        data: {
+          guardianName: guardian.name,
+          ...(guardian.phone && { guardianPhone: guardian.phone }),
+        },
+      });
+
+      return createdLink;
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Guardian linked to student successfully and contact info synced',
+      data: link,
+    });
+  } catch (error) {
+    console.error('Link guardian to student error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
+export async function unlinkGuardianFromStudent(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const id = req.params.id as string;
+    const branchId = req.user.branchId;
+
+    const link = await prisma.guardianLink.findUnique({
+      where: { id },
       include: {
         guardian: {
           select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        student: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
+            branchId: true,
           },
         },
       },
     });
 
-    return res.status(201).json({
+    if (!link || link.guardian.branchId !== branchId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Guardian link not found or access denied',
+      });
+    }
+
+    await prisma.guardianLink.delete({
+      where: { id },
+    });
+
+    return res.status(200).json({
       success: true,
-      message: 'Guardian linked to student successfully',
-      data: link,
+      message: 'Guardian unlinked from student successfully',
     });
   } catch (error) {
-    console.error('Link guardian to student error:', error);
+    console.error('Unlink guardian error:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error',

@@ -30,6 +30,7 @@ export async function getStudentsWithSummary(req: Request, res: Response) {
         createdAt: true,
         studentGuardians: {
           select: {
+            id: true,
             guardian: {
               select: {
                 id: true,
@@ -70,7 +71,10 @@ export async function getStudentsWithSummary(req: Request, res: Response) {
       const { _count, attendances, studentGuardians, ...rest } = student;
       return {
         ...rest,
-        linkedGuardians: studentGuardians.map((g) => g.guardian),
+        linkedGuardians: studentGuardians.map((g) => ({
+          linkId: g.id,
+          ...g.guardian,
+        })),
         enrolledBatchesCount: _count.enrollments,
         recentAttendance: attendances.length > 0 ? {
           status: attendances[0].status,

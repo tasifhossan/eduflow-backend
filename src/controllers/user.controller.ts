@@ -39,6 +39,17 @@ export async function getUsers(req: Request, res: Response) {
         email: true,
         phone: true,
         role: true,
+        guardianLinks: {
+          select: {
+            student: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+        },
       },
       orderBy: {
         name: 'asc',

@@ -17,6 +17,7 @@ import submissionRouter from './routes/submission.routes';
 import chapterRouter from './routes/chapter.routes';
 import dashboardRouter from './routes/dashboard.routes';
 import feeRouter from './routes/fee.routes';
+import uploadRouter from './routes/upload.routes';
 
 // Load environment variables
 dotenv.config();
@@ -75,6 +76,7 @@ app.use('/api', submissionRouter);
 app.use('/api/chapters', chapterRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api', feeRouter);
+app.use('/api', uploadRouter);
 
 
 // Global Error Handler

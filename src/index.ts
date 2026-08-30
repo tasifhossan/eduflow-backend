@@ -19,6 +19,7 @@ import dashboardRouter from './routes/dashboard.routes';
 import feeRouter from './routes/fee.routes';
 import uploadRouter from './routes/upload.routes';
 import resourceRouter from './routes/resource.routes';
+import noticeRouter from './routes/notice.routes';
 
 // Load environment variables
 dotenv.config();
@@ -79,6 +80,7 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api', feeRouter);
 app.use('/api', uploadRouter);
 app.use('/api', resourceRouter);
+app.use('/api', noticeRouter);
 
 
 // Global Error Handler

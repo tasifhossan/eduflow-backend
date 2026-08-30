@@ -28,6 +28,18 @@ export async function getStudentsWithSummary(req: Request, res: Response) {
         guardianName: true,
         guardianPhone: true,
         createdAt: true,
+        studentGuardians: {
+          select: {
+            guardian: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+              },
+            },
+          },
+        },
         _count: {
           select: {
             enrollments: true,
@@ -55,9 +67,10 @@ export async function getStudentsWithSummary(req: Request, res: Response) {
     });
 
     const formattedStudents = students.map((student) => {
-      const { _count, attendances, ...rest } = student;
+      const { _count, attendances, studentGuardians, ...rest } = student;
       return {
         ...rest,
+        linkedGuardians: studentGuardians.map((g) => g.guardian),
         enrolledBatchesCount: _count.enrollments,
         recentAttendance: attendances.length > 0 ? {
           status: attendances[0].status,

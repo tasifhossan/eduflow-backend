@@ -22,6 +22,49 @@ export async function getDashboardSummary(req: Request, res: Response) {
     const sevenDaysFromNow = new Date(todayNormalized.getTime() + 7 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(todayNormalized.getTime() - 7 * 24 * 60 * 60 * 1000);
 
+    // ─── GUARDIAN path ────────────────────────────────────────────────────────
+    if (role === Role.GUARDIAN) {
+      const guardianLinks = await prisma.guardianLink.findMany({
+        where: { guardianId: userId },
+        select: {
+          student: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+              enrollments: {
+                where: { status: 'ACTIVE' },
+                select: {
+                  batch: {
+                    select: { id: true, name: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const children = guardianLinks.map((link) => ({
+        id: link.student.id,
+        name: link.student.name,
+        email: link.student.email,
+        phone: link.student.phone,
+        enrolledBatches: link.student.enrollments.map((e) => e.batch),
+      }));
+
+      return res.status(200).json({
+        success: true,
+        message: 'Guardian dashboard summary retrieved successfully',
+        data: {
+          role: 'GUARDIAN',
+          childrenCount: children.length,
+          children,
+        },
+      });
+    }
+
     // ─── STUDENT path ─────────────────────────────────────────────────────────
     if (role === Role.STUDENT) {
       const [enrollments, upcomingTests, recentAttendance] = await Promise.all([

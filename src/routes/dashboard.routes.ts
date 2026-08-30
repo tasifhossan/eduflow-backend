@@ -8,7 +8,7 @@ const router = Router();
 router.get(
   '/summary',
   authenticate,
-  authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT),
+  authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN),
   getDashboardSummary,
 );
 

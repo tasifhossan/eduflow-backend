@@ -67,6 +67,7 @@ model Branch {
   createdAt DateTime @default(now())
   users     User[]
   batches   Batch[]
+  notices   Notice[]
 }
 
 model User {
@@ -92,6 +93,10 @@ model User {
   recordedPayments     FeePayment[]            @relation(name: "RecordedPayments")
   guardianChangeLogs   GuardianInfoChangeLog[] @relation(name: "GuardianChangeLogs")
   adminGuardianChanges GuardianInfoChangeLog[] @relation(name: "AdminGuardianChanges")
+  guardianLinks        GuardianLink[]          @relation(name: "GuardianStudents")
+  studentGuardians     GuardianLink[]          @relation(name: "StudentGuardians")
+  createdNotices       Notice[]                @relation(name: "CreatedNotices")
+  uploadedResources    Resource[]              @relation(name: "UploadedResources")
 }
 
 model GuardianInfoChangeLog {
@@ -114,11 +119,12 @@ model Subject {
 }
 
 model Chapter {
-  id        String  @id @default(cuid())
+  id        String     @id @default(cuid())
   name      String
   subjectId String
-  subject   Subject @relation(fields: [subjectId], references: [id])
+  subject   Subject    @relation(fields: [subjectId], references: [id])
   tests     Test[]
+  resources Resource[]
 }
 
 model Batch {
@@ -140,6 +146,8 @@ model Batch {
   attendances  Attendance[]
   tests        Test[]
   feePayments  FeePayment[]
+  notices      Notice[]
+  resources    Resource[]
 }
 
 model Enrollment {
@@ -279,4 +287,43 @@ model FeePayment {
 
   @@unique([studentId, batchId, period])
 }
+
+model GuardianLink {
+  id         String   @id @default(cuid())
+  guardianId String
+  guardian   User     @relation(name: "GuardianStudents", fields: [guardianId], references: [id])
+  studentId  String
+  student    User     @relation(name: "StudentGuardians", fields: [studentId], references: [id])
+  createdAt  DateTime @default(now())
+
+  @@unique([guardianId, studentId])
+}
+
+model Notice {
+  id          String   @id @default(cuid())
+  title       String
+  content     String
+  branchId    String
+  branch      Branch   @relation(fields: [branchId], references: [id])
+  batchId     String?
+  batch       Batch?   @relation(fields: [batchId], references: [id])
+  createdById String
+  createdBy   User     @relation(name: "CreatedNotices", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+}
+
+model Resource {
+  id           String   @id @default(cuid())
+  title        String
+  fileUrl      String
+  fileType     String
+  batchId      String
+  batch        Batch    @relation(fields: [batchId], references: [id])
+  chapterId    String?
+  chapter      Chapter? @relation(fields: [chapterId], references: [id])
+  uploadedById String
+  uploadedBy   User     @relation(name: "UploadedResources", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+}
+
 

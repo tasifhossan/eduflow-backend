@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { calculateNetFee } from '../utils/fee-calculator';
 import { sendEmail } from '../utils/mailer';
-import { getRecipientEmails } from '../utils/notification-recipients';
+import { getNotificationRecipients } from '../utils/notification-recipients';
 import {
   updateBatchFeeSchema,
   setStudentFeeSchema,
@@ -309,30 +309,59 @@ export async function createPaymentRecord(req: Request, res: Response) {
         : 'N/A';
       const statusColor = status === 'DUE' ? '#ef4444' : '#f59e0b';
 
-      getRecipientEmails(studentId)
-        .then((to) =>
-          sendEmail(
-            to,
-            `Fee Due Reminder – ${batch.name}`,
-            `
-            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-              <h2 style="color:${statusColor}">Fee Due Reminder</h2>
-              <p>Dear Parent/Guardian,</p>
-              <p>This is an automated notification from <strong>EduFlow</strong>.</p>
-              <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${student.name}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${period}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${finalAmountDue.toFixed(2)}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${paid.toFixed(2)}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dueDateStr}</td></tr>
-              </table>
-              <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
-            </div>
-            `
-          )
-        )
+      getNotificationRecipients(studentId)
+        .then((recipients) => {
+          // 1. Send to Student if available
+          if (recipients.student?.email) {
+            sendEmail(
+              [recipients.student.email],
+              `Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Due'} Reminder – ${batch.name}`,
+              `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
+                <p>Dear ${recipients.student.name},</p>
+                <p>Your fee record for <strong>${batch.name}</strong> (${period}) has been updated:</p>
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${recipients.student.name}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${period}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${finalAmountDue.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${paid.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dueDateStr}</td></tr>
+                </table>
+                <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+              </div>
+              `
+            );
+          }
+
+          // 2. Send to Guardian(s) if available
+          for (const guardian of recipients.guardians) {
+            if (!guardian.email) continue;
+            sendEmail(
+              [guardian.email],
+              `Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Due'} Reminder – ${recipients.student?.name || 'Student'} (${batch.name})`,
+              `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
+                <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
+                <p>Fee update for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${batch.name}</strong> (${period}):</p>
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${recipients.student?.name || 'N/A'}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${period}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${finalAmountDue.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${paid.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dueDateStr}</td></tr>
+                </table>
+                <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+              </div>
+              `
+            );
+          }
+        })
         .catch((err) => console.error('[fee] Notification error:', err));
     }
 
@@ -532,28 +561,55 @@ export async function updatePaymentRecord(req: Request, res: Response) {
     if (status === 'DUE' || status === 'PARTIAL') {
       const statusColor = status === 'DUE' ? '#ef4444' : '#f59e0b';
 
-      getRecipientEmails(existingPayment.studentId)
-        .then((to) =>
-          sendEmail(
-            to,
-            `Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Due'} – ${existingPayment.batch.name}`,
-            `
-            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-              <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
-              <p>Dear Parent/Guardian,</p>
-              <p>This is an automated notification from <strong>EduFlow</strong>.</p>
-              <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.batch.name}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.period}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${existingPayment.amountDue.toFixed(2)}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${newAmountPaid.toFixed(2)}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
-              </table>
-              <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
-            </div>
-            `
-          )
-        )
+      getNotificationRecipients(existingPayment.studentId)
+        .then((recipients) => {
+          // 1. Send to Student if available
+          if (recipients.student?.email) {
+            sendEmail(
+              [recipients.student.email],
+              `Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Due'} – ${existingPayment.batch.name}`,
+              `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
+                <p>Dear ${recipients.student.name},</p>
+                <p>Your fee record for <strong>${existingPayment.batch.name}</strong> (${existingPayment.period}) has been updated:</p>
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.batch.name}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.period}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${existingPayment.amountDue.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${newAmountPaid.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                </table>
+                <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+              </div>
+              `
+            );
+          }
+
+          // 2. Send to Guardian(s) if available
+          for (const guardian of recipients.guardians) {
+            if (!guardian.email) continue;
+            sendEmail(
+              [guardian.email],
+              `Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Due'} – ${recipients.student?.name || 'Student'} (${existingPayment.batch.name})`,
+              `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
+                <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
+                <p>Fee update for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${existingPayment.batch.name}</strong> (${existingPayment.period}):</p>
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.batch.name}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.period}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${existingPayment.amountDue.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${newAmountPaid.toFixed(2)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                </table>
+                <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+              </div>
+              `
+            );
+          }
+        })
         .catch((err) => console.error('[fee] Notification error:', err));
     }
 

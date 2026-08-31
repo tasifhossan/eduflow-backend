@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { PrismaClient, Role, QuestionType } from '@prisma/client';
 import { submitAnswersSchema, gradeWrittenAnswerSchema } from '../validators/submission.validator';
 import { sendEmail } from '../utils/mailer';
-import { getRecipientEmails } from '../utils/notification-recipients';
+import { getNotificationRecipients } from '../utils/notification-recipients';
 
 const prisma = new PrismaClient();
 
@@ -273,27 +273,53 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
         },
       });
 
-      getRecipientEmails(studentId)
-        .then((to) =>
-          sendEmail(
-            to,
-            `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
-            `
-            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-              <h2 style="color:#6366f1">Test Result Available</h2>
-              <p>Dear Student/Parent,</p>
-              <p>Your test result for <strong>${testWithBatch?.title ?? 'Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
-              <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${updatedResult.totalMarksObtained}</td></tr>
-                ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
-              </table>
-              <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see the full breakdown. This is an automated message.</p>
-            </div>
-            `
-          )
-        )
+      getNotificationRecipients(studentId)
+        .then((recipients) => {
+          // 1. Send to Student if available
+          if (recipients.student?.email) {
+            sendEmail(
+              [recipients.student.email],
+              `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
+              `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                <h2 style="color:#6366f1">Test Result Available</h2>
+                <p>Dear ${recipients.student.name},</p>
+                <p>Your test result for <strong>${testWithBatch?.title ?? 'Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${updatedResult.totalMarksObtained}</td></tr>
+                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                </table>
+                <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
+              </div>
+              `
+            );
+          }
+
+          // 2. Send to Guardian(s) if available
+          for (const guardian of recipients.guardians) {
+            if (!guardian.email) continue;
+            sendEmail(
+              [guardian.email],
+              `Test Result Available – ${recipients.student?.name || 'Student'} (${testWithBatch?.batch.name ?? ''})`,
+              `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                <h2 style="color:#6366f1">Test Result Available</h2>
+                <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
+                <p>Test result for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${testWithBatch?.title ?? 'Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${updatedResult.totalMarksObtained}</td></tr>
+                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                </table>
+                <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
+              </div>
+              `
+            );
+          }
+        })
         .catch((err) => console.error('[submission] Notification error:', err));
     }
 
@@ -504,27 +530,53 @@ export async function saveBatchManualResults(req: Request, res: Response) {
       if (typeof item.studentId === 'string' && typeof item.marksObtained === 'number') {
         const studentId = item.studentId;
         const marksObtained = item.marksObtained;
-        getRecipientEmails(studentId)
-          .then((to) =>
-            sendEmail(
-              to,
-              `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
-              `
-              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-                <h2 style="color:#6366f1">Test Result Available</h2>
-                <p>Dear Student/Parent,</p>
-                <p>Your test result for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
-                <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${marksObtained}</td></tr>
-                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
-                </table>
-                <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
-              </div>
-              `
-            )
-          )
+        getNotificationRecipients(studentId)
+          .then((recipients) => {
+            // 1. Send to Student if available
+            if (recipients.student?.email) {
+              sendEmail(
+                [recipients.student.email],
+                `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
+                `
+                <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                  <h2 style="color:#6366f1">Test Result Available</h2>
+                  <p>Dear ${recipients.student.name},</p>
+                  <p>Your test result for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                  <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${marksObtained}</td></tr>
+                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                  </table>
+                  <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
+                </div>
+                `
+              );
+            }
+
+            // 2. Send to Guardian(s) if available
+            for (const guardian of recipients.guardians) {
+              if (!guardian.email) continue;
+              sendEmail(
+                [guardian.email],
+                `Test Result Available – ${recipients.student?.name || 'Student'} (${testWithBatch?.batch.name ?? ''})`,
+                `
+                <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+                  <h2 style="color:#6366f1">Test Result Available</h2>
+                  <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
+                  <p>Test result for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                  <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${marksObtained}</td></tr>
+                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                  </table>
+                  <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
+                </div>
+                `
+              );
+            }
+          })
           .catch((err) => console.error('[submission] Manual result notification error:', err));
       }
     }

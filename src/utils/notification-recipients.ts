@@ -2,40 +2,64 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+export interface RecipientUser {
+  id: string;
+  name: string;
+  email: string | null;
+}
+
+export interface NotificationRecipients {
+  student: RecipientUser | null;
+  guardians: RecipientUser[];
+}
+
 /**
- * Returns the email addresses to notify for a given student:
- * - The student's own email
- * - Any guardian(s) linked via GuardianLink (with an active portal account)
- * The list is deduped before returning.
+ * Returns structured recipient data for a given student:
+ * - student: student info (id, name, email) if email exists
+ * - guardians: list of linked guardian info (id, name, email) with active emails
  */
-export async function getRecipientEmails(studentId: string): Promise<string[]> {
+export async function getNotificationRecipients(studentId: string): Promise<NotificationRecipients> {
   const [student, guardianLinks] = await Promise.all([
     prisma.user.findUnique({
       where: { id: studentId },
-      select: { email: true },
+      select: { id: true, name: true, email: true },
     }),
     prisma.guardianLink.findMany({
       where: { studentId },
       select: {
         guardian: {
-          select: { email: true },
+          select: { id: true, name: true, email: true },
         },
       },
     }),
   ]);
 
+  const guardians = guardianLinks
+    .map((link) => link.guardian)
+    .filter((g) => g.email !== null);
+
+  return {
+    student: student?.email ? student : null,
+    guardians,
+  };
+}
+
+/**
+ * Legacy helper for getting deduplicated list of email addresses.
+ */
+export async function getRecipientEmails(studentId: string): Promise<string[]> {
+  const recipients = await getNotificationRecipients(studentId);
   const emails: string[] = [];
 
-  if (student?.email) {
-    emails.push(student.email);
+  if (recipients.student?.email) {
+    emails.push(recipients.student.email);
   }
 
-  for (const link of guardianLinks) {
-    if (link.guardian.email) {
-      emails.push(link.guardian.email);
+  for (const g of recipients.guardians) {
+    if (g.email) {
+      emails.push(g.email);
     }
   }
 
-  // Dedupe
   return [...new Set(emails)];
 }

@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { PrismaClient, Role } from '@prisma/client';
 import { markAttendanceSchema } from '../validators/attendance.validator';
+import { sendEmail } from '../utils/mailer';
+import { getRecipientEmails } from '../utils/notification-recipients';
 
 const prisma = new PrismaClient();
 
@@ -92,6 +94,42 @@ export async function markAttendance(req: Request, res: Response) {
     });
 
     await prisma.$transaction(upserts);
+
+    // Fire-and-forget attendance alerts for ABSENT or LATE students
+    const alertRecords = records.filter((r) => r.status === 'ABSENT' || r.status === 'LATE');
+    const studentMap = new Map(students.map((s) => [s.id, s]));
+
+    for (const record of alertRecords) {
+      const student = studentMap.get(record.studentId);
+      if (!student) continue;
+
+      const dateStr = normalizedDate.toLocaleDateString('en-GB', {
+        year: 'numeric', month: 'long', day: 'numeric',
+      });
+
+      getRecipientEmails(record.studentId)
+        .then((to) =>
+          sendEmail(
+            to,
+            `Attendance Alert – ${batch.name}`,
+            `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+              <h2 style="color:#ef4444">Attendance Alert</h2>
+              <p>Dear Parent/Guardian,</p>
+              <p>This is an automated notification from <strong>EduFlow</strong>.</p>
+              <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${(student as any).name}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dateStr}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${record.status === 'ABSENT' ? '#ef4444' : '#f59e0b'};font-weight:700">${record.status}</td></tr>
+              </table>
+              <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+            </div>
+            `
+          )
+        )
+        .catch((err) => console.error('[attendance] Notification error:', err));
+    }
 
     return res.status(200).json({
       success: true,

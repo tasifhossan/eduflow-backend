@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { calculateNetFee } from '../utils/fee-calculator';
+import { sendEmail } from '../utils/mailer';
+import { getRecipientEmails } from '../utils/notification-recipients';
 import {
   updateBatchFeeSchema,
   setStudentFeeSchema,
@@ -300,6 +302,40 @@ export async function createPaymentRecord(req: Request, res: Response) {
       },
     });
 
+    // Fire-and-forget fee due/partial notification
+    if (status === 'DUE' || status === 'PARTIAL') {
+      const dueDateStr = dueDate
+        ? new Date(dueDate).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })
+        : 'N/A';
+      const statusColor = status === 'DUE' ? '#ef4444' : '#f59e0b';
+
+      getRecipientEmails(studentId)
+        .then((to) =>
+          sendEmail(
+            to,
+            `Fee Due Reminder – ${batch.name}`,
+            `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+              <h2 style="color:${statusColor}">Fee Due Reminder</h2>
+              <p>Dear Parent/Guardian,</p>
+              <p>This is an automated notification from <strong>EduFlow</strong>.</p>
+              <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${student.name}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${period}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${finalAmountDue.toFixed(2)}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${paid.toFixed(2)}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dueDateStr}</td></tr>
+              </table>
+              <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+            </div>
+            `
+          )
+        )
+        .catch((err) => console.error('[fee] Notification error:', err));
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Payment record created successfully',
@@ -491,6 +527,35 @@ export async function updatePaymentRecord(req: Request, res: Response) {
         ...(notes !== undefined && { notes }),
       },
     });
+
+    // Fire-and-forget fee notification when status is DUE or PARTIAL after update
+    if (status === 'DUE' || status === 'PARTIAL') {
+      const statusColor = status === 'DUE' ? '#ef4444' : '#f59e0b';
+
+      getRecipientEmails(existingPayment.studentId)
+        .then((to) =>
+          sendEmail(
+            to,
+            `Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Due'} – ${existingPayment.batch.name}`,
+            `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+              <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
+              <p>Dear Parent/Guardian,</p>
+              <p>This is an automated notification from <strong>EduFlow</strong>.</p>
+              <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.batch.name}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.period}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${existingPayment.amountDue.toFixed(2)}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${newAmountPaid.toFixed(2)}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+              </table>
+              <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
+            </div>
+            `
+          )
+        )
+        .catch((err) => console.error('[fee] Notification error:', err));
+    }
 
     return res.status(200).json({
       success: true,

@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { PrismaClient, Role, QuestionType } from '@prisma/client';
 import { submitAnswersSchema, gradeWrittenAnswerSchema } from '../validators/submission.validator';
+import { sendEmail } from '../utils/mailer';
+import { getRecipientEmails } from '../utils/notification-recipients';
 
 const prisma = new PrismaClient();
 
@@ -250,6 +252,50 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
         },
       });
     });
+
+    // Fire-and-forget: notify student (and linked guardians) when the test is fully graded
+    // A test is "fully graded" when every written answer now has marksAwarded set.
+    const pendingWritten = await prisma.studentAnswer.count({
+      where: {
+        studentId,
+        question: { testId, type: QuestionType.WRITTEN },
+        marksAwarded: null,
+      },
+    });
+
+    if (pendingWritten === 0) {
+      const testWithBatch = await prisma.test.findUnique({
+        where: { id: testId },
+        select: {
+          title: true,
+          totalMarks: true,
+          batch: { select: { name: true } },
+        },
+      });
+
+      getRecipientEmails(studentId)
+        .then((to) =>
+          sendEmail(
+            to,
+            `Test Result Available – ${testWithBatch?.title ?? 'Test'}`,
+            `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+              <h2 style="color:#6366f1">Test Result Available</h2>
+              <p>Dear Student/Parent,</p>
+              <p>Your test has been fully graded. Here are the results:</p>
+              <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
+                <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${updatedResult.totalMarksObtained}</td></tr>
+                ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+              </table>
+              <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see the full breakdown. This is an automated message.</p>
+            </div>
+            `
+          )
+        )
+        .catch((err) => console.error('[submission] Notification error:', err));
+    }
 
     return res.status(200).json({
       success: true,

@@ -277,12 +277,12 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
         .then((to) =>
           sendEmail(
             to,
-            `Test Result Available – ${testWithBatch?.title ?? 'Test'}`,
+            `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
             `
             <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
               <h2 style="color:#6366f1">Test Result Available</h2>
               <p>Dear Student/Parent,</p>
-              <p>Your test has been fully graded. Here are the results:</p>
+              <p>Your test result for <strong>${testWithBatch?.title ?? 'Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
               <table style="width:100%;border-collapse:collapse;margin-top:16px">
                 <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
                 <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
@@ -508,12 +508,12 @@ export async function saveBatchManualResults(req: Request, res: Response) {
           .then((to) =>
             sendEmail(
               to,
-              `Test Result Available – ${testWithBatch?.title ?? 'Test'}`,
+              `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:#6366f1">Test Result Available</h2>
                 <p>Dear Student/Parent,</p>
-                <p>Your test result for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> has been published:</p>
+                <p>Your test result for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
                   <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
                   <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>

@@ -63,9 +63,9 @@ export async function register(req: Request, res: Response) {
       branchId: user.branchId,
     });
 
-    // Set JWT in cookie (not httpOnly so client scripts can parse role/claims)
+    // Set JWT in cookie (httpOnly for XSS security)
     res.cookie('token', token, {
-      httpOnly: false,
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
@@ -131,9 +131,9 @@ export async function login(req: Request, res: Response) {
       branchId: user.branchId,
     });
 
-    // Set JWT in cookie (not httpOnly so client scripts can parse role/claims)
+    // Set JWT in cookie (httpOnly for XSS security)
     res.cookie('token', token, {
-      httpOnly: false,
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
@@ -204,7 +204,7 @@ export async function me(req: Request, res: Response) {
 export async function logout(req: Request, res: Response) {
   try {
     res.clearCookie('token', {
-      httpOnly: false,
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     });

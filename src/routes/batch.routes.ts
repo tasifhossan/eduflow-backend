@@ -9,6 +9,7 @@ import {
   deleteBatch,
   getBatchForStudent,
 } from '../controllers/batch.controller';
+import { getBatchAnalytics, getStudentTrend } from '../controllers/analytics.controller';
 
 const router = Router();
 
@@ -19,5 +20,9 @@ router.get('/', authenticate, authorize(Role.ADMIN, Role.TEACHER), getBatches);
 router.get('/:id', authenticate, authorize(Role.ADMIN, Role.TEACHER), getBatchById);
 router.patch('/:id', authenticate, authorize(Role.ADMIN), updateBatch);
 router.delete('/:id', authenticate, authorize(Role.ADMIN), deleteBatch);
+
+// Analytics endpoints
+router.get('/:batchId/analytics', authenticate, authorize(Role.ADMIN, Role.TEACHER), getBatchAnalytics);
+router.get('/:batchId/students/:studentId/trend', authenticate, authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT), getStudentTrend);
 
 export default router;

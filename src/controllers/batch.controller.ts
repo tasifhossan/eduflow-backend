@@ -90,8 +90,10 @@ export async function getBatches(req: Request, res: Response) {
       });
     }
 
+    const whereClause = req.effectiveBranchId ? { branchId: req.effectiveBranchId } : {};
+
     const batches = await prisma.batch.findMany({
-      where: { branchId: req.user.branchId },
+      where: whereClause,
       include: {
         subject: {
           select: { name: true },
@@ -127,12 +129,13 @@ export async function getBatchById(req: Request, res: Response) {
     }
 
     const id = req.params.id as string;
+    const whereClause: any = { id };
+    if (req.effectiveBranchId) {
+      whereClause.branchId = req.effectiveBranchId;
+    }
 
     const batch = await prisma.batch.findFirst({
-      where: {
-        id,
-        branchId: req.user.branchId,
-      },
+      where: whereClause,
       include: {
         subject: {
           select: { id: true, name: true },
@@ -183,7 +186,7 @@ export async function updateBatch(req: Request, res: Response) {
     }
 
     const id = req.params.id as string;
-    const branchId = req.user.branchId;
+    const branchId = req.effectiveBranchId || req.user.branchId;
 
     // Check if batch exists and belongs to user's branch
     const existingBatch = await prisma.batch.findUnique({
@@ -197,7 +200,7 @@ export async function updateBatch(req: Request, res: Response) {
       });
     }
 
-    if (existingBatch.branchId !== branchId) {
+    if (req.effectiveBranchId && existingBatch.branchId !== req.effectiveBranchId) {
       return res.status(403).json({
         success: false,
         message: 'Forbidden: Access denied to this batch',
@@ -283,7 +286,6 @@ export async function deleteBatch(req: Request, res: Response) {
     }
 
     const id = req.params.id as string;
-    const branchId = req.user.branchId;
 
     // Check if batch exists and belongs to user's branch
     const existingBatch = await prisma.batch.findUnique({
@@ -297,7 +299,7 @@ export async function deleteBatch(req: Request, res: Response) {
       });
     }
 
-    if (existingBatch.branchId !== branchId) {
+    if (req.effectiveBranchId && existingBatch.branchId !== req.effectiveBranchId) {
       return res.status(403).json({
         success: false,
         message: 'Forbidden: Access denied to this batch',

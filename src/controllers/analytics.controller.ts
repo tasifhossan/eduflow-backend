@@ -13,9 +13,13 @@ export async function getBatchAnalytics(req: Request, res: Response) {
 
     const batchId = req.params.batchId as string;
 
-    // Scope: batch must belong to caller's branch
+    const batchWhere: any = { id: batchId };
+    if (req.effectiveBranchId) {
+      batchWhere.branchId = req.effectiveBranchId;
+    }
+
     const batch = await prisma.batch.findFirst({
-      where: { id: batchId, branchId: req.user.branchId },
+      where: batchWhere,
       select: { id: true, name: true },
     });
 
@@ -159,9 +163,13 @@ export async function getStudentTrend(req: Request, res: Response) {
       return res.status(403).json({ success: false, message: 'Forbidden: You can only view your own trend' });
     }
 
-    // Scope: batch must belong to caller's branch
+    const batchWhere: any = { id: batchId };
+    if (req.effectiveBranchId) {
+      batchWhere.branchId = req.effectiveBranchId;
+    }
+
     const batch = await prisma.batch.findFirst({
-      where: { id: batchId, branchId },
+      where: batchWhere,
       select: { id: true, name: true },
     });
 

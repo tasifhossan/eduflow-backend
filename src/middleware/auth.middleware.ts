@@ -45,7 +45,7 @@ export function authorize(...roles: Role[]) {
       });
     }
 
-    if (!roles.includes(req.user.role)) {
+    if (!roles.includes(req.user.role) && req.user.role !== Role.SUPER_ADMIN) {
       return res.status(403).json({
         success: false,
         message: 'Forbidden: Access denied',

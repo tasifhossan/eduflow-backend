@@ -144,7 +144,9 @@ export async function getDashboardSummary(req: Request, res: Response) {
       });
     }
 
-    // ─── ADMIN / TEACHER path ─────────────────────────────────────────────────
+    // ─── ADMIN / TEACHER / SUPER_ADMIN path ──────────────────────────────────
+    const effectiveBranchId = req.effectiveBranchId;
+
     const [
       totalActiveStudents,
       totalBatches,
@@ -153,30 +155,30 @@ export async function getDashboardSummary(req: Request, res: Response) {
       upcomingTests,
       recentResultCount,
     ] = await Promise.all([
-      // Count active students in this branch
+      // Count active students
       prisma.user.count({
         where: {
-          branchId,
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
           role: Role.STUDENT,
         },
       }),
 
-      // Count batches in this branch
+      // Count batches
       prisma.batch.count({
-        where: { branchId },
+        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
       }),
 
-      // Count teachers in this branch
+      // Count teachers
       prisma.user.count({
         where: {
-          branchId,
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
           role: Role.TEACHER,
         },
       }),
 
-      // All batches in branch with today's attendance data (reuse today-summary logic)
+      // All batches with today's attendance data (reuse today-summary logic)
       prisma.batch.findMany({
-        where: { branchId },
+        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
         select: {
           id: true,
           name: true,
@@ -190,10 +192,10 @@ export async function getDashboardSummary(req: Request, res: Response) {
         },
       }),
 
-      // Upcoming tests in the next 7 days for this branch
+      // Upcoming tests in the next 7 days
       prisma.test.findMany({
         where: {
-          batch: { branchId },
+          ...(effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {}),
           testDate: {
             gte: todayNormalized,
             lte: sevenDaysFromNow,
@@ -215,7 +217,7 @@ export async function getDashboardSummary(req: Request, res: Response) {
       // Count results submitted in the last 7 days (recent activity)
       prisma.result.count({
         where: {
-          test: { batch: { branchId } },
+          ...(effectiveBranchId ? { test: { batch: { branchId: effectiveBranchId } } } : {}),
           submittedAt: { gte: sevenDaysAgo },
         },
       }),

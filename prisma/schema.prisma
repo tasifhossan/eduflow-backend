@@ -16,6 +16,7 @@ enum Role {
   TEACHER
   STUDENT
   GUARDIAN
+  SUPER_ADMIN
 }
 
 enum BatchType {

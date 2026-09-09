@@ -21,6 +21,7 @@ import uploadRouter from './routes/upload.routes';
 import resourceRouter from './routes/resource.routes';
 import noticeRouter from './routes/notice.routes';
 import guardianRouter from './routes/guardian.routes';
+import branchRouter from './routes/branch.routes';
 
 // Load environment variables
 dotenv.config();
@@ -66,6 +67,7 @@ app.use(
 // Routes
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/branches', branchRouter);
 app.use('/api/batches', batchRouter);
 app.use('/api', enrollmentRouter);
 app.use('/api', routineRouter);

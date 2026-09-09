@@ -273,3 +273,123 @@ export async function getDashboardSummary(req: Request, res: Response) {
     });
   }
 }
+
+export async function getSuperAdminDashboard(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const [
+      branches,
+      totalStudents,
+      totalTeachers,
+      paymentsAggregate,
+      attendances,
+    ] = await Promise.all([
+      // All branches with counts
+      prisma.branch.findMany({
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          _count: {
+            select: {
+              users: { where: { role: Role.STUDENT } },
+              batches: true,
+            },
+          },
+          batches: {
+            select: {
+              feePayments: {
+                select: { amountPaid: true },
+              },
+            },
+          },
+        },
+        orderBy: { name: 'asc' },
+      }),
+
+      // Count active students overall
+      prisma.user.count({
+        where: { role: Role.STUDENT },
+      }),
+
+      // Count teachers overall
+      prisma.user.count({
+        where: { role: Role.TEACHER },
+      }),
+
+      // Total revenue across all payments
+      prisma.feePayment.aggregate({
+        _sum: { amountPaid: true },
+      }),
+
+      // Attendance records for overall attendance rate calculation
+      prisma.attendance.groupBy({
+        by: ['status'],
+        _count: { _all: true },
+      }),
+    ]);
+
+    const totalBranches = branches.length;
+    const totalRevenue = paymentsAggregate._sum.amountPaid || 0;
+
+    // Overall attendance rate computation
+    let totalAttendanceRecords = 0;
+    let presentAttendanceRecords = 0;
+    for (const group of attendances) {
+      const count = group._count._all;
+      totalAttendanceRecords += count;
+      if (group.status === 'PRESENT') {
+        presentAttendanceRecords += count;
+      }
+    }
+    const overallAttendanceRate =
+      totalAttendanceRecords > 0
+        ? parseFloat(((presentAttendanceRecords / totalAttendanceRecords) * 100).toFixed(1))
+        : 0;
+
+    // Build branch breakdown array
+    const branchBreakdown = branches.map((b) => {
+      const studentCount = b._count.users;
+      const batchCount = b._count.batches;
+      const branchRevenue = b.batches.reduce((sum, batch) => {
+        const batchPayments = batch.feePayments.reduce((pSum, p) => pSum + (p.amountPaid || 0), 0);
+        return sum + batchPayments;
+      }, 0);
+
+      return {
+        branchId: b.id,
+        branchName: b.name,
+        address: b.address,
+        studentCount,
+        batchCount,
+        totalRevenue: branchRevenue,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Super admin dashboard summary retrieved successfully',
+      data: {
+        totalBranches,
+        totalStudents,
+        totalTeachers,
+        totalRevenue,
+        overallAttendanceRate,
+        branchBreakdown,
+      },
+    });
+  } catch (error) {
+    console.error('Get super admin dashboard error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+

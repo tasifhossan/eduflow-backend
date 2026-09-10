@@ -1,7 +1,8 @@
 import { Request, Response } from 'express';
 import { PrismaClient, Role, QuestionType } from '@prisma/client';
-import { createPracticeSessionSchema } from '../validators/practice.validator';
+import { createPracticeSessionSchema, submitPracticeSessionSchema } from '../validators/practice.validator';
 import { getBatchChapterWeakSpots } from '../utils/analytics';
+import { scoreMcqQuestion } from '../utils/scoring';
 
 const prisma = new PrismaClient();
 
@@ -192,3 +193,150 @@ export async function createPracticeSession(req: Request, res: Response) {
     });
   }
 }
+
+// POST /api/students/:studentId/practice-sessions/:sessionId/submit
+// STUDENT only, only for their own studentId
+export async function submitPracticeSession(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const { role, userId } = req.user;
+    const studentId = req.params.studentId as string;
+    const sessionId = req.params.sessionId as string;
+
+    // STUDENT only check
+    if (role !== Role.STUDENT) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only students can submit practice sessions',
+      });
+    }
+
+    // Own studentId check
+    if (userId !== studentId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You can only submit practice sessions for yourself',
+      });
+    }
+
+    // Validate body
+    const parseResult = submitPracticeSessionSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        data: parseResult.error.flatten(),
+      });
+    }
+
+    const { answers } = parseResult.data;
+
+    // Fetch PracticeSession
+    const session = await prisma.practiceSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session || session.studentId !== studentId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Practice session not found or access denied',
+      });
+    }
+
+    // Reject re-submissions
+    if (session.submittedAt) {
+      return res.status(400).json({
+        success: false,
+        message: 'Practice session has already been submitted',
+      });
+    }
+
+    // Fetch session questions and options for scoring
+    const questions = await prisma.question.findMany({
+      where: { id: { in: session.questionIds } },
+      include: {
+        options: true,
+        test: {
+          select: {
+            negativeMarkingValue: true,
+          },
+        },
+      },
+    });
+
+    let totalScore = 0;
+    let totalMaxMarks = 0;
+    let correctCount = 0;
+    const reviewArray = [];
+
+    for (const questionId of session.questionIds) {
+      const question = questions.find((q) => q.id === questionId);
+      if (!question) continue;
+
+      const studentAns = answers.find((a) => a.questionId === questionId);
+      const scored = scoreMcqQuestion({
+        questionId: question.id,
+        marks: question.marks,
+        negativeMarkingValue: question.test?.negativeMarkingValue ?? 0,
+        options: question.options,
+        selectedOptionId: studentAns?.selectedOptionId,
+      });
+
+      if (scored.correct) {
+        correctCount++;
+      }
+
+      totalScore += scored.marksAwarded;
+      totalMaxMarks += question.marks;
+
+      reviewArray.push({
+        questionId: scored.questionId,
+        selectedOptionId: scored.selectedOptionId,
+        correctOptionId: scored.correctOptionId,
+        correct: scored.correct,
+      });
+    }
+
+    const scorePercentage =
+      totalMaxMarks > 0
+        ? parseFloat(((Math.max(0, totalScore) / totalMaxMarks) * 100).toFixed(2))
+        : 0;
+
+    // Update PracticeSession record
+    const updatedSession = await prisma.practiceSession.update({
+      where: { id: sessionId },
+      data: {
+        answers: reviewArray as any,
+        correctAnswers: correctCount,
+        score: scorePercentage,
+        submittedAt: new Date(),
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Practice session submitted successfully',
+      data: {
+        sessionId: updatedSession.id,
+        score: updatedSession.score,
+        correctAnswers: updatedSession.correctAnswers,
+        totalQuestions: updatedSession.totalQuestions,
+        submittedAt: updatedSession.submittedAt,
+        answers: reviewArray,
+      },
+    });
+  } catch (error) {
+    console.error('Submit practice session error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+

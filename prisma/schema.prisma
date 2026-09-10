@@ -98,6 +98,7 @@ model User {
   studentGuardians     GuardianLink[]          @relation(name: "StudentGuardians")
   createdNotices       Notice[]                @relation(name: "CreatedNotices")
   uploadedResources    Resource[]              @relation(name: "UploadedResources")
+  practiceSessions     PracticeSession[]
 }
 
 model GuardianInfoChangeLog {
@@ -149,6 +150,7 @@ model Batch {
   feePayments  FeePayment[]
   notices      Notice[]
   resources    Resource[]
+  practiceSessions PracticeSession[]
 }
 
 model Enrollment {
@@ -327,4 +329,20 @@ model Resource {
   createdAt    DateTime @default(now())
 }
 
+model PracticeSession {
+  id             String    @id @default(cuid())
+  studentId      String
+  student        User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  batchId        String
+  batch          Batch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  chapterIds     String[]
+  questionIds    String[]
+  answers        Json?     // null until submitted; then [{ questionId, selectedOptionId, correct }]
+  totalQuestions Int
+  correctAnswers Int?      // null until submitted
+  score          Float?    // null until submitted
+  createdAt      DateTime  @default(now())
+  submittedAt    DateTime?
 
+  @@index([studentId, batchId])
+}

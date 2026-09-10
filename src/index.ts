@@ -22,6 +22,7 @@ import resourceRouter from './routes/resource.routes';
 import noticeRouter from './routes/notice.routes';
 import guardianRouter from './routes/guardian.routes';
 import branchRouter from './routes/branch.routes';
+import practiceRouter from './routes/practice.routes';
 
 // Load environment variables
 dotenv.config();
@@ -85,6 +86,7 @@ app.use('/api', uploadRouter);
 app.use('/api', resourceRouter);
 app.use('/api', noticeRouter);
 app.use('/api', guardianRouter);
+app.use('/api', practiceRouter);
 
 
 // Global Error Handler

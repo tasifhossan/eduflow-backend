@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import { Role } from '@prisma/client';
 import { authenticate, authorize } from '../middleware/auth.middleware';
-import { createPracticeSession, submitPracticeSession } from '../controllers/practice.controller';
+import {
+  createPracticeSession,
+  submitPracticeSession,
+  getPracticeSession,
+} from '../controllers/practice.controller';
 
 const router = Router();
 
@@ -10,6 +14,13 @@ router.post(
   authenticate,
   authorize(Role.STUDENT),
   createPracticeSession
+);
+
+router.get(
+  '/students/:studentId/practice-sessions/:sessionId',
+  authenticate,
+  authorize(Role.STUDENT),
+  getPracticeSession
 );
 
 router.post(

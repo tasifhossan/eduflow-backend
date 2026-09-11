@@ -340,3 +340,94 @@ export async function submitPracticeSession(req: Request, res: Response) {
   }
 }
 
+// GET /api/students/:studentId/practice-sessions/:sessionId
+// STUDENT only, only for their own studentId
+export async function getPracticeSession(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const { role, userId } = req.user;
+    const studentId = req.params.studentId as string;
+    const sessionId = req.params.sessionId as string;
+
+    if (role !== Role.STUDENT) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only students can access practice sessions',
+      });
+    }
+
+    if (userId !== studentId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You can only access your own practice sessions',
+      });
+    }
+
+    const session = await prisma.practiceSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session || session.studentId !== studentId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Practice session not found or access denied',
+      });
+    }
+
+    const questions = await prisma.question.findMany({
+      where: { id: { in: session.questionIds } },
+      include: {
+        options: {
+          select: {
+            id: true,
+            text: true,
+          },
+        },
+      },
+    });
+
+    const orderedQuestions = session.questionIds
+      .map((qId) => questions.find((q) => q.id === qId))
+      .filter(Boolean)
+      .map((q) => ({
+        id: q!.id,
+        text: q!.text,
+        marks: q!.marks,
+        options: q!.options.map((opt) => ({
+          id: opt.id,
+          text: opt.text,
+        })),
+      }));
+
+    return res.status(200).json({
+      success: true,
+      message: 'Practice session retrieved successfully',
+      data: {
+        sessionId: session.id,
+        batchId: session.batchId,
+        chapterIds: session.chapterIds,
+        totalQuestions: session.totalQuestions,
+        correctAnswers: session.correctAnswers,
+        score: session.score,
+        createdAt: session.createdAt,
+        submittedAt: session.submittedAt,
+        answers: session.answers,
+        questions: orderedQuestions,
+      },
+    });
+  } catch (error) {
+    console.error('Get practice session error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
+

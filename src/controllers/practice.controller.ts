@@ -242,10 +242,17 @@ export async function submitPracticeSession(req: Request, res: Response) {
       where: { id: sessionId },
     });
 
-    if (!session || session.studentId !== studentId) {
+    if (!session) {
       return res.status(404).json({
         success: false,
-        message: 'Practice session not found or access denied',
+        message: 'Practice session not found',
+      });
+    }
+
+    if (session.studentId !== studentId || session.studentId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You do not own this practice session',
       });
     }
 
@@ -373,10 +380,17 @@ export async function getPracticeSession(req: Request, res: Response) {
       where: { id: sessionId },
     });
 
-    if (!session || session.studentId !== studentId) {
+    if (!session) {
       return res.status(404).json({
         success: false,
-        message: 'Practice session not found or access denied',
+        message: 'Practice session not found',
+      });
+    }
+
+    if (session.studentId !== studentId || session.studentId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You do not own this practice session',
       });
     }
 

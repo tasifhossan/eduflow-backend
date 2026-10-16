@@ -61,6 +61,25 @@ enum PaymentStatus {
   PAID
 }
 
+enum TestType {
+  MCQ
+  WRITTEN
+  MIXED
+  OFFLINE
+}
+
+enum QuestionType {
+  MCQ
+  WRITTEN
+}
+
+enum ContactMessageStatus {
+  NEW
+  READ
+  REPLIED
+  ARCHIVED
+}
+
 model Branch {
   id        String   @id @default(cuid())
   name      String
@@ -72,24 +91,28 @@ model Branch {
 }
 
 model User {
-  id                String          @id @default(cuid())
-  name              String
-  email             String          @unique
-  phone             String?
-  guardianName      String?
-  guardianPhone     String?
-  password          String
-  role              Role
-  branchId          String
-  branch            Branch          @relation(fields: [branchId], references: [id])
-  createdAt         DateTime        @default(now())
-  teachingBatches   Batch[]         @relation(name: "TeachingBatches")
-  enrollments       Enrollment[]
-  attendances       Attendance[]    @relation(name: "StudentAttendances")
-  markedAttendances Attendance[]    @relation(name: "MarkedAttendances")
-  createdTests      Test[]          @relation(name: "CreatedTests")
-  studentAnswers    StudentAnswer[]
-  results           Result[]
+  id                   String                  @id @default(cuid())
+  name                 String
+  email                String                  @unique
+  phone                String?
+  guardianName         String?
+  guardianPhone        String?
+  password             String
+  role                 Role
+  branchId             String
+  branch               Branch                  @relation(fields: [branchId], references: [id])
+  avatarUrl            String?
+  bio                  String?
+  headline             String?
+  isPublicProfile      Boolean                 @default(false)
+  createdAt            DateTime                @default(now())
+  teachingBatches      Batch[]                 @relation(name: "TeachingBatches")
+  enrollments          Enrollment[]
+  attendances          Attendance[]            @relation(name: "StudentAttendances")
+  markedAttendances    Attendance[]            @relation(name: "MarkedAttendances")
+  createdTests         Test[]                  @relation(name: "CreatedTests")
+  studentAnswers       StudentAnswer[]
+  results              Result[]
   feePayments          FeePayment[]            @relation(name: "FeePayments")
   recordedPayments     FeePayment[]            @relation(name: "RecordedPayments")
   guardianChangeLogs   GuardianInfoChangeLog[] @relation(name: "GuardianChangeLogs")
@@ -99,6 +122,10 @@ model User {
   createdNotices       Notice[]                @relation(name: "CreatedNotices")
   uploadedResources    Resource[]              @relation(name: "UploadedResources")
   practiceSessions     PracticeSession[]
+  reviews              Review[]
+
+  @@index([branchId])
+  @@index([role])
 }
 
 model GuardianInfoChangeLog {
@@ -111,6 +138,9 @@ model GuardianInfoChangeLog {
   changedById String
   changedBy   User     @relation(name: "AdminGuardianChanges", fields: [changedById], references: [id])
   changedAt   DateTime @default(now())
+
+  @@index([studentId])
+  @@index([changedById])
 }
 
 model Subject {
@@ -127,30 +157,45 @@ model Chapter {
   subject   Subject    @relation(fields: [subjectId], references: [id])
   tests     Test[]
   resources Resource[]
+
+  @@index([subjectId])
 }
 
 model Batch {
-  id           String        @id @default(cuid())
-  name         String
-  type         BatchType
-  classLevel   String?
-  feeType      FeeType       @default(MONTHLY)
-  feeAmount    Float         @default(0)
-  subjectId    String
-  subject      Subject       @relation(fields: [subjectId], references: [id])
-  branchId     String
-  branch       Branch        @relation(fields: [branchId], references: [id])
-  createdAt    DateTime      @default(now())
-  teacherId    String?
-  teacher      User?         @relation(name: "TeachingBatches", fields: [teacherId], references: [id])
-  enrollments  Enrollment[]
-  routineSlots RoutineSlot[]
-  attendances  Attendance[]
-  tests        Test[]
-  feePayments  FeePayment[]
-  notices      Notice[]
-  resources    Resource[]
+  id               String            @id @default(cuid())
+  slug             String?           @unique
+  name             String
+  type             BatchType
+  classLevel       String?
+  feeType          FeeType           @default(MONTHLY)
+  feeAmount        Float             @default(0)
+  description      String?
+  imageUrl         String?
+  gallery          String[]          @default([])
+  syllabus         Json?
+  highlights       String[]          @default([])
+  isPublished      Boolean           @default(true)
+  subjectId        String
+  subject          Subject           @relation(fields: [subjectId], references: [id])
+  branchId         String
+  branch           Branch            @relation(fields: [branchId], references: [id])
+  createdAt        DateTime          @default(now())
+  teacherId        String?
+  teacher          User?             @relation(name: "TeachingBatches", fields: [teacherId], references: [id])
+  enrollments      Enrollment[]
+  routineSlots     RoutineSlot[]
+  attendances      Attendance[]
+  tests            Test[]
+  feePayments      FeePayment[]
+  notices          Notice[]
+  resources        Resource[]
   practiceSessions PracticeSession[]
+  reviews          Review[]
+
+  @@index([branchId])
+  @@index([subjectId])
+  @@index([teacherId])
+  @@index([isPublished])
 }
 
 model Enrollment {
@@ -167,6 +212,9 @@ model Enrollment {
   discountReason  String?
 
   @@unique([studentId, batchId])
+  @@index([batchId])
+  @@index([studentId])
+  @@index([status])
 }
 
 model RoutineSlot {
@@ -176,6 +224,8 @@ model RoutineSlot {
   dayOfWeek DayOfWeek
   startTime String
   endTime   String
+
+  @@index([batchId])
 }
 
 model Attendance {
@@ -190,18 +240,9 @@ model Attendance {
   markedBy   User             @relation(name: "MarkedAttendances", fields: [markedById], references: [id])
 
   @@unique([studentId, batchId, date])
-}
-
-enum TestType {
-  MCQ
-  WRITTEN
-  MIXED
-  OFFLINE
-}
-
-enum QuestionType {
-  MCQ
-  WRITTEN
+  @@index([batchId])
+  @@index([studentId])
+  @@index([date])
 }
 
 model Test {
@@ -221,6 +262,10 @@ model Test {
   createdAt            DateTime   @default(now())
   questions            Question[]
   results              Result[]
+
+  @@index([batchId])
+  @@index([chapterId])
+  @@index([createdById])
 }
 
 model Question {
@@ -233,6 +278,8 @@ model Question {
   order          Int
   options        Option[]
   studentAnswers StudentAnswer[]
+
+  @@index([testId])
 }
 
 model Option {
@@ -242,6 +289,8 @@ model Option {
   text           String
   isCorrect      Boolean         @default(false)
   studentAnswers StudentAnswer[]
+
+  @@index([questionId])
 }
 
 model StudentAnswer {
@@ -256,6 +305,8 @@ model StudentAnswer {
   marksAwarded      Float?
 
   @@unique([studentId, questionId])
+  @@index([studentId])
+  @@index([questionId])
 }
 
 model Result {
@@ -269,6 +320,8 @@ model Result {
   submittedAt        DateTime
 
   @@unique([studentId, testId])
+  @@index([studentId])
+  @@index([testId])
 }
 
 model FeePayment {
@@ -289,6 +342,10 @@ model FeePayment {
   createdAt    DateTime      @default(now())
 
   @@unique([studentId, batchId, period])
+  @@index([studentId])
+  @@index([batchId])
+  @@index([recordedById])
+  @@index([status])
 }
 
 model GuardianLink {
@@ -300,6 +357,8 @@ model GuardianLink {
   createdAt  DateTime @default(now())
 
   @@unique([guardianId, studentId])
+  @@index([guardianId])
+  @@index([studentId])
 }
 
 model Notice {
@@ -313,6 +372,10 @@ model Notice {
   createdById String
   createdBy   User     @relation(name: "CreatedNotices", fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
+
+  @@index([branchId])
+  @@index([batchId])
+  @@index([createdById])
 }
 
 model Resource {
@@ -327,6 +390,10 @@ model Resource {
   uploadedById String
   uploadedBy   User     @relation(name: "UploadedResources", fields: [uploadedById], references: [id])
   createdAt    DateTime @default(now())
+
+  @@index([batchId])
+  @@index([chapterId])
+  @@index([uploadedById])
 }
 
 model PracticeSession {
@@ -345,4 +412,80 @@ model PracticeSession {
   submittedAt    DateTime?
 
   @@index([studentId, batchId])
+  @@index([batchId])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  batchId   String
+  batch     Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([batchId, studentId])
+  @@index([batchId])
+  @@index([studentId])
+}
+
+model BlogPost {
+  id          String    @id @default(cuid())
+  slug        String    @unique
+  title       String
+  excerpt     String?
+  content     String
+  coverImage  String?
+  category    String
+  authorName  String
+  isPublished Boolean   @default(false)
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([isPublished, publishedAt])
+  @@index([category])
+}
+
+model Testimonial {
+  id         String   @id @default(cuid())
+  name       String
+  roleTitle  String
+  content    String
+  avatarUrl  String?
+  rating     Int      @default(5)
+  isFeatured Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([isFeatured])
+}
+
+model ContactMessage {
+  id        String               @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  status    ContactMessageStatus @default(NEW)
+  createdAt DateTime             @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model NewsletterSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+}
+
+model FaqItem {
+  id        String   @id @default(cuid())
+  question  String
+  answer    String
+  category  String
+  sortOrder Int      @default(0)
+
+  @@index([category, sortOrder])
 }

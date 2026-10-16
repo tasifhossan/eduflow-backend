@@ -31,6 +31,7 @@ import contentRouter from './routes/content.routes';
 import tablesRouter from './routes/tables.routes';
 import chartsRouter from './routes/charts.routes';
 import meRouter from './routes/me.routes';
+import aiRouter from './routes/ai.routes';
 
 const app = express();
 const PORT = env.PORT || 5000;
@@ -83,9 +84,24 @@ const publicLimiter = rateLimit({
   },
 });
 
+const demoLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many demo login requests, please try again later.',
+    });
+  },
+});
+
 app.use('/api', apiLimiter);
 app.post('/api/auth/login', authLimiter);
 app.post('/api/auth/register', authLimiter);
+app.post('/api/auth/google', authLimiter);
+app.post('/api/auth/demo', demoLimiter);
 
 // SEC-02: Exact origins only, no vercel.app suffix match
 const allowedOrigins = [
@@ -137,6 +153,7 @@ app.use('/api', resourceRouter);
 app.use('/api', noticeRouter);
 app.use('/api', guardianRouter);
 app.use('/api', practiceRouter);
+app.use('/api/ai', aiRouter);
 
 
 // Global Error Handler

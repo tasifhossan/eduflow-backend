@@ -26,6 +26,11 @@ import noticeRouter from './routes/notice.routes';
 import guardianRouter from './routes/guardian.routes';
 import branchRouter from './routes/branch.routes';
 import practiceRouter from './routes/practice.routes';
+import publicRouter from './routes/public.routes';
+import contentRouter from './routes/content.routes';
+import tablesRouter from './routes/tables.routes';
+import chartsRouter from './routes/charts.routes';
+import meRouter from './routes/me.routes';
 
 const app = express();
 const PORT = env.PORT || 5000;
@@ -65,6 +70,19 @@ const authLimiter = rateLimit({
   },
 });
 
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many requests, please try again later.',
+    });
+  },
+});
+
 app.use('/api', apiLimiter);
 app.post('/api/auth/login', authLimiter);
 app.post('/api/auth/register', authLimiter);
@@ -94,6 +112,11 @@ app.use(
 
 // Routes
 app.use('/api/health', healthRouter);
+app.use('/api/public', publicLimiter, publicRouter);
+app.use('/api/tables', tablesRouter);
+app.use('/api/charts', chartsRouter);
+app.use('/api/me', meRouter);
+app.use('/api', contentRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/branches', branchRouter);
 app.use('/api/batches', batchRouter);

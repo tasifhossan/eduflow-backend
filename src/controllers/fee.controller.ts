@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { calculateNetFee } from '../utils/fee-calculator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
+import { escapeHtml } from '../utils/escapeHtml';
 import prisma from '../utils/prisma';
 import {
   updateBatchFeeSchema,
@@ -318,16 +319,16 @@ export async function createPaymentRecord(req: Request, res: Response) {
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
-                <p>Dear ${recipients.student.name},</p>
-                <p>Your fee record for <strong>${batch.name}</strong> (${period}) has been updated:</p>
+                <p>Dear ${escapeHtml(recipients.student.name)},</p>
+                <p>Your fee record for <strong>${escapeHtml(batch.name)}</strong> (${escapeHtml(period)}) has been updated:</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${recipients.student.name}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${period}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${finalAmountDue.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${paid.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dueDateStr}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(recipients.student.name)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(batch.name)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(period)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(finalAmountDue.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(paid.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${escapeHtml(status)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(dueDateStr)}</td></tr>
                 </table>
                 <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
               </div>
@@ -344,16 +345,16 @@ export async function createPaymentRecord(req: Request, res: Response) {
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
-                <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
-                <p>Fee update for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${batch.name}</strong> (${period}):</p>
+                <p>Dear ${escapeHtml(guardian.name || 'Parent/Guardian')},</p>
+                <p>Fee update for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> for <strong>${escapeHtml(batch.name)}</strong> (${escapeHtml(period)}):</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${recipients.student?.name || 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${batch.name}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${period}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${finalAmountDue.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${paid.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${dueDateStr}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Student</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(recipients.student?.name || 'N/A')}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(batch.name)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(period)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(finalAmountDue.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(paid.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${escapeHtml(status)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Due Date</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(dueDateStr)}</td></tr>
                 </table>
                 <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
               </div>
@@ -570,14 +571,14 @@ export async function updatePaymentRecord(req: Request, res: Response) {
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
-                <p>Dear ${recipients.student.name},</p>
-                <p>Your fee record for <strong>${existingPayment.batch.name}</strong> (${existingPayment.period}) has been updated:</p>
+                <p>Dear ${escapeHtml(recipients.student.name)},</p>
+                <p>Your fee record for <strong>${escapeHtml(existingPayment.batch.name)}</strong> (${escapeHtml(existingPayment.period)}) has been updated:</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.batch.name}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.period}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${existingPayment.amountDue.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${newAmountPaid.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(existingPayment.batch.name)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(existingPayment.period)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(existingPayment.amountDue.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(newAmountPaid.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${escapeHtml(status)}</td></tr>
                 </table>
                 <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
               </div>
@@ -594,14 +595,14 @@ export async function updatePaymentRecord(req: Request, res: Response) {
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:${statusColor}">Fee ${status === 'PARTIAL' ? 'Partially Paid' : 'Reminder'}</h2>
-                <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
-                <p>Fee update for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${existingPayment.batch.name}</strong> (${existingPayment.period}):</p>
+                <p>Dear ${escapeHtml(guardian.name || 'Parent/Guardian')},</p>
+                <p>Fee update for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> for <strong>${escapeHtml(existingPayment.batch.name)}</strong> (${escapeHtml(existingPayment.period)}):</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.batch.name}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${existingPayment.period}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${existingPayment.amountDue.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${newAmountPaid.toFixed(2)}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${status}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(existingPayment.batch.name)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Period</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(existingPayment.period)}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Due</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(existingPayment.amountDue.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Amount Paid</td><td style="padding:8px;border:1px solid #e5e7eb">৳${escapeHtml(newAmountPaid.toFixed(2))}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Status</td><td style="padding:8px;border:1px solid #e5e7eb;color:${statusColor};font-weight:700">${escapeHtml(status)}</td></tr>
                 </table>
                 <p style="margin-top:16px;color:#6b7280;font-size:13px">This is an automated message. Please do not reply.</p>
               </div>

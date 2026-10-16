@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role, EnrollmentStatus } from '@prisma/client';
+import { Role, EnrollmentStatus } from '@prisma/client';
 import { createNoticeSchema } from '../validators/notice.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function createNotice(req: Request, res: Response) {
   try {

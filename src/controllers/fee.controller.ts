@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { calculateNetFee } from '../utils/fee-calculator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
+import prisma from '../utils/prisma';
 import {
   updateBatchFeeSchema,
   setStudentFeeSchema,
@@ -10,8 +11,6 @@ import {
   updatePaymentSchema,
   createInstallmentPlanSchema,
 } from '../validators/fee.validator';
-
-const prisma = new PrismaClient();
 
 /**
  * PATCH /batches/:id/fee

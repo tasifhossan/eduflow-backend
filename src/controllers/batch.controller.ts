@@ -1,8 +1,6 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { createBatchSchema, updateBatchSchema } from '../validators/batch.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function createBatch(req: Request, res: Response) {
   try {

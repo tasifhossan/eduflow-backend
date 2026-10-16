@@ -2,7 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import { Role } from '@prisma/client';
 import { verifyToken } from '../utils/jwt';
 
-export function authenticate(req: Request, res: Response, next: NextFunction) {
+import prisma from '../utils/prisma';
+
+export async function authenticate(req: Request, res: Response, next: NextFunction) {
   try {
     let token = req.cookies?.token;
 
@@ -21,10 +23,28 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
     }
 
     const decoded = verifyToken(token);
+
+    // SEC-07: Load user by id from DB, reject 401 if missing/inactive
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: {
+        id: true,
+        role: true,
+        branchId: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: User not found or inactive',
+      });
+    }
+
     req.user = {
-      userId: decoded.userId,
-      role: decoded.role,
-      branchId: decoded.branchId,
+      userId: user.id,
+      role: user.role,
+      branchId: user.branchId,
     };
 
     next();

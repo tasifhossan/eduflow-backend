@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
+import prisma from '../utils/prisma';
 import { createTestSchema, updateTestSchema } from '../validators/test.validator';
-
-const prisma = new PrismaClient();
 
 export async function createTest(req: Request, res: Response) {
   try {
@@ -102,6 +101,23 @@ export async function getTestsByBatch(req: Request, res: Response) {
       });
     }
 
+    // SEC-09: STUDENT access requires an ACTIVE enrollment in that batch; otherwise 403.
+    if (req.user.role === Role.STUDENT) {
+      const activeEnrollment = await prisma.enrollment.findFirst({
+        where: {
+          studentId: req.user.userId,
+          batchId,
+          status: 'ACTIVE',
+        },
+      });
+      if (!activeEnrollment) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Active enrollment required',
+        });
+      }
+    }
+
     const tests = await prisma.test.findMany({
       where: { batchId },
       orderBy: { testDate: 'asc' },
@@ -155,22 +171,35 @@ export async function getTestById(req: Request, res: Response) {
       });
     }
 
+    // SEC-09: STUDENT access requires an ACTIVE enrollment in that batch; otherwise 403.
+    if (req.user.role === Role.STUDENT) {
+      const activeEnrollment = await prisma.enrollment.findFirst({
+        where: {
+          studentId: req.user.userId,
+          batchId: test.batchId,
+          status: 'ACTIVE',
+        },
+      });
+      if (!activeEnrollment) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Active enrollment required',
+        });
+      }
+    }
+
     // Exclude batch property from response data
     const { batch, ...testData } = test;
 
-    // If student, check if they already submitted the test
+    // EXAM-01: for STUDENT callers, strip isCorrect from options until now > testDate + durationMinutes. If durationMinutes is null, treat the end as testDate. Staff roles are unaffected.
     if (req.user.role === Role.STUDENT) {
-      const submission = await prisma.result.findUnique({
-        where: {
-          studentId_testId: {
-            studentId: req.user.userId,
-            testId: id,
-          },
-        },
-      });
+      const now = new Date();
+      const testDate = new Date(test.testDate);
+      const testEndTime = test.durationMinutes
+        ? new Date(testDate.getTime() + test.durationMinutes * 60 * 1000)
+        : testDate;
 
-      if (!submission) {
-        // Exclude isCorrect from options
+      if (now <= testEndTime) {
         testData.questions = testData.questions.map((q) => ({
           ...q,
           options: q.options.map((o) => {

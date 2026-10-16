@@ -1,9 +1,8 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { createGuardianSchema, linkGuardianSchema } from '../validators/guardian.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function createGuardianAccount(req: Request, res: Response) {
   try {

@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { updateStudentSchema } from '../validators/student.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function getStudentsWithSummary(req: Request, res: Response) {
   try {

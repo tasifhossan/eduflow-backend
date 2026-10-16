@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role, EnrollmentStatus } from '@prisma/client';
+import { Role, EnrollmentStatus } from '@prisma/client';
 import { createResourceSchema } from '../validators/resource.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function createResource(req: Request, res: Response) {
   try {

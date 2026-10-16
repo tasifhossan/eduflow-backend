@@ -1,14 +1,22 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
+import prisma from '../utils/prisma';
 import { signToken } from '../utils/jwt';
-import { registerSchema, loginSchema } from '../validators/auth.validator';
-
-const prisma = new PrismaClient();
+import { registerSchema, superAdminRegisterSchema, loginSchema } from '../validators/auth.validator';
 
 export async function register(req: Request, res: Response) {
   try {
-    const parseResult = registerSchema.safeParse(req.body);
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const isSuperAdmin = req.user.role === Role.SUPER_ADMIN;
+    const schema = isSuperAdmin ? superAdminRegisterSchema : registerSchema;
+    const parseResult = schema.safeParse(req.body);
     if (!parseResult.success) {
       return res.status(400).json({
         success: false,
@@ -17,11 +25,41 @@ export async function register(req: Request, res: Response) {
       });
     }
 
-    const { name, email, phone, password, role, branchId } = parseResult.data;
+    const { name, email, phone, password, role } = parseResult.data;
+
+    let branchId: string;
+    if (isSuperAdmin) {
+      if (!parseResult.data.branchId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Branch ID is required',
+        });
+      }
+      branchId = parseResult.data.branchId;
+      const branchExists = await prisma.branch.findUnique({
+        where: { id: branchId },
+      });
+      if (!branchExists) {
+        return res.status(400).json({
+          success: false,
+          message: 'The specified branch does not exist',
+        });
+      }
+    } else {
+      // Non-super-admin (ADMIN) callers: ignore body branchId and force caller's branchId
+      if (!req.user.branchId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Caller has no branch assigned',
+        });
+      }
+      branchId = req.user.branchId;
+    }
 
     // Check if email already exists
     const existingUser = await prisma.user.findUnique({
       where: { email },
+      select: { id: true },
     });
     if (existingUser) {
       return res.status(409).json({
@@ -30,21 +68,10 @@ export async function register(req: Request, res: Response) {
       });
     }
 
-    // Check if branch exists
-    const branchExists = await prisma.branch.findUnique({
-      where: { id: branchId },
-    });
-    if (!branchExists) {
-      return res.status(400).json({
-        success: false,
-        message: 'The specified branch does not exist',
-      });
-    }
-
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create User
+    // Create User with explicit select to avoid returning secrets
     const user = await prisma.user.create({
       data: {
         name,
@@ -54,32 +81,23 @@ export async function register(req: Request, res: Response) {
         role,
         branchId,
       },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        branchId: true,
+        createdAt: true,
+      },
     });
 
-    // Generate JWT
-    const token = signToken({
-      userId: user.id,
-      role: user.role,
-      branchId: user.branchId,
-    });
-
-    // Set JWT in cookie (httpOnly for XSS security)
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
-    });
-
-    // Remove password from user object
-    const { password: _, ...userWithoutPassword } = user;
-
+    // SEC-05: register must not set or change any cookie.
     return res.status(201).json({
       success: true,
       message: 'Registration successful',
       data: {
-        user: userWithoutPassword,
-        token,
+        user,
       },
     });
   } catch (error) {
@@ -139,14 +157,21 @@ export async function login(req: Request, res: Response) {
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
     });
 
-    // Remove password from user object
-    const { password: _, ...userWithoutPassword } = user;
+    const userSafe = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      branchId: user.branchId,
+      createdAt: user.createdAt,
+    };
 
     return res.status(200).json({
       success: true,
       message: 'Login successful',
       data: {
-        user: userWithoutPassword,
+        user: userSafe,
         token,
       },
     });

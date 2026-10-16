@@ -1,8 +1,6 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 const createBranchSchema = z.object({
   name: z.string().min(1, 'Branch name is required'),

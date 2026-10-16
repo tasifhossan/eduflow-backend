@@ -1,7 +1,10 @@
+import env from './config/env';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import prisma from './utils/prisma';
 import authRouter from './routes/auth.routes';
 import healthRouter from './routes/health.routes';
 import batchRouter from './routes/batch.routes';
@@ -24,39 +27,63 @@ import guardianRouter from './routes/guardian.routes';
 import branchRouter from './routes/branch.routes';
 import practiceRouter from './routes/practice.routes';
 
-// Load environment variables
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = env.PORT || 5000;
+
+// Security and proxy settings
+app.set('trust proxy', 1);
+app.use(helmet());
 
 // Standard Middlewares (Set up before routes)
 app.use(express.json());
 app.use(cookieParser());
 
-const allowedOrigins = ([
-  process.env.FRONTEND_URL,
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://localhost:3002',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:3001',
-  'http://127.0.0.1:3002'
-].filter(Boolean) as string[]).map((url) => url.replace(/\/$/, ''));
+// Rate limiters
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many requests, please try again later.',
+    });
+  },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many requests, please try again later.',
+    });
+  },
+});
+
+app.use('/api', apiLimiter);
+app.post('/api/auth/login', authLimiter);
+app.post('/api/auth/register', authLimiter);
+
+// SEC-02: Exact origins only, no vercel.app suffix match
+const allowedOrigins = [
+  env.FRONTEND_URL.replace(/\/$/, ''),
+  ...(env.NODE_ENV !== 'production' ? ['http://localhost:3000'] : []),
+];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl)
       if (!origin) {
         return callback(null, true);
       }
       
       const sanitizedOrigin = origin.replace(/\/$/, '');
-      if (
-        allowedOrigins.includes(sanitizedOrigin) || 
-        sanitizedOrigin.endsWith('.vercel.app')
-      ) {
+      if (allowedOrigins.includes(sanitizedOrigin)) {
         return callback(null, true);
       }
       return callback(null, false);
@@ -98,8 +125,21 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   });
 });
 
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await prisma.$disconnect();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  await prisma.$disconnect();
+  process.exit(0);
+});
+
 // Start server
 app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`EduFlow Backend is running on port ${PORT}`);
 });
+
+export default app;
 

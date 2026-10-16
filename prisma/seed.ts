@@ -1,10 +1,26 @@
 import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import crypto from 'crypto';
 
 const prisma = new PrismaClient();
 
 async function main() {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Database seeding is strictly forbidden in production');
+  }
+
   console.log('Seeding database...');
+
+  // Read passwords from env or generate random fallbacks
+  const adminPasswordPlain = process.env.SEED_ADMIN_PASSWORD || crypto.randomBytes(10).toString('hex');
+  const teacherPasswordPlain = process.env.SEED_TEACHER_PASSWORD || crypto.randomBytes(10).toString('hex');
+  const studentPasswordPlain = process.env.SEED_STUDENT_PASSWORD || crypto.randomBytes(10).toString('hex');
+
+  console.log('--- Seed Account Credentials ---');
+  console.log(`Admin Password: ${adminPasswordPlain}`);
+  console.log(`Teacher Password: ${teacherPasswordPlain}`);
+  console.log(`Student Password: ${studentPasswordPlain}`);
+  console.log('--------------------------------');
 
   // Create or retrieve "Main Branch"
   let branch = await prisma.branch.findFirst({
@@ -23,7 +39,7 @@ async function main() {
   }
 
   // Hash admin password
-  const hashedPassword = await bcrypt.hash('Admin@123', 10);
+  const hashedPassword = await bcrypt.hash(adminPasswordPlain, 10);
 
   // Create or update admin user
   const adminUser = await prisma.user.upsert({
@@ -46,7 +62,7 @@ async function main() {
   console.log(`Seeded admin user: ${adminUser.email} (${adminUser.id})`);
 
   // Hash teacher password
-  const teacherPassword = await bcrypt.hash('Teacher@123', 10);
+  const teacherPassword = await bcrypt.hash(teacherPasswordPlain, 10);
 
   // Create or update teacher user
   const teacherUser = await prisma.user.upsert({
@@ -85,7 +101,7 @@ async function main() {
   }
 
   // Seed 5 default student accounts
-  const studentPassword = await bcrypt.hash('Student@123', 10);
+  const studentPassword = await bcrypt.hash(studentPasswordPlain, 10);
   const sampleStudents = [
     { name: 'Tasif Hossain', email: 'tasif@eduflow.com', phone: '01712345678', guardianName: 'Mr. Hossain', guardianPhone: '01711111111' },
     { name: 'Imran Khan', email: 'imran@eduflow.com', phone: '01812345678', guardianName: 'Mr. Khan', guardianPhone: '01811111111' },

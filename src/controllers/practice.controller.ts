@@ -1,10 +1,9 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role, QuestionType } from '@prisma/client';
+import { Role, QuestionType } from '@prisma/client';
 import { createPracticeSessionSchema, submitPracticeSessionSchema } from '../validators/practice.validator';
 import { getBatchChapterWeakSpots } from '../utils/analytics';
 import { scoreMcqQuestion } from '../utils/scoring';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 // POST /api/students/:studentId/practice-sessions
 // STUDENT only, only for their own studentId

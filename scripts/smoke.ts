@@ -1061,9 +1061,12 @@ async function runSmokeTests() {
         await prisma.test.deleteMany({ where: { id: { in: createdTestIds } } });
       }
       if (createdBatchIds.length > 0) {
+        await prisma.test.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.enrollment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.routineSlot.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.review.deleteMany({ where: { batchId: { in: createdBatchIds } } });
+        await prisma.attendance.deleteMany({ where: { batchId: { in: createdBatchIds } } });
+        await prisma.feePayment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.batch.deleteMany({ where: { id: { in: createdBatchIds } } });
       }
       if (createdUserIds.length > 0) {
@@ -1076,6 +1079,8 @@ async function runSmokeTests() {
         await prisma.newsletterSubscriber.deleteMany({ where: { email: { in: createdNewsletterEmails } } });
       }
       // Delete any stray SMOKE- tagged items
+      await prisma.test.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+      await prisma.batch.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
       await prisma.contactMessage.deleteMany({ where: { email: { contains: 'smoke' } } });
       await prisma.user.deleteMany({ where: { email: { contains: 'smoke' } } });
       console.log('Smoke test fixtures cleaned up successfully.');

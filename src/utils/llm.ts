@@ -257,10 +257,11 @@ export function setStubClient(client: any): void {
 }
 
 function getGeminiClient(): GoogleGenAI {
-  if (stubClient) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (stubClient && !isProduction) {
     return stubClient;
   }
-  if (process.env.LLM_STUB === 'true') {
+  if (process.env.LLM_STUB === 'true' && !isProduction) {
     return {
       models: {
         generateContent: async () => ({

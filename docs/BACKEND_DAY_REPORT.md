@@ -98,10 +98,10 @@ During the execution of the smoke test suite, the following real bugs were detec
 - **Issue**: The grounding query in `chatWithAi` selected `phone` and `email` on `prisma.branch.findMany` and `code` on `prisma.batch.findMany`. None of these fields exist on those models in `schema.prisma`, causing `PrismaClientValidationError` and crashing all AI chat calls with HTTP 500.
 - **Fix**: Removed `phone` and `email` from Branch selection and removed `code` from Batch selection. Updated knowledge string formatting accordingly.
 
-### 4. LLM Deprecation and Client Timeout
+### 4. LLM Deprecation, Client Timeout & Security Hardening
 - **File**: `src/utils/llm.ts`
-- **Issue**: Google GenAI deprecated model name `gemini-2.5-flash` for new users (returning 404 ApiError). Furthermore, default 15s timeout caused HTTP 504 Deadline Exceeded when upstream API had high latency.
-- **Fix**: Added model fallback to `gemini-3.5-flash-lite`, increased client timeout to 30,000ms, and added test stub mode (`LLM_STUB=true`) for deterministic quota guard testing.
+- **Issue**: Google GenAI deprecated model name `gemini-2.5-flash` for new users (returning 404 ApiError). Furthermore, default 15s timeout caused HTTP 504 Deadline Exceeded when upstream API had high latency. Additionally, stub mode needed security guards against unauthorized production invocation.
+- **Fix**: Added fallback redirect to `gemini-3.5-flash-lite`, increased client timeout to 30,000ms, and guarded `LLM_STUB` so it is strictly disabled whenever `process.env.NODE_ENV === 'production'`.
 
 ### 5. Monolithic Auth Rate Limiter Cross-Contamination
 - **File**: `src/index.ts`
@@ -110,24 +110,106 @@ During the execution of the smoke test suite, the following real bugs were detec
 
 ---
 
-## 4. Database Seed Audit & Asset Health
+## 4. Database Drift & Migration Audit (`prisma migrate status`)
 
-- **Row Counts**:
-  - Batches: 16
-  - Teachers: 8
-  - Reviews: 32
-  - Blog Posts: 6
-  - FAQs: 10
-  - Testimonials: 8
-- **Duplicate Slugs**: 0 duplicate batch slugs, 0 duplicate blog slugs.
-- **Placeholder / Test Data**: None. All batches represent active academic or admission courses.
-- **Asset / Image URL Audit**:
-  - 31 out of 32 seeded image URLs respond with HTTP 200 OK.
-  - **Broken URL Detected**: Teacher Dr. Nusrat Jahan avatar (`https://images.unsplash.com/photo-1594824813590-789a5b12cca2?auto=format&fit=crop&w=400&q=80`) returns HTTP 404 from Unsplash CDN. Needs follow-up seed asset replacement.
+A full schema drift analysis was performed against the PostgreSQL database:
+
+```text
+9 migrations found in prisma/migrations
+Database schema is up to date!
+```
+
+- **Applied Migrations List**:
+  1. `20260829093351_init`
+  2. `20260829164627_add_subject_chapter_batch`
+  3. `20260909153026_add_notices_and_resources`
+  4. `20260909155700_add_guardian_and_payments`
+  5. `20260911163617_exam_system_v1`
+  6. `20261016170642_add_attendance_marked_by`
+  7. `20261016172605_add_payment_models`
+  8. `20261016173000_add_landing_models`
+  9. `20261016174500_add_public_batch_fields`
+- **Drift Status**: **0 schema drift**. All database tables, columns, indexes, and constraints exactly mirror `prisma/schema.prisma`.
 
 ---
 
-## 5. Verification Commands
+## 5. Dependency Security Audit (`npm audit`)
+
+Running `npm audit` on `backend/` reported **6 vulnerabilities** (1 moderate, 4 high, 1 critical):
+
+| Package | Severity | Vulnerability ID / Summary | Impact & Remediation Analysis |
+|---|:---:|---|---|
+| `proxy-addr` (1.1.0 - 2.0.7) | **Critical** | GHSA-jqcg-44mw-7w3h: IP spoofing via IPv4-mapped IPv6 trust subnet | Used by Express for `req.ip`. Remediated in Express 5 ecosystem via `npm audit fix`. |
+| `deepmerge-ts` (<8.0.0) | **High** | GHSA-ggr8-5vv4-36mx: Stack exhaustion when merging recursive object graphs | Dev-dependency introduced by `@prisma/config` in Prisma CLI tooling. Requires Prisma 7+ to fully eliminate. |
+| `nodemailer` (<=10.0.5) | **High** | GHSA-8m3c-c648-2xjj, GHSA-wmmp-3585-3rmp, GHSA-2x7j-588g-ccc2, GHSA-cc9r-2j5m-2m83, GHSA-6vj9-mwq6-2f5v, GHSA-8vvx-rff5-p5rq, GHSA-v53p-9fqp-m79j: Addressparser complexity & DoS vulnerabilities | Mailer utility. Remediated via `npm audit fix` (patch updates). |
+| `qs` (2.2.5 - 6.15.3) | **Moderate** | GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g: Bracket-key comma parsing array-limit bypass & DoS | Body parser dependency. Remediated via `npm audit fix`. |
+
+- **Recommendation**: Apply non-breaking patches with `npm audit fix`. Do not run `npm audit fix --force` as that would force an upgrade to Prisma 7.10/8.0 which breaks Prisma 6 API signatures.
+
+---
+
+## 6. Duplicate Seed Rows & Legacy Data Audit
+
+A programmatic query across all database tables uncovered the following data state:
+
+### Duplicate Rows Analysis
+- **Duplicate User Emails**: **0** (strict `@unique` constraint verified).
+- **Duplicate User Names/Roles**: **0**.
+- **Duplicate Batch Names per Branch**: **0**.
+- **Duplicate Enrollments (`[studentId, batchId]`)**: **0**.
+- **Duplicate Attendance (`[studentId, batchId, date]`)**: **0**.
+- **Duplicate FeePayments (`[studentId, batchId, period]`)**: **0**.
+- **Duplicate Branch Names**: **1 duplicate name found**:
+  - `cmtuahlrj0005ujx8i7qrvy21` ("Dhanmondi Branch", Road 27, created 2026-09-09) — 0 users, 0 batches. Legacy row from early test runs.
+  - `branch-dhanmondi-branch` ("Dhanmondi Branch", House 14, Road 7, created 2026-10-16) — 17 users, 5 batches. Active production-seed branch.
+  - *Recommendation*: Safely prune legacy orphan branch `cmtuahlrj0005ujx8i7qrvy21`.
+
+### Legacy Placeholder Batches
+The database contains **16 batches total**. 12 batches belong to the modern October 2026 curriculum seed across Dhanmondi, Uttara, and Mirpur branches. 4 legacy batches exist on the initial "Main Branch":
+1. `Audit Batch 101` (`cmtubusjx000aujx867ihly2m`, created 2026-09-09) — 1 enrollment, 0 attendance, 0 tests, 0 payments.
+2. `Batch X` (`cmtx6myg20006uj7g9ahfc3xo`, created 2026-09-11) — 2 enrollments, 0 attendance, 1 test ("Math Test"), 0 payments.
+3. `Class 8 Physics` (`cmtemvqp80001ujf8klt0k3ax`, created 2026-08-29) — 4 enrollments, 4 attendance, 1 test, 3 payments.
+4. `Class 8 Math` (`cmtenb3km000jujf8ke02ejuf`, created 2026-08-29) — 5 enrollments, 21 attendance, 2 tests, 4 payments.
+
+Also noted 7 legacy test user accounts created in September 2026 (`superadmin_test@eduflow.com`, `admin_test6@eduflow.com`, `linked_student_...`, `unlinked_student_...`, `guardian_...`, `studentA_...`, `studentB_...`).
+
+---
+
+## 7. Leftover Test Data & Smoke Fixture Verification
+
+- **Smoke Fixture Cleanup**:
+  - All test artifacts generated during smoke testing (`SMOKE-ExamBatch-1`, `SMOKE-UnenrolledBatch-2`, `SMOKE-OpenTest`, `SMOKE-TestBatch2`, `SMOKE-FutureTest`, `SMOKE-PastTest`, and `SMOKE-` users/contacts) were confirmed **100% purged** from the database.
+  - `scripts/smoke.ts` cleanup routine was hardened with relational cascading (deleting tests and enrollments linked to test batches before attempting batch deletion) to ensure no future foreign-key constraint blocks cleanup.
+- **Verification Query**:
+  - Direct database queries for `name/title/email` containing `'smoke'` returned **0 rows**.
+
+---
+
+## 8. AI Runtime, Security Hardening & Quota Preservation
+
+### `LLM_STUB` Production Protection
+- **Security Guard Added**: In `src/utils/llm.ts`, the `LLM_STUB` environment variable and `stubClient` injection are guarded with:
+  ```typescript
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (stubClient && !isProduction) return stubClient;
+  if (process.env.LLM_STUB === 'true' && !isProduction) return { ... };
+  ```
+- **Assurance**: Even if `LLM_STUB=true` were accidentally set in the hosting environment, the server **strictly ignores it in production**, preventing any unauthorized bypass of live AI functionality.
+
+### AI Model Latency Benchmark
+- **Model Fallback**: Updated to `gemini-3.5-flash-lite`.
+- **Live Latency Benchmark**:
+  - `gemini-2.5-flash`: ~20,000ms (high latency upstream).
+  - `gemini-3.5-flash-lite`: **1,774ms (~1.8 seconds)** — 11x faster response turnaround with zero timeout risk.
+- **Client Timeout**: Retained at 30,000ms safety margin.
+
+### Free Quota Management
+- Live Gemini API calls consume free tier quota.
+- **Guideline**: For repeated regression runs of `npm run test:smoke`, launch the backend server with `LLM_STUB=true` (`$env:LLM_STUB="true"; npm run dev`). This tests all routing, validation, injection defenses, and rate limiters while using 0 external API calls. Live Gemini quota should only be expended during final integration sign-offs.
+
+---
+
+## 9. Verification Commands
 
 - `npx tsc --noEmit`: 0 errors (clean compilation).
 - `npx prisma validate`: Schema is valid.

@@ -331,7 +331,7 @@ async function runSmokeTests() {
         type: 'ACADEMIC',
         branchId: demoAdmin.branchId,
         subjectId: smokeSubject!.id,
-        isPublished: true,
+        isPublished: false,
       },
     });
     createdBatchIds.push(smokeBatch1.id);
@@ -413,7 +413,7 @@ async function runSmokeTests() {
         type: 'ADMISSION',
         branchId: demoAdmin.branchId,
         subjectId: smokeSubject!.id,
-        isPublished: true,
+        isPublished: false,
       },
     });
     createdBatchIds.push(smokeBatch2.id);
@@ -692,6 +692,36 @@ async function runSmokeTests() {
       allPublicTeachers;
     recordCheck('20', 'Public landing data endpoints', c20Passed, `All 200s, public teachers verified`);
 
+    // Check 20b: Public branch filtering (only branches with published batches included)
+    const branchesPayload = c20Branches.body?.data?.items || c20Branches.body?.data || [];
+    const filterBranches = c20Filters.body?.data?.branches || [];
+    const statsBranchCount = c20Stats.body?.data?.branches;
+
+    const noZeroBatchBranchesInBranches =
+      Array.isArray(branchesPayload) &&
+      branchesPayload.length > 0 &&
+      branchesPayload.every((b: any) => b.publishedBatchCount > 0 && b.name !== 'Demo Branch');
+
+    const noZeroBatchBranchesInFilters =
+      Array.isArray(filterBranches) &&
+      filterBranches.every((b: any) => b.name !== 'Demo Branch');
+
+    const statsMatchesFilteredCount =
+      statsBranchCount === branchesPayload.length &&
+      statsBranchCount === filterBranches.length;
+
+    const c20bPassed =
+      noZeroBatchBranchesInBranches &&
+      noZeroBatchBranchesInFilters &&
+      statsMatchesFilteredCount;
+
+    recordCheck(
+      '20b',
+      'Public branches & stats strictly omit branches without published batches',
+      c20bPassed,
+      `Branches: ${branchesPayload.length}, Filter branches: ${filterBranches.length}, Stats count: ${statsBranchCount}, Demo excluded: true`
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
     // CONTENT CHECKS (21 - 24)
     // ─────────────────────────────────────────────────────────────────────────
@@ -844,8 +874,8 @@ async function runSmokeTests() {
       _count: { _all: true },
     });
     const dbTotalCount = dbFeeGroups.reduce((acc, g) => acc + g._count._all, 0);
-    const chartStatuses = c25AdminFee.body?.data?.statuses || [];
-    const chartTotalCount = chartStatuses.reduce((acc: number, s: any) => acc + (s.count || 0), 0);
+    const statusSummary = c25AdminFee.body?.data?.statusSummary || {};
+    const chartTotalCount = Object.values(statusSummary).reduce((acc: number, s: any) => acc + (s.count || 0), 0);
     const feeMatch = dbTotalCount === chartTotalCount;
 
     const c25Passed =
@@ -932,7 +962,7 @@ async function runSmokeTests() {
 
     // Aux server with invalid key returns 503
     let c27Aux503 = false;
-    await withAuxServer(5002, { GEMINI_API_KEY: 'invalid_bad_key_12345' }, async (auxUrl) => {
+    await withAuxServer(5002, { GEMINI_API_KEY: 'invalid_bad_key_12345', LLM_STUB: '' }, async (auxUrl) => {
       const res = await req('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1056,12 +1086,42 @@ async function runSmokeTests() {
       if (createdGuardianLinkIds.length > 0) {
         await prisma.guardianLink.deleteMany({ where: { id: { in: createdGuardianLinkIds } } });
       }
+
+      // Delete test dependent answers, options, questions, and results before test deletion
+      await prisma.result.deleteMany({
+        where: { OR: [{ testId: { in: createdTestIds } }, { test: { title: { startsWith: 'SMOKE-' } } }] },
+      });
+      await prisma.studentAnswer.deleteMany({
+        where: {
+          OR: [
+            { question: { testId: { in: createdTestIds } } },
+            { question: { test: { title: { startsWith: 'SMOKE-' } } } },
+          ],
+        },
+      });
+      await prisma.option.deleteMany({
+        where: {
+          OR: [
+            { question: { testId: { in: createdTestIds } } },
+            { question: { test: { title: { startsWith: 'SMOKE-' } } } },
+          ],
+        },
+      });
+      await prisma.question.deleteMany({
+        where: {
+          OR: [
+            { testId: { in: createdTestIds } },
+            { test: { title: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+
       if (createdTestIds.length > 0) {
-        // Test deletes cascade questions, options, studentAnswers, and results
         await prisma.test.deleteMany({ where: { id: { in: createdTestIds } } });
       }
+      await prisma.test.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
       if (createdBatchIds.length > 0) {
-        await prisma.test.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.enrollment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.routineSlot.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.review.deleteMany({ where: { batchId: { in: createdBatchIds } } });
@@ -1069,6 +1129,8 @@ async function runSmokeTests() {
         await prisma.feePayment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.batch.deleteMany({ where: { id: { in: createdBatchIds } } });
       }
+      await prisma.batch.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
+
       if (createdUserIds.length > 0) {
         await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
       }
@@ -1078,9 +1140,8 @@ async function runSmokeTests() {
       if (createdNewsletterEmails.length > 0) {
         await prisma.newsletterSubscriber.deleteMany({ where: { email: { in: createdNewsletterEmails } } });
       }
+
       // Delete any stray SMOKE- tagged items
-      await prisma.test.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
-      await prisma.batch.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
       await prisma.contactMessage.deleteMany({ where: { email: { contains: 'smoke' } } });
       await prisma.user.deleteMany({ where: { email: { contains: 'smoke' } } });
       console.log('Smoke test fixtures cleaned up successfully.');

@@ -246,6 +246,18 @@ function classifyError(error: unknown): LLMError {
     return new LLMUnavailableError('LLM request timed out', error);
   }
 
+  if (
+    status === 404 ||
+    err?.code === 'NOT_FOUND' ||
+    lowerMsg.includes('not found') ||
+    lowerMsg.includes('not supported') ||
+    lowerMsg.includes('is not available') ||
+    lowerMsg.includes('invalid model') ||
+    lowerMsg.includes('models/')
+  ) {
+    return new LLMUnavailableError(`Configured LLM model is not available or rejected by provider: ${message}`, error);
+  }
+
   return new LLMUnavailableError(message || 'Failed to communicate with LLM provider', error);
 }
 
@@ -310,8 +322,7 @@ export async function callLLM(options: CallLLMOptions): Promise<string> {
   const contents = formatMessages(options.messages);
 
   // 5. Build request configuration
-  const rawModel = env.LLM_MODEL || 'gemini-3.5-flash-lite';
-  const model = rawModel === 'gemini-2.5-flash' ? 'gemini-3.5-flash-lite' : rawModel;
+  const model = env.LLM_MODEL || 'gemini-3.5-flash-lite';
   const maxOutputTokens = options.maxTokens ?? (isChat ? 600 : 800);
   const temperature = options.temperature ?? (isChat ? 0.3 : 0.2);
 

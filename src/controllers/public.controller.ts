@@ -475,7 +475,13 @@ export async function getPublicStats(req: Request, res: Response) {
 
     const [publishedBatches, branches, publicTeachers, activeStudents, ratingAgg] = await Promise.all([
       prisma.batch.count({ where: { isPublished: true, slug: { not: null } } }),
-      prisma.branch.count(),
+      prisma.branch.count({
+        where: {
+          batches: {
+            some: { isPublished: true, slug: { not: null } },
+          },
+        },
+      }),
       prisma.user.count({ where: { role: Role.TEACHER, isPublicProfile: true } }),
       prisma.user.count({ where: { role: Role.STUDENT, enrollments: { some: { status: 'ACTIVE' } } } }),
       prisma.review.aggregate({ _avg: { rating: true } }),
@@ -525,9 +531,16 @@ export async function getPublicBranches(req: Request, res: Response) {
     const { page, limit } = parseResult.data;
     const { skip, take } = parsePagination({ page, limit }, { defaultLimit: 12, maxLimit: 50 });
 
+    const branchWhere: Prisma.BranchWhereInput = {
+      batches: {
+        some: { isPublished: true, slug: { not: null } },
+      },
+    };
+
     const [total, branches] = await Promise.all([
-      prisma.branch.count(),
+      prisma.branch.count({ where: branchWhere }),
       prisma.branch.findMany({
+        where: branchWhere,
         skip,
         take,
         orderBy: { name: 'asc' },

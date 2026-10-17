@@ -14,8 +14,8 @@ const envSchema = z.object({
   GOOGLE_DEFAULT_BRANCH_ID: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
   LLM_MODEL: z
-    .preprocess((val) => (val === '' || val === undefined ? 'gemini-2.5-flash' : val), z.string())
-    .default('gemini-2.5-flash'),
+    .preprocess((val) => (val === '' || val === undefined ? 'gemini-3.5-flash-lite' : val), z.string())
+    .default('gemini-3.5-flash-lite'),
   LLM_DAILY_LIMIT: z
     .preprocess((val) => (val === '' || val === undefined ? 200 : val), z.coerce.number().int().positive())
     .default(200),

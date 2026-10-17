@@ -309,8 +309,8 @@ export async function callLLM(options: CallLLMOptions): Promise<string> {
   const contents = formatMessages(options.messages);
 
   // 5. Build request configuration
-  const rawModel = env.LLM_MODEL || 'gemini-3.8-flash';
-  const model = rawModel === 'gemini-2.5-flash' ? 'gemini-3.8-flash' : rawModel;
+  const rawModel = env.LLM_MODEL || 'gemini-3.5-flash-lite';
+  const model = rawModel === 'gemini-2.5-flash' ? 'gemini-3.5-flash-lite' : rawModel;
   const maxOutputTokens = options.maxTokens ?? (isChat ? 600 : 800);
   const temperature = options.temperature ?? (isChat ? 0.3 : 0.2);
 

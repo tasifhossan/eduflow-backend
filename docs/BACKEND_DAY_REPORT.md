@@ -101,7 +101,7 @@ During the execution of the smoke test suite, the following real bugs were detec
 ### 4. LLM Deprecation and Client Timeout
 - **File**: `src/utils/llm.ts`
 - **Issue**: Google GenAI deprecated model name `gemini-2.5-flash` for new users (returning 404 ApiError). Furthermore, default 15s timeout caused HTTP 504 Deadline Exceeded when upstream API had high latency.
-- **Fix**: Added model fallback to `gemini-3.8-flash`, increased client timeout to 30,000ms, and added test stub mode (`LLM_STUB=true`) for deterministic quota guard testing.
+- **Fix**: Added model fallback to `gemini-3.5-flash-lite`, increased client timeout to 30,000ms, and added test stub mode (`LLM_STUB=true`) for deterministic quota guard testing.
 
 ### 5. Monolithic Auth Rate Limiter Cross-Contamination
 - **File**: `src/index.ts`

@@ -59,7 +59,7 @@
 
 - **Legacy Batches Archiving**: Set `isPublished = false` on 4 legacy batches (`class-8-physics`, `class-8-math`, `audit-batch-101`, `batch-x`). All associated enrollments, attendance, and payments were preserved.
 - **Orphan Branch Deletion**: Confirmed 0 users, 0 batches, and 0 notices on orphan "Dhanmondi Branch" (`cmtuahlrj0005ujx8i7qrvy21`) and purged the row. Active seeded branch `branch-dhanmondi-branch` remains untouched.
-- **Zero-Relation Test Account Pruning**: Deleted 5 zero-relation test accounts (`admin_test6@eduflow.com`, `admin_task7@eduflow.com`, `audit_admin@eduflow.com`, `audit_student2@eduflow.com`, `unlinked_student_...`). Zero-relation `SUPER_ADMIN` test accounts were preserved pending replacement.
+- **Zero-Relation Test Account Pruning**: Deleted all 8 zero-relation legacy test accounts: 5 non-superadmin accounts (`admin_test6@eduflow.com`, `admin_task7@eduflow.com`, `audit_admin@eduflow.com`, `audit_student2@eduflow.com`, `unlinked_student_...`) and all 3 legacy `SUPER_ADMIN` test accounts (`superadmin_test@eduflow.com`, `super_task7@eduflow.com`, `audit_super@eduflow.com`). Exactly one verified active `SUPER_ADMIN` remains (`super_admin@eduflow.com`).
 - **Targeted Password Neutralization**: Reset passwords to unprinted cryptographically secure random bcrypt hashes for `teacher@eduflow.com` and accounts matching `audit_*`, `studentA_*`, `studentB_*`, `linked_student_*`, and `guardian_*`. 63 production, seed, and demo accounts remained untouched.
 - **Superadmin Script**: Added `scripts/set-superadmin.ts` to create/update a `SUPER_ADMIN` from `SUPERADMIN_EMAIL` and `SUPERADMIN_PASSWORD` (min 12 characters) with zero password or hash output.
 

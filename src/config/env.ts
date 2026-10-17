@@ -12,8 +12,13 @@ const envSchema = z.object({
   FRONTEND_URL: z.string().min(1, 'FRONTEND_URL is required'),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_DEFAULT_BRANCH_ID: z.string().optional(),
-  LLM_API_KEY: z.string().optional(),
-  LLM_MODEL: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  LLM_MODEL: z
+    .preprocess((val) => (val === '' || val === undefined ? 'gemini-2.5-flash' : val), z.string())
+    .default('gemini-2.5-flash'),
+  LLM_DAILY_LIMIT: z
+    .preprocess((val) => (val === '' || val === undefined ? 200 : val), z.coerce.number().int().positive())
+    .default(200),
   DEMO_MODE: z.string().optional(),
 });
 

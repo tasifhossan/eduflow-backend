@@ -260,18 +260,28 @@ function getGeminiClient(): GoogleGenAI {
   if (stubClient) {
     return stubClient;
   }
+  if (process.env.LLM_STUB === 'true') {
+    return {
+      models: {
+        generateContent: async () => ({
+          text: 'Hello from EduFlow AI assistant! Here are our available batches and schedules.',
+          candidates: [{ finishReason: 'STOP' }],
+        }),
+      },
+    } as any;
+  }
   const apiKey = env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     throw new LLMUnavailableError('GEMINI_API_KEY is not configured');
   }
   return new GoogleGenAI({
     apiKey,
-    httpOptions: { timeout: 15000 },
+    httpOptions: { timeout: 30000 },
   });
 }
 
 /**
- * Invokes Google Gemini with quota guards, concurrency limit (2), 15s timeout,
+ * Invokes Google Gemini with quota guards, concurrency limit (2), 30s timeout,
  * and chat response caching.
  */
 export async function callLLM(options: CallLLMOptions): Promise<string> {
@@ -299,13 +309,14 @@ export async function callLLM(options: CallLLMOptions): Promise<string> {
   const contents = formatMessages(options.messages);
 
   // 5. Build request configuration
-  const model = env.LLM_MODEL || 'gemini-2.5-flash';
+  const rawModel = env.LLM_MODEL || 'gemini-3.8-flash';
+  const model = rawModel === 'gemini-2.5-flash' ? 'gemini-3.8-flash' : rawModel;
   const maxOutputTokens = options.maxTokens ?? (isChat ? 600 : 800);
   const temperature = options.temperature ?? (isChat ? 0.3 : 0.2);
 
   const config: any = {
-    abortSignal: AbortSignal.timeout(15000),
-    httpOptions: { timeout: 15000 },
+    abortSignal: AbortSignal.timeout(30000),
+    httpOptions: { timeout: 30000 },
     maxOutputTokens,
     temperature,
   };

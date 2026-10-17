@@ -75,7 +75,6 @@ export async function chatWithAi(req: Request, res: Response) {
         select: {
           id: true,
           name: true,
-          code: true,
           feeType: true,
           feeAmount: true,
           branch: { select: { id: true, name: true, address: true } },
@@ -86,7 +85,7 @@ export async function chatWithAi(req: Request, res: Response) {
         },
       }),
       prisma.branch.findMany({
-        select: { id: true, name: true, address: true, phone: true, email: true },
+        select: { id: true, name: true, address: true },
         orderBy: { name: 'asc' },
       }),
       prisma.faqItem.findMany({
@@ -97,13 +96,13 @@ export async function chatWithAi(req: Request, res: Response) {
 
     // Build concise knowledge representation
     const branchKnowledge = branches
-      .map((b) => `- ${b.name}: Address: ${b.address || 'Dhaka'}, Phone: ${b.phone || 'N/A'}, Email: ${b.email || 'N/A'}`)
+      .map((b) => `- ${b.name}: Address: ${b.address || 'Dhaka'}`)
       .join('\n');
 
     const batchKnowledge = batches
       .map(
         (b) =>
-          `- ${b.name} (${b.code || 'N/A'}): Subject: ${b.subject.name}, Branch: ${b.branch?.name || 'N/A'}, Fee: ৳${b.feeAmount} (${b.feeType}), Routine: ${formatRoutine(b.routineSlots)}`
+          `- ${b.name}: Subject: ${b.subject.name}, Branch: ${b.branch?.name || 'N/A'}, Fee: ৳${b.feeAmount} (${b.feeType}), Routine: ${formatRoutine(b.routineSlots)}`
       )
       .join('\n');
 

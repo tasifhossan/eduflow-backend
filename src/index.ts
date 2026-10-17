@@ -58,7 +58,7 @@ const apiLimiter = rateLimit({
   },
 });
 
-const authLimiter = rateLimit({
+const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
@@ -67,6 +67,32 @@ const authLimiter = rateLimit({
     res.status(429).json({
       success: false,
       message: 'Too many requests, please try again later.',
+    });
+  },
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many registration requests, please try again later.',
+    });
+  },
+});
+
+const googleLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many Google authentication requests, please try again later.',
     });
   },
 });
@@ -98,9 +124,9 @@ const demoLimiter = rateLimit({
 });
 
 app.use('/api', apiLimiter);
-app.post('/api/auth/login', authLimiter);
-app.post('/api/auth/register', authLimiter);
-app.post('/api/auth/google', authLimiter);
+app.post('/api/auth/login', loginLimiter);
+app.post('/api/auth/register', registerLimiter);
+app.post('/api/auth/google', googleLimiter);
 app.post('/api/auth/demo', demoLimiter);
 
 // SEC-02: Exact origins only, no vercel.app suffix match

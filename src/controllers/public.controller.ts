@@ -189,12 +189,15 @@ export async function getPublicBatches(req: Request, res: Response) {
     // Sort items
     switch (sort) {
       case 'fee_asc':
+      case 'fee-asc':
         items.sort((a, b) => a.fee - b.fee);
         break;
       case 'fee_desc':
+      case 'fee-desc':
         items.sort((a, b) => b.fee - a.fee);
         break;
       case 'rating':
+      case 'rating-desc':
         items.sort((a, b) => b.avgRating - a.avgRating || b.reviewCount - a.reviewCount);
         break;
       case 'popular':

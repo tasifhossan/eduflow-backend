@@ -5,3 +5,7 @@ node_modules
 /generated/prisma
 /dist
 
+# local documentation (kept on device, not tracked in git)
+docs/
+
+

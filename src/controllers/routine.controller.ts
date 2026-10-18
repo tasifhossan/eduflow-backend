@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { createRoutineSlotSchema } from '../validators/routine.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function createRoutineSlot(req: Request, res: Response) {
   try {
@@ -92,6 +91,23 @@ export async function getRoutineByBatch(req: Request, res: Response) {
         success: false,
         message: 'Forbidden: Batch does not belong to your branch',
       });
+    }
+
+    // SEC-09: STUDENT access requires an ACTIVE enrollment in that batch; otherwise 403.
+    if (req.user.role === Role.STUDENT) {
+      const activeEnrollment = await prisma.enrollment.findFirst({
+        where: {
+          studentId: req.user.userId,
+          batchId,
+          status: 'ACTIVE',
+        },
+      });
+      if (!activeEnrollment) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Active enrollment required',
+        });
+      }
     }
 
     const slots = await prisma.routineSlot.findMany({

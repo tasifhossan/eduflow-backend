@@ -1,9 +1,8 @@
 import { Request, Response } from 'express';
-import { PrismaClient, QuestionType } from '@prisma/client';
+import { QuestionType } from '@prisma/client';
 import { createQuestionSchema } from '../validators/test.validator';
 import { z } from 'zod';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 // Helper to verify test ownership
 async function verifyTestOwnership(testId: string, branchId: string): Promise<boolean> {

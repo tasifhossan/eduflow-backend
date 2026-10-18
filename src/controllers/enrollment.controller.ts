@@ -1,9 +1,8 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { createStudentSchema, enrollStudentSchema } from '../validators/enrollment.validator';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function createStudent(req: Request, res: Response) {
   try {

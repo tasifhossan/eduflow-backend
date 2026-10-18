@@ -1,8 +1,6 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 const createSubjectSchema = z.object({
   name: z.string().min(2, 'Subject name must be at least 2 characters long'),

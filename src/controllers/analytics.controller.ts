@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { getBatchChapterWeakSpots } from '../utils/analytics';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 // GET /api/batches/:batchId/analytics
 // ADMIN / TEACHER only — scoped to caller's branchId

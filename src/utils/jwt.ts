@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
 import { Role } from '@prisma/client';
+import { env } from '../config/env';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-eduflow';
+const JWT_SECRET = env.JWT_SECRET;
 
 export interface TokenPayload {
   userId: string;

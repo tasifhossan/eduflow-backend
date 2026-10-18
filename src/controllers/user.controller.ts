@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { z } from 'zod';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 const updateUserBranchSchema = z.object({
   branchId: z.string().min(1, 'Branch ID is required'),

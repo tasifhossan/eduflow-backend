@@ -1,10 +1,9 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { markAttendanceSchema } from '../validators/attendance.validator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
-
-const prisma = new PrismaClient();
+import prisma from '../utils/prisma';
 
 export async function markAttendance(req: Request, res: Response) {
   try {

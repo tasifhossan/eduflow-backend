@@ -1,10 +1,10 @@
 import { Request, Response } from 'express';
-import { PrismaClient, Role, QuestionType } from '@prisma/client';
+import { Role, QuestionType } from '@prisma/client';
+import prisma from '../utils/prisma';
 import { submitAnswersSchema, gradeWrittenAnswerSchema } from '../validators/submission.validator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
-
-const prisma = new PrismaClient();
+import { escapeHtml } from '../utils/escapeHtml';
 
 export async function submitTest(req: Request, res: Response) {
   try {
@@ -51,6 +51,27 @@ export async function submitTest(req: Request, res: Response) {
       });
     }
 
+    // EXAM-02: Validate exam timing window
+    const now = new Date();
+    const testDate = new Date(test.testDate);
+
+    if (now < testDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Test has not started yet',
+      });
+    }
+
+    if (test.durationMinutes !== null && test.durationMinutes !== undefined) {
+      const deadline = new Date(testDate.getTime() + (test.durationMinutes * 60 + 60) * 1000); // 60s grace
+      if (now > deadline) {
+        return res.status(400).json({
+          success: false,
+          message: 'Test submission deadline has passed',
+        });
+      }
+    }
+
     // 2. Verify the student is enrolled in the batch
     const enrollment = await prisma.enrollment.findFirst({
       where: {
@@ -66,25 +87,22 @@ export async function submitTest(req: Request, res: Response) {
       });
     }
 
-    // 3. Verify they haven't submitted already
-    const existingResult = await prisma.result.findUnique({
-      where: {
-        studentId_testId: {
-          studentId,
-          testId,
-        },
-      },
-    });
-
-    if (existingResult) {
-      return res.status(400).json({
-        success: false,
-        message: 'Test has already been submitted by this student',
-      });
-    }
-
-    // Run scoring & creation inside a transaction
+    // Run scoring & creation inside a transaction with duplicate check inside
     const finalResult = await prisma.$transaction(async (tx) => {
+      // EXAM-03: Move already-submitted check inside the transaction
+      const existingResult = await tx.result.findUnique({
+        where: {
+          studentId_testId: {
+            studentId,
+            testId,
+          },
+        },
+      });
+
+      if (existingResult) {
+        throw new Error('ALREADY_SUBMITTED');
+      }
+
       let totalScore = 0;
       const createdAnswers = [];
 
@@ -154,7 +172,13 @@ export async function submitTest(req: Request, res: Response) {
         submittedAt: finalResult.result.submittedAt,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.message === 'ALREADY_SUBMITTED' || error?.code === 'P2002') {
+      return res.status(400).json({
+        success: false,
+        message: 'Test has already been submitted by this student',
+      });
+    }
     console.error('Submit test error:', error);
     return res.status(500).json({
       success: false,
@@ -283,13 +307,13 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:#6366f1">Test Result Available</h2>
-                <p>Dear ${recipients.student.name},</p>
-                <p>Your test result for <strong>${testWithBatch?.title ?? 'Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                <p>Dear ${escapeHtml(recipients.student.name)},</p>
+                <p>Your test result for <strong>${escapeHtml(testWithBatch?.title ?? 'Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${updatedResult.totalMarksObtained}</td></tr>
-                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(updatedResult.totalMarksObtained))}</td></tr>
+                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
                 </table>
                 <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
               </div>
@@ -306,13 +330,13 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:#6366f1">Test Result Available</h2>
-                <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
-                <p>Test result for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${testWithBatch?.title ?? 'Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                <p>Dear ${escapeHtml(guardian.name || 'Parent/Guardian')},</p>
+                <p>Test result for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> for <strong>${escapeHtml(testWithBatch?.title ?? 'Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${updatedResult.totalMarksObtained}</td></tr>
-                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(updatedResult.totalMarksObtained))}</td></tr>
+                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
                 </table>
                 <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
               </div>
@@ -540,13 +564,13 @@ export async function saveBatchManualResults(req: Request, res: Response) {
                 `
                 <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                   <h2 style="color:#6366f1">Test Result Available</h2>
-                  <p>Dear ${recipients.student.name},</p>
-                  <p>Your test result for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                  <p>Dear ${escapeHtml(recipients.student.name)},</p>
+                  <p>Your test result for <strong>${escapeHtml(testWithBatch?.title ?? 'Offline Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
                   <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${marksObtained}</td></tr>
-                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(marksObtained))}</td></tr>
+                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
                   </table>
                   <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
                 </div>
@@ -563,13 +587,13 @@ export async function saveBatchManualResults(req: Request, res: Response) {
                 `
                 <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                   <h2 style="color:#6366f1">Test Result Available</h2>
-                  <p>Dear ${guardian.name || 'Parent/Guardian'},</p>
-                  <p>Test result for your child <strong>${recipients.student?.name || 'Student'}</strong> for <strong>${testWithBatch?.title ?? 'Offline Test'}</strong> in <strong>${testWithBatch?.batch.name ?? 'Batch'}</strong> has been published:</p>
+                  <p>Dear ${escapeHtml(guardian.name || 'Parent/Guardian')},</p>
+                  <p>Test result for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> for <strong>${escapeHtml(testWithBatch?.title ?? 'Offline Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
                   <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.title ?? 'N/A'}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch?.batch.name ?? 'N/A'}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${marksObtained}</td></tr>
-                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${testWithBatch.totalMarks}</td></tr>` : ''}
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
+                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(marksObtained))}</td></tr>
+                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
                   </table>
                   <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
                 </div>
@@ -621,6 +645,8 @@ export async function getStudentResult(req: Request, res: Response) {
             title: true,
             type: true,
             totalMarks: true,
+            testDate: true,
+            durationMinutes: true,
           },
         },
       },
@@ -646,7 +672,7 @@ export async function getStudentResult(req: Request, res: Response) {
               select: {
                 id: true,
                 text: true,
-                isCorrect: true, // Leak correct answers ONLY after submission (which is guaranteed here!)
+                isCorrect: true,
               },
             },
           },
@@ -665,12 +691,35 @@ export async function getStudentResult(req: Request, res: Response) {
       },
     });
 
+    // EXAM-01: for STUDENT callers, strip isCorrect from options until now > testDate + durationMinutes. If durationMinutes is null, treat the end as testDate. Staff roles are unaffected.
+    let sanitizedAnswers = answers;
+    if (req.user.role === Role.STUDENT) {
+      const now = new Date();
+      const testDate = new Date(result.test.testDate);
+      const testEndTime = result.test.durationMinutes
+        ? new Date(testDate.getTime() + result.test.durationMinutes * 60 * 1000)
+        : testDate;
+
+      if (now <= testEndTime) {
+        sanitizedAnswers = answers.map((ans) => ({
+          ...ans,
+          question: {
+            ...ans.question,
+            options: ans.question.options.map((opt) => {
+              const { isCorrect, ...restOpt } = opt;
+              return restOpt;
+            }) as any,
+          },
+        }));
+      }
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Student test result retrieved successfully',
       data: {
         result,
-        answers,
+        answers: sanitizedAnswers,
       },
     });
   } catch (error) {

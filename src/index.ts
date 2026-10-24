@@ -33,6 +33,8 @@ import chartsRouter from './routes/charts.routes';
 import meRouter from './routes/me.routes';
 import aiRouter from './routes/ai.routes';
 import auditRouter from './routes/audit.routes';
+import settingsRouter from './routes/settings.routes';
+import { requireFeature } from './middleware/featureFlag.middleware';
 
 const app = express();
 const PORT = env.PORT || 5000;
@@ -166,8 +168,9 @@ app.use('/api', resourceRouter);
 app.use('/api', noticeRouter);
 app.use('/api', guardianRouter);
 app.use('/api', practiceRouter);
-app.use('/api/ai', aiRouter);
+app.use('/api/ai', requireFeature('aiAssistant'), aiRouter);
 app.use('/api/audit-logs', auditRouter);
+app.use('/api/settings', settingsRouter);
 
 
 // Global Error Handler

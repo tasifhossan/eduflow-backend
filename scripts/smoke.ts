@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -46,7 +46,17 @@ async function req(
   baseUrl: string = BASE_URL
 ): Promise<{ status: number; headers: Headers; body: any; rawText: string }> {
   const url = endpoint.startsWith('http') ? endpoint : `${baseUrl}${endpoint}`;
-  const res = await fetch(url, options);
+  let res: Response;
+  try {
+    res = await fetch(url, options);
+  } catch (err: any) {
+    if (err.cause?.code === 'ECONNRESET' || err.message?.includes('fetch failed')) {
+      await new Promise((r) => setTimeout(r, 200));
+      res = await fetch(url, options);
+    } else {
+      throw err;
+    }
+  }
   const rawText = await res.text();
   let body: any = null;
   try {
@@ -147,6 +157,12 @@ async function runSmokeTests() {
       cwd: process.cwd(),
       env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true' },
       stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    mainServerChild.stderr?.on('data', (d: Buffer) => {
+      console.error(`[MAIN SERVER STDERR]: ${d.toString()}`);
+    });
+    mainServerChild.on('exit', (code: any, sig: any) => {
+      console.log(`[MAIN SERVER EXITED]: code=${code}, signal=${sig}`);
     });
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 400));
@@ -1365,6 +1381,162 @@ async function runSmokeTests() {
     );
 
     // ─────────────────────────────────────────────────────────────────────────
+    // CENTER SETTINGS, FEATURE FLAGS, INIT & DEPLOY CHECKS (39 - 44)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Obtain SUPER_ADMIN credentials for settings checks
+    const saUserForSettings = await prisma.user.findFirst({
+      where: { role: Role.SUPER_ADMIN, isActive: true },
+    });
+    if (!saUserForSettings) {
+      throw new Error('No active SUPER_ADMIN user found in database for smoke checks');
+    }
+    const superAdminToken = jwt.sign(
+      { userId: saUserForSettings.id, role: Role.SUPER_ADMIN, branchId: saUserForSettings.branchId },
+      env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+    const superAdminCookie = `token=${superAdminToken}`;
+
+    // Check 39: Settings GET/PATCH authorization (SUPER_ADMIN only)
+    const c39NoAuth = await req('/api/settings');
+    const c39Admin = await req('/api/settings', { headers: { Cookie: adminCookie } });
+    const c39SuperAdminGet = await req('/api/settings', { headers: { Cookie: superAdminCookie } });
+    const c39Passed =
+      c39NoAuth.status === 401 &&
+      c39Admin.status === 403 &&
+      c39SuperAdminGet.status === 200 &&
+      c39SuperAdminGet.body?.data?.key === 'center';
+    recordCheck(
+      '39',
+      'Settings GET/PATCH access control (SUPER_ADMIN only)',
+      c39Passed,
+      `NoAuth: ${c39NoAuth.status}, Admin: ${c39Admin.status}, SuperAdmin: ${c39SuperAdminGet.status}`
+    );
+
+    // Check 40: Settings input validation (hex color, url, phone)
+    const c40BadHex = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ primaryColor: 'invalid-blue' }),
+    });
+    const c40BadUrl = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ logoUrl: 'ftp://invalidscheme.com/logo.png' }),
+    });
+    const c40BadPhone = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ contactPhone: 'bad-phone-number' }),
+    });
+    const c40Passed =
+      c40BadHex.status === 400 &&
+      c40BadUrl.status === 400 &&
+      c40BadPhone.status === 400;
+    recordCheck(
+      '40',
+      'Settings PATCH strict validation (hex colors, https URLs, phone)',
+      c40Passed,
+      `BadHex: ${c40BadHex.status}, BadUrl: ${c40BadUrl.status}, BadPhone: ${c40BadPhone.status}`
+    );
+
+    // Check 41: Public center endpoint has zero private fields
+    const c41Res = await req('/api/public/center');
+    const c41Data = c41Res.body?.data || {};
+    const privateKeysFound = ['receiptHeader', 'receiptFooter', 'academicYearStartMonth', 'createdAt', 'updatedAt', 'id', 'key'].filter(
+      (k) => k in c41Data
+    );
+    const c41Passed =
+      c41Res.status === 200 &&
+      !!c41Data.name &&
+      !!c41Data.features &&
+      privateKeysFound.length === 0;
+    recordCheck(
+      '41',
+      'Public center endpoint (/api/public/center) strips private fields',
+      c41Passed,
+      c41Passed
+        ? `Status 200, name: "${c41Data.name}", 0 private fields exposed`
+        : `Status: ${c41Res.status}, Leaked private keys: ${privateKeysFound.join(', ')}`
+    );
+
+    // Check 42: Feature flag runtime gating and re-enabling
+    // Disable blog feature
+    const c42PatchOff = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { blog: false } }),
+    });
+    const c42GatedRes = await req('/api/blog');
+    // Re-enable blog feature
+    const c42PatchOn = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { blog: true } }),
+    });
+    const c42UngatedRes = await req('/api/blog');
+    const c42Passed =
+      c42PatchOff.status === 200 &&
+      c42GatedRes.status === 404 &&
+      c42GatedRes.body?.message === 'Not available' &&
+      c42PatchOn.status === 200 &&
+      c42UngatedRes.status === 200;
+    recordCheck(
+      '42',
+      'Feature flag runtime gating (404 Not available) and re-enabling',
+      c42Passed,
+      `Gated: ${c42GatedRes.status} (${c42GatedRes.body?.message}), Re-enabled: ${c42UngatedRes.status}`
+    );
+
+    // Check 43: init-center safety refusal on populated database
+    let c43RefusalOutput = '';
+    let c43ExitCode = 0;
+    try {
+      c43RefusalOutput = execSync('npx tsx scripts/init-center.ts --dry-run', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      c43ExitCode = 0;
+    } catch (e: any) {
+      c43ExitCode = e.status || 1;
+      c43RefusalOutput = (e.stdout || '') + (e.stderr || '');
+    }
+    const c43Passed =
+      c43ExitCode !== 0 &&
+      c43RefusalOutput.includes('Refusing to initialize: center already initialized or users exist in database');
+    recordCheck(
+      '43',
+      'init-center refuses execution on populated database',
+      c43Passed,
+      `ExitCode: ${c43ExitCode}, Refusal message detected: ${c43Passed}`
+    );
+
+    // Check 44: check-deploy fails when DEMO_MODE=true
+    let c44DeployOutput = '';
+    let c44ExitCode = 0;
+    try {
+      c44DeployOutput = execSync('npx tsx scripts/check-deploy.ts', {
+        encoding: 'utf8',
+        env: { ...process.env, DEMO_MODE: 'true' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      c44ExitCode = 0;
+    } catch (e: any) {
+      c44ExitCode = e.status || 1;
+      c44DeployOutput = (e.stdout || '') + (e.stderr || '');
+    }
+    const c44Passed =
+      c44ExitCode !== 0 &&
+      c44DeployOutput.includes('[FAIL] DEMO_MODE is disabled');
+    recordCheck(
+      '44',
+      'check-deploy fails with non-zero exit when DEMO_MODE=true',
+      c44Passed,
+      `ExitCode: ${c44ExitCode}, FAIL line detected: ${c44Passed}`
+    );
+
+    // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1372,17 +1544,22 @@ async function runSmokeTests() {
     let c29RateLimited = false;
     let attemptsMade = 0;
     for (let i = 1; i <= 11; i++) {
-      const res = await req('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: 'admin@demo.eduflow.local',
-          password: 'definitely-wrong-password',
-        }),
-      });
-      attemptsMade = i;
-      if (res.status === 429) {
-        c29RateLimited = true;
+      try {
+        const res = await req('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identifier: 'admin@demo.eduflow.local',
+            password: 'definitely-wrong-password',
+          }),
+        });
+        attemptsMade = i;
+        if (res.status === 429) {
+          c29RateLimited = true;
+          break;
+        }
+      } catch (err: any) {
+        console.error(`[CHECK 29 ATTEMPT ${i} ERROR]:`, err.message || err);
         break;
       }
     }
@@ -1480,6 +1657,16 @@ async function runSmokeTests() {
       console.log('Smoke test fixtures cleaned up successfully.');
     } catch (cleanupErr) {
       console.error('Error cleaning up fixtures:', cleanupErr);
+    }
+
+    if (mainServerChild?.pid) {
+      try {
+        if (process.platform === 'win32') {
+          spawn(`taskkill /pid ${mainServerChild.pid} /f /t`, { shell: true });
+        } else {
+          mainServerChild.kill('SIGTERM');
+        }
+      } catch {}
     }
   }
 

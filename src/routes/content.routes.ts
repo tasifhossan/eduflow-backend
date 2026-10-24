@@ -16,6 +16,7 @@ import {
   updateContactMessageStatus,
   subscribeNewsletter,
 } from '../controllers/content.controller';
+import { requireFeature } from '../middleware/featureFlag.middleware';
 
 const router = Router();
 
@@ -47,17 +48,18 @@ const newsletterRateLimiter = rateLimit({
 });
 
 // 1. Blog
-router.get('/blog', getBlogPosts);
-router.get('/blog/:slug', getBlogPostBySlug);
+router.get('/blog', requireFeature('blog'), getBlogPosts);
+router.get('/blog/:slug', requireFeature('blog'), getBlogPostBySlug);
 
 // 2. Testimonials & FAQ
-router.get('/testimonials', getTestimonials);
+router.get('/testimonials', requireFeature('testimonials'), getTestimonials);
 router.get('/faq', getFaqItems);
 
 // 3. Reviews
-router.get('/batches/:batchId/reviews', getBatchReviews);
+router.get('/batches/:batchId/reviews', requireFeature('reviews'), getBatchReviews);
 router.post(
   '/batches/:batchId/reviews',
+  requireFeature('reviews'),
   authenticate,
   authorize(Role.STUDENT),
   createBatchReview
@@ -81,6 +83,6 @@ router.patch(
 );
 
 // 5. Newsletter
-router.post('/newsletter', newsletterRateLimiter, subscribeNewsletter);
+router.post('/newsletter', requireFeature('newsletter'), newsletterRateLimiter, subscribeNewsletter);
 
 export default router;

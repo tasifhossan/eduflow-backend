@@ -5,9 +5,15 @@ import crypto from 'crypto';
 const prisma = new PrismaClient();
 
 async function main() {
-  if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-    throw new Error('Demo seeding is not allowed in production unless DEMO_MODE is set to true.');
+  if (process.env.NODE_ENV === 'production' || process.env.ALLOW_DEMO_SEED !== 'true') {
+    throw new Error(
+      'REFUSING TO SEED: Demo content seeding is strictly forbidden in production and requires ALLOW_DEMO_SEED="true" in development.'
+    );
   }
+
+  console.log('================================================================');
+  console.log(' WARNING: Seeding demo/sample content. Do NOT use on production!');
+  console.log('================================================================');
 
   const isReset = process.argv.includes('--reset');
   console.log(`Seeding demo environment... (mode: ${isReset ? 'RESET & SEED' : 'IDEMPOTENT UPSERT'})`);

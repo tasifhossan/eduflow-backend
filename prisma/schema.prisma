@@ -532,3 +532,30 @@ model FaqItem {
 
   @@index([category, sortOrder])
 }
+
+model CenterSettings {
+  id                     String   @id @default(cuid())
+  key                    String   @unique @default("center")
+  name                   String   @default("EduFlow Coaching")
+  shortName              String   @default("EduFlow")
+  tagline                String   @default("Modern Coaching Center Management Platform")
+  logoUrl                String?
+  faviconUrl             String?
+  primaryColor           String   @default("#4f46e5")
+  contactEmail           String   @default("contact@eduflow.local")
+  contactPhone           String   @default("01700000000")
+  whatsapp               String?
+  address                String   @default("Dhaka, Bangladesh")
+  socials                Json?
+  currency               String   @default("BDT")
+  currencySymbol         String   @default("৳")
+  timezone               String   @default("Asia/Dhaka")
+  defaultLocale          String   @default("en")
+  academicYearStartMonth Int      @default(1)
+  receiptHeader          String?
+  receiptFooter          String?
+  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":true,\"showPoweredBy\":true}")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+

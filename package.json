@@ -12,10 +12,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "db:seed": "prisma db seed"
-  },
-  "prisma": {
-    "seed": "npx tsx prisma/seed.ts"
+    "init-center": "tsx scripts/init-center.ts",
+    "check:deploy": "tsx scripts/check-deploy.ts",
+    "seed:demo": "tsx prisma/seed-demo-content.ts"
   },
   "keywords": [],
   "author": "",

@@ -12,11 +12,21 @@ export async function getSignedUploadParams(req: Request, res: Response) {
 
     const timestamp = Math.round(new Date().getTime() / 1000);
     const folder = (req.query.folder as string) || 'eduflow_resources';
+    const isBranding =
+      folder.includes('branding') ||
+      req.query.type === 'branding' ||
+      folder.includes('logo') ||
+      folder.includes('favicon');
 
     const paramsToSign: Record<string, any> = {
       timestamp,
       folder,
     };
+
+    if (isBranding) {
+      paramsToSign.allowed_formats = 'png,jpg,jpeg,webp';
+      paramsToSign.max_bytes = 2 * 1024 * 1024; // 2MB max for branding
+    }
 
     const apiSecret = process.env.CLOUDINARY_API_SECRET;
     if (!apiSecret) {
@@ -37,6 +47,8 @@ export async function getSignedUploadParams(req: Request, res: Response) {
         cloudName: process.env.CLOUDINARY_CLOUD_NAME,
         apiKey: process.env.CLOUDINARY_API_KEY,
         folder,
+        allowed_formats: paramsToSign.allowed_formats,
+        max_bytes: paramsToSign.max_bytes,
       },
     });
   } catch (error) {

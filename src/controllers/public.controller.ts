@@ -7,6 +7,7 @@ import {
   publicPaginationQuerySchema,
   batchSlugParamSchema,
 } from '../validators/public.validator';
+import { getCenterSettings } from '../services/settings.service';
 
 // In-memory cache for GET /stats (5 minutes)
 interface CachedStats {
@@ -154,6 +155,9 @@ export async function getPublicBatches(req: Request, res: Response) {
       });
     }
 
+    const centerSettings = await getCenterSettings();
+    const showFees = (centerSettings.homepage as any)?.showFees !== false;
+
     // Attach computed metrics
     let items = candidateBatches.map((b) => {
       const stats = ratingMap.get(b.id) || { avgRating: 0, reviewCount: 0 };
@@ -171,10 +175,10 @@ export async function getPublicBatches(req: Request, res: Response) {
         description: desc,
         subject: { id: b.subject.id, name: b.subject.name },
         branch: { id: b.branch.id, name: b.branch.name },
-        fee: b.feeAmount,
+        fee: showFees ? b.feeAmount : null,
         type: b.type,
-        avgRating: stats.avgRating,
-        reviewCount: stats.reviewCount,
+        avgRating: stats.reviewCount > 0 ? stats.avgRating : null,
+        reviewCount: stats.reviewCount || 0,
         enrolledCount: b._count.enrollments,
         nextSchedule: formatScheduleSummary(b.routineSlots),
         createdAt: b.createdAt,
@@ -183,22 +187,26 @@ export async function getPublicBatches(req: Request, res: Response) {
 
     // Filter by minRating if requested
     if (minRating !== undefined) {
-      items = items.filter((item) => item.avgRating >= minRating);
+      items = items.filter((item) => item.avgRating !== null && item.avgRating >= minRating);
     }
 
     // Sort items
     switch (sort) {
       case 'fee_asc':
       case 'fee-asc':
-        items.sort((a, b) => a.fee - b.fee);
+        if (showFees) {
+          items.sort((a, b) => (a.fee ?? 0) - (b.fee ?? 0));
+        }
         break;
       case 'fee_desc':
       case 'fee-desc':
-        items.sort((a, b) => b.fee - a.fee);
+        if (showFees) {
+          items.sort((a, b) => (b.fee ?? 0) - (a.fee ?? 0));
+        }
         break;
       case 'rating':
       case 'rating-desc':
-        items.sort((a, b) => b.avgRating - a.avgRating || b.reviewCount - a.reviewCount);
+        items.sort((a, b) => (b.avgRating ?? 0) - (a.avgRating ?? 0) || b.reviewCount - a.reviewCount);
         break;
       case 'popular':
         items.sort((a, b) => b.enrolledCount - a.enrolledCount || b.reviewCount - a.reviewCount);
@@ -338,7 +346,10 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
       reviewCount += count;
     }
 
-    const avgRating = reviewCount > 0 ? Number((totalScore / reviewCount).toFixed(1)) : 0;
+    const avgRating = reviewCount > 0 ? Number((totalScore / reviewCount).toFixed(1)) : null;
+
+    const centerSettings = await getCenterSettings();
+    const showFees = (centerSettings.homepage as any)?.showFees !== false;
 
     const teacherInfo =
       batch.teacher && batch.teacher.isPublicProfile
@@ -368,7 +379,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
       gallery: batch.gallery,
       highlights: batch.highlights,
       syllabus: batch.syllabus,
-      fee: batch.feeAmount,
+      fee: showFees ? batch.feeAmount : null,
       feeType: batch.feeType,
       type: batch.type,
       classLevel: batch.classLevel,
@@ -386,7 +397,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
         slug: rb.slug!,
         name: rb.name,
         imageUrl: rb.imageUrl,
-        fee: rb.feeAmount,
+        fee: showFees ? rb.feeAmount : null,
         type: rb.type,
         branch: rb.branch,
         subject: rb.subject,

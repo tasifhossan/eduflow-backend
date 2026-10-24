@@ -234,6 +234,7 @@ model Batch {
   resources        Resource[]
   practiceSessions PracticeSession[]
   reviews          Review[]
+  contactMessages  ContactMessage[]
 
   @@index([branchId])
   @@index([subjectId])
@@ -505,16 +506,22 @@ model Testimonial {
 }
 
 model ContactMessage {
-  id        String               @id @default(cuid())
-  name      String
-  email     String
-  subject   String
-  message   String
-  status    ContactMessageStatus @default(NEW)
-  createdAt DateTime             @default(now())
+  id                String               @id @default(cuid())
+  name              String
+  email             String?
+  phone             String?
+  subject           String?
+  message           String?
+  interestedBatchId String?
+  interestedBatch   Batch?               @relation(fields: [interestedBatchId], references: [id], onDelete: SetNull)
+  interestedGrade   String?
+  source            String               @default("WEBSITE")
+  status            ContactMessageStatus @default(NEW)
+  createdAt         DateTime             @default(now())
 
   @@index([status])
   @@index([createdAt])
+  @@index([interestedBatchId])
 }
 
 model NewsletterSubscriber {
@@ -555,7 +562,9 @@ model CenterSettings {
   receiptHeader          String?
   receiptFooter          String?
   features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":true,\"showPoweredBy\":true}")
+  homepage               Json     @default("{\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
+
 

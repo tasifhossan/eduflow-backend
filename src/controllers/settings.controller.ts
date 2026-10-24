@@ -76,6 +76,15 @@ export async function updateSettings(req: Request, res: Response) {
       }
     }
 
+    // Deep merge homepage object if provided
+    if (parseResult.data.homepage) {
+      const existingHomepage = (currentSettings.homepage as Record<string, unknown>) || {};
+      updateData.homepage = {
+        ...existingHomepage,
+        ...parseResult.data.homepage,
+      };
+    }
+
     const updated = await prisma.centerSettings.update({
       where: { key: 'center' },
       data: updateData as any,

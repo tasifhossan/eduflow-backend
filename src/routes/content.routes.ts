@@ -72,7 +72,7 @@ router.post('/contact', contactRateLimiter, submitContactMessage);
 router.get(
   '/contact',
   authenticate,
-  authorize(Role.SUPER_ADMIN),
+  authorize(Role.SUPER_ADMIN, Role.ADMIN),
   getContactMessages
 );
 router.patch(

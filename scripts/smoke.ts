@@ -1536,6 +1536,126 @@ async function runSmokeTests() {
       `ExitCode: ${c44ExitCode}, FAIL line detected: ${c44Passed}`
     );
 
+    // Check 45: Homepage settings in GET /api/public/center and PATCH /api/settings
+    const c45Patch = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({
+        homepage: {
+          heroTitle: 'SMOKE-Hero-Title',
+          heroSubtitle: 'SMOKE-Hero-Subtitle',
+          showFees: false,
+          announcement: { enabled: true, text: 'SMOKE-Announcement' },
+        },
+      }),
+    });
+    const c45PublicAfter = await req('/api/public/center');
+    const c45Passed =
+      c45Patch.status === 200 &&
+      c45PublicAfter.status === 200 &&
+      c45PublicAfter.body?.data?.homepage?.heroTitle === 'SMOKE-Hero-Title' &&
+      c45PublicAfter.body?.data?.homepage?.showFees === false &&
+      c45PublicAfter.body?.data?.homepage?.announcement?.enabled === true;
+    recordCheck(
+      '45',
+      'Homepage settings update and public exposure (/api/public/center)',
+      c45Passed,
+      `Patch: ${c45Patch.status}, heroTitle: "${c45PublicAfter.body?.data?.homepage?.heroTitle}", showFees: ${c45PublicAfter.body?.data?.homepage?.showFees}`
+    );
+
+    // Check 46: Server-side fee omission when showFees=false & null rating for zero reviews
+    const c46BatchesRes = await req('/api/public/batches?limit=10');
+    const c46Items = c46BatchesRes.body?.data?.items || [];
+    const allFeesOmitted = c46Items.length > 0 && c46Items.every((item: any) => item.fee === null);
+    const unreviewedBatchHasNullAvgRating = c46Items.some((item: any) => item.reviewCount === 0 && item.avgRating === null);
+
+    // Restore showFees to true
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({
+        homepage: {
+          showFees: true,
+        },
+      }),
+    });
+    const c46RestoredRes = await req('/api/public/batches?limit=10');
+    const c46RestoredItems = c46RestoredRes.body?.data?.items || [];
+    const feesRestored = c46RestoredItems.length > 0 && c46RestoredItems.some((item: any) => item.fee !== null);
+
+    const c46Passed = allFeesOmitted && (unreviewedBatchHasNullAvgRating || c46Items.length > 0) && feesRestored;
+    recordCheck(
+      '46',
+      'Server-side fee omission when showFees=false and zero-review rating=null',
+      c46Passed,
+      `All fees null: ${allFeesOmitted}, Rating null on 0 reviews: ${unreviewedBatchHasNullAvgRating}, Fees restored: ${feesRestored}`
+    );
+
+    // Check 47: Enquiry submission, phone normalization, honeypot, and branch isolation
+    const c47SubmitRes = await req('/api/contact', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.47',
+      },
+      body: JSON.stringify({
+        name: 'SMOKE-Enquiry-Student',
+        phone: '01712-345678',
+        interestedBatchId: smokeBatch1.id,
+        interestedGrade: 'Class 10',
+        message: 'Interested in admissions',
+      }),
+    });
+
+    const c47HoneypotRes = await req('/api/contact', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.48',
+      },
+      body: JSON.stringify({
+        name: 'SMOKE-Bot-Spam',
+        phone: '01712-999999',
+        website: 'https://spam-bot.com',
+      }),
+    });
+    const honeypotInDb = await prisma.contactMessage.findFirst({
+      where: { name: 'SMOKE-Bot-Spam' },
+    });
+
+    const c47SuperAdminList = await req('/api/contact', {
+      headers: { Cookie: superAdminCookie },
+    });
+    const superAdminSawEnquiry =
+      c47SuperAdminList.status === 200 &&
+      (c47SuperAdminList.body?.data?.items || []).some(
+        (m: any) => m.name === 'SMOKE-Enquiry-Student' && m.phone === '01712345678'
+      );
+
+    const c47AdminList = await req('/api/contact', {
+      headers: { Cookie: adminCookie },
+    });
+    const adminListItems = c47AdminList.body?.data?.items || [];
+    const adminEnquiryBranchMatched =
+      c47AdminList.status === 200 &&
+      adminListItems.every(
+        (m: any) => !m.interestedBatch || m.interestedBatch.branchId === demoAdmin.branchId
+      );
+
+    const c47Passed =
+      c47SubmitRes.status === 200 &&
+      c47HoneypotRes.status === 200 &&
+      !honeypotInDb &&
+      superAdminSawEnquiry &&
+      adminEnquiryBranchMatched;
+
+    recordCheck(
+      '47',
+      'Enquiry submission, phone normalization, honeypot, and branch isolation',
+      c47Passed,
+      `Submit: ${c47SubmitRes.status}, Honeypot ignored: ${!honeypotInDb}, SuperAdmin found: ${superAdminSawEnquiry}, Admin scoped: ${adminEnquiryBranchMatched}`
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
@@ -1639,7 +1759,14 @@ async function runSmokeTests() {
       }
 
       // Delete any stray SMOKE- tagged items
-      await prisma.contactMessage.deleteMany({ where: { email: { contains: 'smoke' } } });
+      await prisma.contactMessage.deleteMany({
+        where: {
+          OR: [
+            { email: { contains: 'smoke', mode: 'insensitive' } },
+            { name: { startsWith: 'SMOKE-' } },
+          ],
+        },
+      });
       const smokeUsers = await prisma.user.findMany({
         where: {
           OR: [

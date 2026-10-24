@@ -27,6 +27,22 @@ export interface CenterPublicData {
     showPoweredBy?: boolean;
     [key: string]: unknown;
   };
+  homepage: {
+    heroTitle?: string;
+    heroSubtitle?: string;
+    heroImageUrl?: string | null;
+    announcement?: {
+      enabled: boolean;
+      text: string;
+      linkLabel?: string;
+      linkUrl?: string | null;
+    };
+    highlights?: Array<{ label: string; value: string }>;
+    whyChooseUs?: Array<{ title: string; description: string; icon: string }>;
+    admissionSteps?: Array<{ title: string; description: string }>;
+    showFees?: boolean;
+    showPhotoGallery?: boolean;
+  };
 }
 
 let cachedSettings: any = null;
@@ -71,6 +87,17 @@ export async function getCenterSettings(forceRefresh = false) {
           newsletter: true,
           showPoweredBy: true,
         },
+        homepage: {
+          heroTitle: '',
+          heroSubtitle: '',
+          heroImageUrl: null,
+          announcement: { enabled: false, text: '', linkLabel: '', linkUrl: '' },
+          highlights: [],
+          whyChooseUs: [],
+          admissionSteps: [],
+          showFees: true,
+          showPhotoGallery: true,
+        },
       },
     });
   }
@@ -99,6 +126,17 @@ export async function getPublicCenterSettings(forceRefresh = false): Promise<Cen
     timezone: settings.timezone,
     defaultLocale: settings.defaultLocale,
     features: (settings.features as CenterPublicData['features']) || {},
+    homepage: (settings.homepage as CenterPublicData['homepage']) || {
+      heroTitle: '',
+      heroSubtitle: '',
+      heroImageUrl: null,
+      announcement: { enabled: false, text: '', linkLabel: '', linkUrl: '' },
+      highlights: [],
+      whyChooseUs: [],
+      admissionSteps: [],
+      showFees: true,
+      showPhotoGallery: true,
+    },
   };
 }
 

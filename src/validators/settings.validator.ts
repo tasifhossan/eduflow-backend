@@ -23,6 +23,89 @@ const hexColorSchema = z
     message: 'Primary color must be a 6-digit hex code in #RRGGBB format',
   });
 
+export const LUCIDE_ICON_WHITELIST = [
+  'BookOpen',
+  'GraduationCap',
+  'Award',
+  'Users',
+  'Clock',
+  'CheckCircle',
+  'CheckCircle2',
+  'Star',
+  'Shield',
+  'ShieldCheck',
+  'Sparkles',
+  'Target',
+  'Compass',
+  'Lightbulb',
+  'Smile',
+  'Heart',
+  'TrendingUp',
+  'Zap',
+  'HelpCircle',
+  'FileText',
+  'Calendar',
+  'MapPin',
+  'Brain',
+  'Layers',
+  'Flame',
+  'Trophy',
+  'BadgeCheck',
+] as const;
+
+export const homepageSchema = z
+  .object({
+    heroTitle: z.string().trim().max(90).optional(),
+    heroSubtitle: z.string().trim().max(220).optional(),
+    heroImageUrl: httpsUrlSchema,
+    announcement: z
+      .object({
+        enabled: z.boolean().default(false),
+        text: z.string().trim().max(160).default(''),
+        linkLabel: z.string().trim().max(40).optional(),
+        linkUrl: z
+          .string()
+          .trim()
+          .refine((val) => val === '' || val.startsWith('/') || /^https:\/\//i.test(val), {
+            message: 'Must be a relative URL starting with / or an HTTPS URL',
+          })
+          .optional()
+          .nullable(),
+      })
+      .optional(),
+    highlights: z
+      .array(
+        z.object({
+          label: z.string().trim().max(40),
+          value: z.string().trim().max(40),
+        })
+      )
+      .max(4)
+      .optional(),
+    whyChooseUs: z
+      .array(
+        z.object({
+          title: z.string().trim().max(60),
+          description: z.string().trim().max(220),
+          icon: z.enum(LUCIDE_ICON_WHITELIST),
+        })
+      )
+      .max(6)
+      .optional(),
+    admissionSteps: z
+      .array(
+        z.object({
+          title: z.string().trim().max(60),
+          description: z.string().trim().max(220),
+        })
+      )
+      .max(5)
+      .optional(),
+    showFees: z.boolean().optional(),
+    showPhotoGallery: z.boolean().optional(),
+  })
+  .strict();
+
 export const updateSettingsSchema = z
   .object({
     name: z.string().trim().min(2).max(100).optional(),
@@ -65,6 +148,7 @@ export const updateSettingsSchema = z
       })
       .partial()
       .optional(),
+    homepage: homepageSchema.partial().optional(),
   })
   .strict();
 

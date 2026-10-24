@@ -24,28 +24,64 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
 
     const decoded = verifyToken(token);
 
-    // SEC-07: Load user by id from DB, reject 401 if missing/inactive
+    // SEC-07 & Auth Lifecycle: Load user by id from DB, reject 401 if missing/inactive
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: {
         id: true,
         role: true,
         branchId: true,
+        isActive: true,
+        mustChangePassword: true,
+        passwordChangedAt: true,
       },
     });
 
-    if (!user) {
+    if (!user || !user.isActive) {
       return res.status(401).json({
         success: false,
         message: 'Unauthorized: User not found or inactive',
       });
     }
 
+    // Invalidate tokens issued before passwordChangedAt
+    if (user.passwordChangedAt && decoded.iat) {
+      const tokenIatMs = decoded.iat * 1000;
+      // Buffer by 1 second for clock skew
+      if (tokenIatMs < user.passwordChangedAt.getTime() - 1000) {
+        return res.status(401).json({
+          success: false,
+          code: 'SESSION_EXPIRED',
+          message: 'Unauthorized: Session expired due to password change',
+        });
+      }
+    }
+
     req.user = {
       userId: user.id,
       role: user.role,
       branchId: user.branchId,
+      mustChangePassword: user.mustChangePassword,
     };
+
+    // If mustChangePassword is true, block everything except:
+    // GET /api/auth/me, POST /api/auth/change-password, POST /api/auth/logout
+    if (user.mustChangePassword) {
+      const url = req.originalUrl || req.url;
+      const cleanPath = url.split('?')[0];
+      const isAllowed =
+        (req.method === 'GET' && cleanPath === '/api/auth/me') ||
+        (req.method === 'POST' && cleanPath === '/api/auth/change-password') ||
+        (req.method === 'POST' && cleanPath === '/api/auth/logout');
+
+      if (!isAllowed) {
+        return res.status(403).json({
+          success: false,
+          code: 'PASSWORD_CHANGE_REQUIRED',
+          message: 'Password change required before accessing other resources',
+        });
+      }
+    }
 
     next();
   } catch (error) {

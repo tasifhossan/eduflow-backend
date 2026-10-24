@@ -83,6 +83,7 @@ enum ContactMessageStatus {
 model Branch {
   id        String   @id @default(cuid())
   name      String
+  code      String?  @unique
   address   String?
   createdAt DateTime @default(now())
   users     User[]
@@ -93,8 +94,9 @@ model Branch {
 model User {
   id                   String                  @id @default(cuid())
   name                 String
-  email                String                  @unique
-  phone                String?
+  email                String?                 @unique
+  studentCode          String?                 @unique
+  phone                String?                 @unique
   guardianName         String?
   guardianPhone        String?
   password             String
@@ -105,6 +107,11 @@ model User {
   bio                  String?
   headline             String?
   isPublicProfile      Boolean                 @default(false)
+  mustChangePassword   Boolean                 @default(false)
+  isActive             Boolean                 @default(true)
+  lastLoginAt          DateTime?
+  passwordChangedAt    DateTime?
+  deactivatedAt        DateTime?
   createdAt            DateTime                @default(now())
   teachingBatches      Batch[]                 @relation(name: "TeachingBatches")
   enrollments          Enrollment[]
@@ -123,9 +130,45 @@ model User {
   uploadedResources    Resource[]              @relation(name: "UploadedResources")
   practiceSessions     PracticeSession[]
   reviews              Review[]
+  passwordResetTokens  PasswordResetToken[]
 
   @@index([branchId])
   @@index([role])
+  @@index([studentCode])
+  @@index([phone])
+  @@index([isActive])
+}
+
+model PasswordResetToken {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+  createdById String?
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+  branchId   String?
+  metadata   Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([action])
+  @@index([entityType])
+  @@index([actorId])
+  @@index([branchId])
+  @@index([createdAt])
 }
 
 model GuardianInfoChangeLog {

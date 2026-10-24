@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { Role } from '@prisma/client';
 import prisma from '../src/utils/prisma';
@@ -132,6 +133,36 @@ async function runSmokeTests() {
   const createdGuardianLinkIds: string[] = [];
   const createdNewsletterEmails: string[] = [];
   const createdContactMessageIds: string[] = [];
+  let mainServerChild: any = null;
+  let mainIsOnline = false;
+  try {
+    const checkRes = await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(1500) });
+    if (checkRes.ok) mainIsOnline = true;
+  } catch {}
+
+  if (!mainIsOnline) {
+    console.log(`Main backend is not running on ${BASE_URL}. Starting local test server...`);
+    const cliPath = path.resolve('node_modules/tsx/dist/cli.mjs');
+    mainServerChild = spawn(process.execPath, [cliPath, 'src/index.ts'], {
+      cwd: process.cwd(),
+      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true' },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 400));
+      try {
+        const res = await fetch(`${BASE_URL}/api/health`);
+        if (res.ok) {
+          mainIsOnline = true;
+          break;
+        }
+      } catch {}
+    }
+    if (!mainIsOnline) {
+      throw new Error('Failed to start main backend server on port 5000 for smoke tests.');
+    }
+    console.log('Main test server online on port 5000.\n');
+  }
 
   try {
     // 0. PRE-AUTHENTICATION: Login demo roles once
@@ -298,19 +329,13 @@ async function runSmokeTests() {
     const c7Passed = (c7SuperAdmin.status === 400 || c7SuperAdmin.status === 403 || c7SuperAdmin.status === 404) && c7AuxPassed;
     recordCheck('7', 'Demo auth guards', c7Passed, `SUPER_ADMIN rejected (${c7SuperAdmin.status}), DEMO_MODE=false returned 404`);
 
-    // Check 8: POST /api/auth/google garbage token -> 401/400 (never 500); missing body -> 400
-    const c8Garbage = await req('/api/auth/google', {
+    // Check 8: POST /api/auth/google endpoint removed -> 404
+    const c8 = await req('/api/auth/google', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken: 'garbage-invalid-token' }),
+      body: JSON.stringify({ idToken: 'some-token' }),
     });
-    const c8Missing = await req('/api/auth/google', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-    const c8Passed = (c8Garbage.status === 400 || c8Garbage.status === 401) && c8Missing.status === 400;
-    recordCheck('8', 'Google OAuth input validation', c8Passed, `Garbage: ${c8Garbage.status}, Missing: ${c8Missing.status}`);
+    recordCheck('8', 'Google OAuth endpoint removed (404)', c8.status === 404, `Status: ${c8.status}`);
 
     // Check 9 is evaluated throughout and finalized at end of script
 
@@ -1045,6 +1070,301 @@ async function runSmokeTests() {
     recordCheck('28b', 'LLM SDK dependency compliance (@google/genai present, @anthropic-ai/sdk purged)', hasGenAi && noAnthropic, `@google/genai: ${hasGenAi}, Anthropic removed: ${noAnthropic}`);
 
     // ─────────────────────────────────────────────────────────────────────────
+    // AUTH LIFECYCLE & PROVISIONING CHECKS (30 - 38)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Check 30: Staff-only user provisioning (returns temporaryPassword, studentCode, mustChangePassword=true)
+    const phoneNum = '0171234' + String(Date.now()).slice(-4);
+    const c30 = await req('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        name: 'SMOKE-ProvStudent',
+        email: `smoke-prov-${Date.now()}@example.com`,
+        phone: phoneNum,
+        role: 'STUDENT',
+      }),
+    });
+    const c30User = c30.body?.data?.user;
+    const c30TempPass = c30.body?.data?.temporaryPassword;
+    const c30Ident = c30.body?.data?.identifier;
+    if (c30User?.id) createdUserIds.push(c30User.id);
+    const c30Passed =
+      c30.status === 201 &&
+      typeof c30TempPass === 'string' &&
+      c30TempPass.length >= 12 &&
+      c30User?.mustChangePassword === true &&
+      typeof c30User?.studentCode === 'string' &&
+      c30Ident === c30User.studentCode;
+    recordCheck(
+      '30',
+      'Staff provisioning (temporary password & student code)',
+      c30Passed,
+      `Status: ${c30.status}, code: ${c30User?.studentCode}, tempPassLen: ${c30TempPass?.length}`
+    );
+
+    // Check 31: Login by phone, student code, and email
+    const c31Email = await req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: c30User.email,
+        password: c30TempPass,
+      }),
+    });
+    const c31Phone = await req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: '+880' + phoneNum.slice(1),
+        password: c30TempPass,
+      }),
+    });
+    const c31Code = await req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: c30User.studentCode.toLowerCase(),
+        password: c30TempPass,
+      }),
+    });
+    const c31Passed =
+      c31Email.status === 200 &&
+      c31Phone.status === 200 &&
+      c31Code.status === 200 &&
+      c31Email.body?.mustChangePassword === true;
+    recordCheck(
+      '31',
+      'Multi-identifier login (email, normalized phone, student code)',
+      c31Passed,
+      `Email: ${c31Email.status}, Phone (+880): ${c31Phone.status}, Code: ${c31Code.status}`
+    );
+
+    // Check 32: Forced password change gate (PASSWORD_CHANGE_REQUIRED on other endpoints)
+    const tempUserCookie = extractCookie(c31Email.headers);
+    const c32Blocked = await req('/api/me', {
+      headers: { Cookie: tempUserCookie },
+    });
+    const c32MeAllowed = await req('/api/auth/me', {
+      headers: { Cookie: tempUserCookie },
+    });
+    const c32ChangeAllowed = await req('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: tempUserCookie },
+      body: JSON.stringify({
+        currentPassword: c30TempPass,
+        newPassword: 'BrandNewSecurePassword123!',
+      }),
+    });
+    const updatedCookie = extractCookie(c32ChangeAllowed.headers) || tempUserCookie;
+    const c32NowAllowed = await req('/api/me', {
+      headers: { Cookie: updatedCookie },
+    });
+    const c32Passed =
+      c32Blocked.status === 403 &&
+      c32Blocked.body?.code === 'PASSWORD_CHANGE_REQUIRED' &&
+      c32MeAllowed.status === 200 &&
+      c32ChangeAllowed.status === 200 &&
+      c32NowAllowed.status === 200;
+    recordCheck(
+      '32',
+      'Forced password change gate & post-change access',
+      c32Passed,
+      `Blocked: ${c32Blocked.status} (${c32Blocked.body?.code}), Changed: ${c32ChangeAllowed.status}, Unblocked: ${c32NowAllowed.status}`
+    );
+
+    // Check 33: Session invalidation (token issued before passwordChangedAt rejected)
+    const c33OldToken = await req('/api/me', {
+      headers: { Cookie: tempUserCookie },
+    });
+    recordCheck(
+      '33',
+      'Old session invalidation after password change',
+      c33OldToken.status === 401,
+      `Status: ${c33OldToken.status} (${c33OldToken.body?.code || '401'})`
+    );
+
+    // Check 34: Deactivated user rejected immediately on login and token
+    const c34Deactivate = await req(`/api/users/${c30User.id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ isActive: false }),
+    });
+    const c34Login = await req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: c30User.studentCode,
+        password: 'BrandNewSecurePassword123!',
+      }),
+    });
+    const c34Token = await req('/api/me', {
+      headers: { Cookie: updatedCookie },
+    });
+    const c34Passed =
+      c34Deactivate.status === 200 &&
+      c34Login.status === 401 &&
+      c34Token.status === 401;
+    recordCheck(
+      '34',
+      'Account deactivation immediate rejection',
+      c34Passed,
+      `Deactivated: ${c34Deactivate.status}, Login: ${c34Login.status}, Token: ${c34Token.status}`
+    );
+
+    // Check 35: Last SUPER_ADMIN protection
+    const superAdminUser = await prisma.user.findFirst({
+      where: { role: 'SUPER_ADMIN' },
+    });
+    let c35Passed = false;
+    if (superAdminUser) {
+      const superToken = jwt.sign(
+        { userId: superAdminUser.id, role: 'SUPER_ADMIN', branchId: superAdminUser.branchId },
+        env.JWT_SECRET
+      );
+      const c35Res = await req(`/api/users/${superAdminUser.id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: `token=${superToken}` },
+        body: JSON.stringify({ isActive: false }),
+      });
+      c35Passed = c35Res.status === 400;
+      recordCheck(
+        '35',
+        'Last active SUPER_ADMIN protection',
+        c35Passed,
+        `Status: ${c35Res.status}, message: ${c35Res.body?.message}`
+      );
+    } else {
+      recordCheck('35', 'Last active SUPER_ADMIN protection', true, 'Skipped: No SUPER_ADMIN in dev DB');
+    }
+
+    // Check 36: Forgot-password uniform response and single-use token
+    const c36UniformKnown = await req('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: demoStudent.email }),
+    });
+    const c36UniformUnknown = await req('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: 'nonexistent-user-12345@example.com' }),
+    });
+    const rawTestToken = crypto.randomBytes(32).toString('hex');
+    const testHash = crypto.createHash('sha256').update(rawTestToken).digest('hex');
+    await prisma.passwordResetToken.create({
+      data: {
+        userId: demoStudent.id,
+        tokenHash: testHash,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      },
+    });
+    const c36Reset1 = await req('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: rawTestToken,
+        newPassword: 'ResetPasswordSuccess123!',
+      }),
+    });
+    const c36Reset2 = await req('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: rawTestToken,
+        newPassword: 'ResetPasswordAgain456!',
+      }),
+    });
+    const c36Passed =
+      c36UniformKnown.status === 200 &&
+      c36UniformUnknown.status === 200 &&
+      c36UniformKnown.body?.message === c36UniformUnknown.body?.message &&
+      c36Reset1.status === 200 &&
+      c36Reset2.status === 400;
+    recordCheck(
+      '36',
+      'Forgot-password uniform response & single-use token',
+      c36Passed,
+      `Uniform: 200/200, Token used: ${c36Reset1.status}, Reused: ${c36Reset2.status}`
+    );
+
+    // Check 37: Bulk CSV import with partial validation, guardian linking, batch enrollment
+    const importPhone = '0181234' + String(Date.now()).slice(-4);
+    const c37 = await req('/api/users/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        rows: [
+          {
+            name: 'SMOKE-ImportStudent1',
+            phone: importPhone,
+            role: 'STUDENT',
+          },
+          {
+            name: '', // Invalid: missing name
+            phone: '01700000001',
+            role: 'STUDENT',
+          },
+          {
+            name: 'SMOKE-EscalationAdmin',
+            role: 'ADMIN', // Invalid: Admin caller cannot import ADMIN
+          },
+        ],
+      }),
+    });
+    const c37Data = c37.body?.data;
+    const c37Passed =
+      c37.status === 200 &&
+      c37Data?.createdCount === 1 &&
+      c37Data?.skippedCount === 2 &&
+      c37Data?.results?.[0]?.status === 'CREATED' &&
+      typeof c37Data?.results?.[0]?.temporaryPassword === 'string';
+    recordCheck(
+      '37',
+      'Bulk user import with partial validation & credentials',
+      c37Passed,
+      `Status: ${c37.status}, Created: ${c37Data?.createdCount}, Skipped: ${c37Data?.skippedCount}`
+    );
+
+    // Check 38: Audit log scoping and zero sensitive metadata
+    const c38AdminLogs = await req('/api/audit-logs', {
+      headers: { Cookie: adminCookie },
+    });
+    // demoStudent password was reset in Check 36; re-login to obtain fresh active session
+    const freshStudentLogin = await req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: demoStudent.email,
+        password: 'ResetPasswordSuccess123!',
+      }),
+    });
+    const freshStudentCookie = extractCookie(freshStudentLogin.headers);
+    const c38StudentLogs = await req('/api/audit-logs', {
+      headers: { Cookie: freshStudentCookie },
+    });
+    const logs = c38AdminLogs.body?.data?.logs || [];
+    let c38HasSensitiveData = false;
+    for (const log of logs) {
+      if (log.metadata) {
+        const metaStr = JSON.stringify(log.metadata).toLowerCase();
+        if (metaStr.includes('password') || metaStr.includes('hash') || metaStr.includes('token')) {
+          c38HasSensitiveData = true;
+        }
+      }
+    }
+    const c38Passed =
+      c38AdminLogs.status === 200 &&
+      c38StudentLogs.status === 403 &&
+      logs.length > 0 &&
+      !c38HasSensitiveData;
+    recordCheck(
+      '38',
+      'Audit log access control & zero sensitive metadata',
+      c38Passed,
+      `Admin: ${c38AdminLogs.status}, Student: ${c38StudentLogs.status}, Logs: ${logs.length}, Sensitive: ${c38HasSensitiveData}`
+    );
+
+    // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1143,7 +1463,20 @@ async function runSmokeTests() {
 
       // Delete any stray SMOKE- tagged items
       await prisma.contactMessage.deleteMany({ where: { email: { contains: 'smoke' } } });
-      await prisma.user.deleteMany({ where: { email: { contains: 'smoke' } } });
+      const smokeUsers = await prisma.user.findMany({
+        where: {
+          OR: [
+            { email: { contains: 'smoke', mode: 'insensitive' } },
+            { name: { startsWith: 'SMOKE-' } },
+          ],
+        },
+        select: { id: true },
+      });
+      if (smokeUsers.length > 0) {
+        const sIds = smokeUsers.map(u => u.id);
+        await prisma.auditLog.deleteMany({ where: { OR: [{ actorId: { in: sIds } }, { entityId: { in: sIds } }] } });
+        await prisma.user.deleteMany({ where: { id: { in: sIds } } });
+      }
       console.log('Smoke test fixtures cleaned up successfully.');
     } catch (cleanupErr) {
       console.error('Error cleaning up fixtures:', cleanupErr);

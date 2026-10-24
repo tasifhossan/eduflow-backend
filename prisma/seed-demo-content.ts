@@ -5,11 +5,15 @@ import crypto from 'crypto';
 const prisma = new PrismaClient();
 
 async function main() {
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('Database seeding is strictly forbidden in production');
+  if (process.env.NODE_ENV === 'production' || process.env.ALLOW_DEMO_SEED !== 'true') {
+    throw new Error(
+      'REFUSING TO SEED: Demo content seeding is strictly forbidden in production and requires ALLOW_DEMO_SEED="true" in development.'
+    );
   }
 
-  console.log('Seeding EduFlow database with real coaching center content...');
+  console.log('================================================================');
+  console.log(' WARNING: Seeding demo/sample content. Do NOT use on production!');
+  console.log('================================================================');
 
   const collectedImageUrls: string[] = [];
   function trackImage(url: string | null | undefined): string {

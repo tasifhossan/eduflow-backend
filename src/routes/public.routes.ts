@@ -7,14 +7,20 @@ import {
   getPublicBranches,
   getPublicTeachers,
 } from '../controllers/public.controller';
+import { getPublicCenter } from '../controllers/settings.controller';
+import { requireFeature } from '../middleware/featureFlag.middleware';
 
 const router = Router();
 
-router.get('/batches', getPublicBatches);
-router.get('/batches/:slug', getPublicBatchBySlug);
-router.get('/filters', getPublicFilters);
-router.get('/stats', getPublicStats);
-router.get('/branches', getPublicBranches);
-router.get('/teachers', getPublicTeachers);
+// Center branding facts & feature flags (always public for runtime site bootstrap)
+router.get('/center', getPublicCenter);
+
+// Public course & center directory (gated by publicSite feature flag)
+router.get('/batches', requireFeature('publicSite'), getPublicBatches);
+router.get('/batches/:slug', requireFeature('publicSite'), getPublicBatchBySlug);
+router.get('/filters', requireFeature('publicSite'), getPublicFilters);
+router.get('/stats', requireFeature('publicSite'), getPublicStats);
+router.get('/branches', requireFeature('publicSite'), getPublicBranches);
+router.get('/teachers', requireFeature('publicSite'), getPublicTeachers);
 
 export default router;

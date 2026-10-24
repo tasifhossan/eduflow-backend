@@ -6,6 +6,7 @@ declare global {
       userId: string;
       role: Role;
       branchId: string;
+      mustChangePassword?: boolean;
     }
 
     interface Request {

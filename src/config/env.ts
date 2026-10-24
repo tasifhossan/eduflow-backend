@@ -10,8 +10,6 @@ const envSchema = z.object({
   DIRECT_URL: z.string().optional(),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
   FRONTEND_URL: z.string().min(1, 'FRONTEND_URL is required'),
-  GOOGLE_CLIENT_ID: z.string().optional(),
-  GOOGLE_DEFAULT_BRANCH_ID: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
   LLM_MODEL: z
     .preprocess((val) => (val === '' || val === undefined ? 'gemini-3.5-flash-lite' : val), z.string())

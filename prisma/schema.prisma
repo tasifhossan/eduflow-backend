@@ -83,6 +83,7 @@ enum ContactMessageStatus {
 model Branch {
   id        String   @id @default(cuid())
   name      String
+  code      String?  @unique
   address   String?
   createdAt DateTime @default(now())
   users     User[]
@@ -93,8 +94,9 @@ model Branch {
 model User {
   id                   String                  @id @default(cuid())
   name                 String
-  email                String                  @unique
-  phone                String?
+  email                String?                 @unique
+  studentCode          String?                 @unique
+  phone                String?                 @unique
   guardianName         String?
   guardianPhone        String?
   password             String
@@ -105,6 +107,11 @@ model User {
   bio                  String?
   headline             String?
   isPublicProfile      Boolean                 @default(false)
+  mustChangePassword   Boolean                 @default(false)
+  isActive             Boolean                 @default(true)
+  lastLoginAt          DateTime?
+  passwordChangedAt    DateTime?
+  deactivatedAt        DateTime?
   createdAt            DateTime                @default(now())
   teachingBatches      Batch[]                 @relation(name: "TeachingBatches")
   enrollments          Enrollment[]
@@ -123,9 +130,45 @@ model User {
   uploadedResources    Resource[]              @relation(name: "UploadedResources")
   practiceSessions     PracticeSession[]
   reviews              Review[]
+  passwordResetTokens  PasswordResetToken[]
 
   @@index([branchId])
   @@index([role])
+  @@index([studentCode])
+  @@index([phone])
+  @@index([isActive])
+}
+
+model PasswordResetToken {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+  createdById String?
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+  branchId   String?
+  metadata   Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([action])
+  @@index([entityType])
+  @@index([actorId])
+  @@index([branchId])
+  @@index([createdAt])
 }
 
 model GuardianInfoChangeLog {
@@ -191,6 +234,7 @@ model Batch {
   resources        Resource[]
   practiceSessions PracticeSession[]
   reviews          Review[]
+  contactMessages  ContactMessage[]
 
   @@index([branchId])
   @@index([subjectId])
@@ -462,16 +506,22 @@ model Testimonial {
 }
 
 model ContactMessage {
-  id        String               @id @default(cuid())
-  name      String
-  email     String
-  subject   String
-  message   String
-  status    ContactMessageStatus @default(NEW)
-  createdAt DateTime             @default(now())
+  id                String               @id @default(cuid())
+  name              String
+  email             String?
+  phone             String?
+  subject           String?
+  message           String?
+  interestedBatchId String?
+  interestedBatch   Batch?               @relation(fields: [interestedBatchId], references: [id], onDelete: SetNull)
+  interestedGrade   String?
+  source            String               @default("WEBSITE")
+  status            ContactMessageStatus @default(NEW)
+  createdAt         DateTime             @default(now())
 
   @@index([status])
   @@index([createdAt])
+  @@index([interestedBatchId])
 }
 
 model NewsletterSubscriber {
@@ -489,3 +539,32 @@ model FaqItem {
 
   @@index([category, sortOrder])
 }
+
+model CenterSettings {
+  id                     String   @id @default(cuid())
+  key                    String   @unique @default("center")
+  name                   String   @default("EduFlow Coaching")
+  shortName              String   @default("EduFlow")
+  tagline                String   @default("Modern Coaching Center Management Platform")
+  logoUrl                String?
+  faviconUrl             String?
+  primaryColor           String   @default("#4f46e5")
+  contactEmail           String   @default("contact@eduflow.local")
+  contactPhone           String   @default("01700000000")
+  whatsapp               String?
+  address                String   @default("Dhaka, Bangladesh")
+  socials                Json?
+  currency               String   @default("BDT")
+  currencySymbol         String   @default("৳")
+  timezone               String   @default("Asia/Dhaka")
+  defaultLocale          String   @default("en")
+  academicYearStartMonth Int      @default(1)
+  receiptHeader          String?
+  receiptFooter          String?
+  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":true,\"showPoweredBy\":true}")
+  homepage               Json     @default("{\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+

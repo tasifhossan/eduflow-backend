@@ -32,6 +32,9 @@ import tablesRouter from './routes/tables.routes';
 import chartsRouter from './routes/charts.routes';
 import meRouter from './routes/me.routes';
 import aiRouter from './routes/ai.routes';
+import auditRouter from './routes/audit.routes';
+import settingsRouter from './routes/settings.routes';
+import { requireFeature } from './middleware/featureFlag.middleware';
 
 const app = express();
 const PORT = env.PORT || 5000;
@@ -84,19 +87,6 @@ const registerLimiter = rateLimit({
   },
 });
 
-const googleLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req: Request, res: Response) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many Google authentication requests, please try again later.',
-    });
-  },
-});
-
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 120,
@@ -126,7 +116,6 @@ const demoLimiter = rateLimit({
 app.use('/api', apiLimiter);
 app.post('/api/auth/login', loginLimiter);
 app.post('/api/auth/register', registerLimiter);
-app.post('/api/auth/google', googleLimiter);
 app.post('/api/auth/demo', demoLimiter);
 
 // SEC-02: Exact origins only, no vercel.app suffix match
@@ -179,7 +168,9 @@ app.use('/api', resourceRouter);
 app.use('/api', noticeRouter);
 app.use('/api', guardianRouter);
 app.use('/api', practiceRouter);
-app.use('/api/ai', aiRouter);
+app.use('/api/ai', requireFeature('aiAssistant'), aiRouter);
+app.use('/api/audit-logs', auditRouter);
+app.use('/api/settings', settingsRouter);
 
 
 // Global Error Handler

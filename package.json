@@ -12,10 +12,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "db:seed": "prisma db seed"
-  },
-  "prisma": {
-    "seed": "npx tsx prisma/seed.ts"
+    "init-center": "tsx scripts/init-center.ts",
+    "check:deploy": "tsx scripts/check-deploy.ts",
+    "seed:demo": "tsx prisma/seed-demo-content.ts"
   },
   "keywords": [],
   "author": "",
@@ -31,7 +30,6 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.1",
-    "google-auth-library": "^11.3.1",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^9.0.6",

@@ -17,6 +17,7 @@ import {
   updateContactStatusSchema,
   newsletterSubscribeSchema,
 } from '../validators/content.validator';
+import { normalizePhone } from '../utils/phone';
 
 /**
  * Masks full name to show first name and last initial only (e.g., "Arif Hossain" -> "Arif H.").
@@ -584,7 +585,7 @@ export async function submitContactMessage(req: Request, res: Response) {
       });
     }
 
-    const { name, email, subject, message, website } = parseResult.data;
+    const { name, email, phone, subject, message, interestedBatchId, interestedGrade, source, website } = parseResult.data;
 
     // Honeypot check: If filled, silently succeed without saving
     if (website && website.trim().length > 0) {
@@ -594,12 +595,19 @@ export async function submitContactMessage(req: Request, res: Response) {
       });
     }
 
+    const normalizedPhone = phone ? normalizePhone(phone) : null;
+    const batchIdToSet = interestedBatchId && interestedBatchId.trim().length > 0 ? interestedBatchId.trim() : null;
+
     await prisma.contactMessage.create({
       data: {
-        name,
-        email,
-        subject,
-        message,
+        name: name.trim(),
+        email: email && email.trim().length > 0 ? email.trim() : null,
+        phone: normalizedPhone,
+        subject: subject && subject.trim().length > 0 ? subject.trim() : 'Enquiry',
+        message: message && message.trim().length > 0 ? message.trim() : null,
+        interestedBatchId: batchIdToSet,
+        interestedGrade: interestedGrade && interestedGrade.trim().length > 0 ? interestedGrade.trim() : null,
+        source: source || 'WEBSITE',
         status: ContactMessageStatus.NEW,
       },
       select: {
@@ -622,7 +630,8 @@ export async function submitContactMessage(req: Request, res: Response) {
 
 /**
  * GET /contact
- * SUPER_ADMIN only: paginated list of contact messages, filterable by status.
+ * SUPER_ADMIN & ADMIN list of contact messages/enquiries, filterable by status.
+ * ADMIN is scoped to their branch's batches; unassigned enquiries are visible to SUPER_ADMIN only.
  */
 export async function getContactMessages(req: Request, res: Response) {
   try {
@@ -638,9 +647,24 @@ export async function getContactMessages(req: Request, res: Response) {
     const { page, limit, status } = parseResult.data;
     const { skip, take } = parsePagination({ page, limit }, { defaultLimit: 15, maxLimit: 50 });
 
+    const userRole = req.user?.role;
+    const userBranchId = req.user?.branchId;
+
     const where: Prisma.ContactMessageWhereInput = {};
     if (status) {
       where.status = status;
+    }
+
+    if (userRole === Role.ADMIN) {
+      if (!userBranchId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Admin is not associated with any branch',
+        });
+      }
+      where.interestedBatch = {
+        branchId: userBranchId,
+      };
     }
 
     const [total, items] = await Promise.all([
@@ -654,8 +678,20 @@ export async function getContactMessages(req: Request, res: Response) {
           id: true,
           name: true,
           email: true,
+          phone: true,
           subject: true,
           message: true,
+          interestedBatchId: true,
+          interestedBatch: {
+            select: {
+              id: true,
+              name: true,
+              branchId: true,
+              branch: { select: { id: true, name: true } },
+            },
+          },
+          interestedGrade: true,
+          source: true,
           status: true,
           createdAt: true,
         },

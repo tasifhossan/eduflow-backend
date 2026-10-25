@@ -157,6 +157,40 @@ async function runChecks(): Promise<boolean> {
     reason: !!settingsRow ? undefined : 'CenterSettings row with key "center" was not found',
   });
 
+  // Check 9b: CenterSettings does not contain default placeholders or default name
+  let settingsNoPlaceholders = true;
+  let placeholderReason: string | undefined;
+
+  if (settingsRow) {
+    const issues: string[] = [];
+    if (settingsRow.name === 'EduFlow Coaching' || settingsRow.name === 'Coaching Center') {
+      issues.push(`default center name "${settingsRow.name}"`);
+    }
+    if (settingsRow.tagline === 'Modern Coaching Center Management Platform') {
+      issues.push('placeholder tagline "Modern Coaching Center Management Platform"');
+    }
+    if (typeof settingsRow.contactEmail === 'string' && settingsRow.contactEmail.endsWith('.local')) {
+      issues.push(`placeholder contactEmail "${settingsRow.contactEmail}"`);
+    }
+    if (settingsRow.contactPhone === '01700000000') {
+      issues.push('placeholder contactPhone "01700000000"');
+    }
+
+    if (issues.length > 0) {
+      settingsNoPlaceholders = false;
+      placeholderReason = `Settings contain unconfigured placeholders: ${issues.join(', ')}`;
+    }
+  } else if (!dbReachable) {
+    settingsNoPlaceholders = false;
+    placeholderReason = 'Cannot verify settings placeholders because database is unreachable';
+  }
+
+  results.push({
+    name: 'CenterSettings contains no unconfigured placeholders or default name',
+    pass: settingsNoPlaceholders,
+    reason: settingsNoPlaceholders ? undefined : placeholderReason,
+  });
+
   // Check 10: Exactly one or more active SUPER_ADMIN exists
   let superAdminCount = 0;
   if (dbReachable) {

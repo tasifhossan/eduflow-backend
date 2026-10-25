@@ -28,6 +28,8 @@ export interface CenterPublicData {
     [key: string]: unknown;
   };
   homepage: {
+    heroBadge?: string;
+    heroPoints?: string[];
     heroTitle?: string;
     heroSubtitle?: string;
     heroImageUrl?: string | null;
@@ -86,10 +88,12 @@ export async function getCenterSettings(forceRefresh = false) {
           blog: true,
           reviews: true,
           testimonials: true,
-          newsletter: true,
+          newsletter: false,
           showPoweredBy: true,
         },
         homepage: {
+          heroBadge: '',
+          heroPoints: [],
           heroTitle: '',
           heroSubtitle: '',
           heroImageUrl: null,
@@ -129,6 +133,8 @@ export async function getPublicCenterSettings(forceRefresh = false): Promise<Cen
     defaultLocale: settings.defaultLocale,
     features: (settings.features as CenterPublicData['features']) || {},
     homepage: (settings.homepage as CenterPublicData['homepage']) || {
+      heroBadge: '',
+      heroPoints: [],
       heroTitle: '',
       heroSubtitle: '',
       heroImageUrl: null,

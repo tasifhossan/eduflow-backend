@@ -55,6 +55,8 @@ export const LUCIDE_ICON_WHITELIST = [
 
 export const homepageSchema = z
   .object({
+    heroBadge: z.string().trim().max(40).optional(),
+    heroPoints: z.array(z.string().trim().max(30)).max(3).optional(),
     heroTitle: z.string().trim().max(90).optional(),
     heroSubtitle: z.string().trim().max(220).optional(),
     heroImageUrl: httpsUrlSchema,

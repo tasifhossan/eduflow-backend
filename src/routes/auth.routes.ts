@@ -2,6 +2,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { Role } from '@prisma/client';
 import { authenticate, authorize } from '../middleware/auth.middleware';
+import { noCache } from '../middleware/noCache.middleware';
 import {
   register,
   login,
@@ -14,6 +15,9 @@ import {
 } from '../controllers/auth.controller';
 
 const router = Router();
+
+// Apply no-store and no-cache headers across all authentication endpoints
+router.use(noCache);
 
 // Demo login rate limiter: 20 requests per 15 min per IP
 const demoRateLimiter = rateLimit({
@@ -49,6 +53,7 @@ const forgotPasswordLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { keyGeneratorIpFallback: false },
   keyGenerator: (req) => `${req.ip}_${req.body?.identifier || ''}`,
   handler: (_req, res) => {
     res.status(429).json({

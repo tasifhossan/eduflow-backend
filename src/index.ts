@@ -35,6 +35,7 @@ import aiRouter from './routes/ai.routes';
 import auditRouter from './routes/audit.routes';
 import settingsRouter from './routes/settings.routes';
 import { requireFeature } from './middleware/featureFlag.middleware';
+import { noCache } from './middleware/noCache.middleware';
 
 const app = express();
 const PORT = env.PORT || 5000;
@@ -114,6 +115,7 @@ const demoLimiter = rateLimit({
 });
 
 app.use('/api', apiLimiter);
+app.use('/api/auth', noCache);
 app.post('/api/auth/login', loginLimiter);
 app.post('/api/auth/register', registerLimiter);
 app.post('/api/auth/demo', demoLimiter);

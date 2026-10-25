@@ -147,8 +147,8 @@ export async function changePassword(req: Request, res: Response) {
     if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        message: 'Validation failed',
-        data: parseResult.error.flatten(),
+        message: 'Validation failed: New password must be at least 8 characters long',
+        errors: parseResult.error.issues.map((i) => i.message),
       });
     }
 

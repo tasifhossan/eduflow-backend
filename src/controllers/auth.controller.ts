@@ -351,7 +351,6 @@ export async function login(req: Request, res: Response) {
       mustChangePassword: user.mustChangePassword,
       data: {
         user: userSafe,
-        token,
       },
     });
   } catch (error) {
@@ -383,7 +382,7 @@ export async function changePassword(req: Request, res: Response) {
       return res.status(400).json({
         success: false,
         message: 'Validation failed: New password must be at least 10 characters long',
-        data: parseResult.error.flatten(),
+        errors: parseResult.error.issues.map((i) => i.message),
       });
     }
 
@@ -471,7 +470,6 @@ export async function changePassword(req: Request, res: Response) {
     return res.status(200).json({
       success: true,
       message: 'Password changed successfully',
-      data: { token: newToken },
     });
   } catch (error) {
     console.error('Change password error:', error);
@@ -800,7 +798,6 @@ export async function demoLogin(req: Request, res: Response) {
       message: 'Demo login successful',
       data: {
         user,
-        token,
       },
     });
   } catch (error) {

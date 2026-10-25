@@ -20,26 +20,77 @@ interface CheckResult {
 }
 
 const checkResults: CheckResult[] = [];
-let passwordKeyDetected = false;
-const leakedPasswordLocations: string[] = [];
+let secretKeyDetected = false;
+const leakedSecretLocations: string[] = [];
+const trackedTemporaryPasswords = new Set<string>();
+const noStoreViolations: string[] = [];
+let serverCapturedStdout = '';
 
-// Deep-scan for "password" key in JSON response
-function deepScanForPassword(obj: any, location: string): void {
+// Allowed endpoints for temporaryPassword:
+// 1. POST /api/auth/register
+// 2. POST /api/users/import
+// 3. POST /api/users/:id/reset-password
+function isAllowedTemporaryPasswordEndpoint(method: string, endpoint: string): boolean {
+  const normMethod = (method || 'GET').toUpperCase();
+  if (normMethod !== 'POST') return false;
+  return (
+    /^\/api\/auth\/register(?:\?.*)?$/.test(endpoint) ||
+    /^\/api\/users\/import(?:\?.*)?$/.test(endpoint) ||
+    /^\/api\/users\/[^/]+\/reset-password(?:\?.*)?$/.test(endpoint)
+  );
+}
+
+// Deep-scan for disallowed password, hash, or token keys anywhere in response
+function deepScanForSecrets(obj: any, location: string, method: string, endpoint: string): void {
   if (!obj || typeof obj !== 'object') return;
   if (Array.isArray(obj)) {
-    obj.forEach((item, idx) => deepScanForPassword(item, `${location}[${idx}]`));
+    obj.forEach((item, idx) => deepScanForSecrets(item, `${location}[${idx}]`, method, endpoint));
     return;
   }
   for (const [key, value] of Object.entries(obj)) {
-    if (key.toLowerCase() === 'password') {
-      passwordKeyDetected = true;
-      leakedPasswordLocations.push(`${location}.${key}`);
+    const keyLower = key.toLowerCase();
+
+    // Explicit exception: temporaryPassword ONLY on allowed endpoints
+    if (key === 'temporaryPassword') {
+      if (isAllowedTemporaryPasswordEndpoint(method, endpoint)) {
+        if (typeof value === 'string' && value.length > 0) {
+          trackedTemporaryPasswords.add(value);
+        }
+      } else {
+        secretKeyDetected = true;
+        leakedSecretLocations.push(`${location}.${key} (temporaryPassword disallowed on ${method} ${endpoint})`);
+      }
+    } else if (
+      // Non-sensitive boolean or timestamp metadata fields containing 'password'
+      keyLower !== 'mustchangepassword' &&
+      keyLower !== 'passwordchangedat' &&
+      // Check for password, hash, or token keys
+      (/password/i.test(key) || /hash/i.test(key) || /token/i.test(key))
+    ) {
+      secretKeyDetected = true;
+      leakedSecretLocations.push(`${location}.${key}`);
     }
-    deepScanForPassword(value, `${location}.${key}`);
+
+    deepScanForSecrets(value, `${location}.${key}`, method, endpoint);
   }
 }
 
-// Fetch helper with password scanning and cookie handling
+function checkNoStoreHeaders(headers: Headers, method: string, endpoint: string): void {
+  const normMethod = (method || 'GET').toUpperCase();
+  const isAuthEndpoint = /^\/api\/auth(\/|$)/.test(endpoint);
+  const isUsersImport = normMethod === 'POST' && /^\/api\/users\/import(?:\?.*)?$/.test(endpoint);
+  const isUsersReset = normMethod === 'POST' && /^\/api\/users\/[^/]+\/reset-password(?:\?.*)?$/.test(endpoint);
+
+  if (isAuthEndpoint || isUsersImport || isUsersReset) {
+    const cc = (headers.get('cache-control') || '').toLowerCase();
+    const pragma = (headers.get('pragma') || '').toLowerCase();
+    if (!cc.includes('no-store') || !pragma.includes('no-cache')) {
+      noStoreViolations.push(`${normMethod} ${endpoint} (cache-control: "${cc}", pragma: "${pragma}")`);
+    }
+  }
+}
+
+// Fetch helper with password scanning, no-store checking, and cookie handling
 async function req(
   endpoint: string,
   options: RequestInit = {},
@@ -57,11 +108,15 @@ async function req(
       throw err;
     }
   }
+
+  // Verify Cache-Control: no-store and Pragma: no-cache on credential and auth endpoints
+  checkNoStoreHeaders(res.headers, options.method || 'GET', endpoint);
+
   const rawText = await res.text();
   let body: any = null;
   try {
     body = JSON.parse(rawText);
-    deepScanForPassword(body, `${options.method || 'GET'} ${endpoint}`);
+    deepScanForSecrets(body, `${options.method || 'GET'} ${endpoint}`, options.method || 'GET', endpoint);
   } catch {
     body = null;
   }
@@ -92,9 +147,13 @@ async function withAuxServer(
   const child = spawn(process.execPath, [cliPath, 'src/index.ts'], {
     cwd: process.cwd(),
     env: { ...process.env, PORT: String(port), ...envOverrides },
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout?.on('data', (d) => {
+    serverCapturedStdout += d.toString();
   });
   child.stderr?.on('data', (d) => {
+    serverCapturedStdout += d.toString();
     stderrBuf += d.toString();
   });
 
@@ -156,9 +215,13 @@ async function runSmokeTests() {
     mainServerChild = spawn(process.execPath, [cliPath, 'src/index.ts'], {
       cwd: process.cwd(),
       env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true' },
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    mainServerChild.stdout?.on('data', (d: Buffer) => {
+      serverCapturedStdout += d.toString();
     });
     mainServerChild.stderr?.on('data', (d: Buffer) => {
+      serverCapturedStdout += d.toString();
       console.error(`[MAIN SERVER STDERR]: ${d.toString()}`);
     });
     mainServerChild.on('exit', (code: any, sig: any) => {
@@ -1119,13 +1182,30 @@ async function runSmokeTests() {
       `Status: ${c30.status}, code: ${c30User?.studentCode}, tempPassLen: ${c30TempPass?.length}`
     );
 
-    // Check 31: Login by phone, student code, and email
+    // Check 30b: Staff reset password endpoint (POST /api/users/:id/reset-password)
+    const c30bReset = await req(`/api/users/${c30User.id}/reset-password`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    const c30bTempPass = c30bReset.body?.data?.temporaryPassword;
+    const c30bPassed =
+      c30bReset.status === 200 &&
+      typeof c30bTempPass === 'string' &&
+      c30bTempPass.length >= 12;
+    recordCheck(
+      '30b',
+      'Staff password reset via POST /api/users/:id/reset-password',
+      c30bPassed,
+      `Status: ${c30bReset.status}, tempPassLen: ${c30bTempPass?.length}`
+    );
+
+    // Check 31: Login by phone, student code, and email using reset temporary password
     const c31Email = await req('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         identifier: c30User.email,
-        password: c30TempPass,
+        password: c30bTempPass,
       }),
     });
     const c31Phone = await req('/api/auth/login', {
@@ -1133,7 +1213,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         identifier: '+880' + phoneNum.slice(1),
-        password: c30TempPass,
+        password: c30bTempPass,
       }),
     });
     const c31Code = await req('/api/auth/login', {
@@ -1141,7 +1221,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         identifier: c30User.studentCode.toLowerCase(),
-        password: c30TempPass,
+        password: c30bTempPass,
       }),
     });
     const c31Passed =
@@ -1168,7 +1248,7 @@ async function runSmokeTests() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: tempUserCookie },
       body: JSON.stringify({
-        currentPassword: c30TempPass,
+        currentPassword: c30bTempPass,
         newPassword: 'BrandNewSecurePassword123!',
       }),
     });
@@ -1685,14 +1765,65 @@ async function runSmokeTests() {
     }
     recordCheck('29', 'Brute-force login rate limiting (10 attempts max)', c29RateLimited, `Reached 429 on attempt ${attemptsMade}`);
 
-    // Check 9: Password leak check across all recorded responses
+    // Check 9: Secret leak scan, temporary password leak scan in stdout & AuditLog, and Cache-Control headers
+    let tempPassLeakedInStdout = false;
+    const stdoutLeakDetails: string[] = [];
+    for (const tp of trackedTemporaryPasswords) {
+      if (serverCapturedStdout.includes(tp)) {
+        tempPassLeakedInStdout = true;
+        stdoutLeakDetails.push(tp);
+      }
+    }
+
+    const allAuditLogs = await prisma.auditLog.findMany({
+      select: { id: true, action: true, metadata: true },
+    });
+    let tempPassLeakedInAuditLog = false;
+    const auditLeakDetails: string[] = [];
+    for (const log of allAuditLogs) {
+      if (log.metadata) {
+        const metaStr = JSON.stringify(log.metadata);
+        for (const tp of trackedTemporaryPasswords) {
+          if (metaStr.includes(tp)) {
+            tempPassLeakedInAuditLog = true;
+            auditLeakDetails.push(`AuditLog ${log.id} (${log.action})`);
+          }
+        }
+      }
+    }
+
+    const c9Passed =
+      !secretKeyDetected &&
+      !tempPassLeakedInStdout &&
+      !tempPassLeakedInAuditLog &&
+      noStoreViolations.length === 0 &&
+      trackedTemporaryPasswords.size >= 3;
+
+    let c9Details = '';
+    if (secretKeyDetected) {
+      c9Details += `Disallowed secret key leaked at: ${leakedSecretLocations.join(', ')}; `;
+    }
+    if (tempPassLeakedInStdout) {
+      c9Details += `Temporary password leaked in server stdout (${stdoutLeakDetails.length} instances); `;
+    }
+    if (tempPassLeakedInAuditLog) {
+      c9Details += `Temporary password leaked in AuditLog (${auditLeakDetails.join(', ')}); `;
+    }
+    if (noStoreViolations.length > 0) {
+      c9Details += `Missing no-store headers at: ${noStoreViolations.join('; ')}; `;
+    }
+    if (trackedTemporaryPasswords.size < 3) {
+      c9Details += `Expected >= 3 temporary passwords tracked, got ${trackedTemporaryPasswords.size}; `;
+    }
+    if (c9Passed) {
+      c9Details = `All responses free of unauthorized secrets; no-store verified on credential responses; ${trackedTemporaryPasswords.size} temp passwords tracked and absent from server stdout & AuditLog`;
+    }
+
     recordCheck(
       '9',
-      'Zero password leak across all API responses',
-      !passwordKeyDetected,
-      passwordKeyDetected
-        ? `PASSWORD KEY LEAKED at: ${leakedPasswordLocations.join(', ')}`
-        : 'All JSON responses completely free of password fields'
+      'Credential leak scan, stdout/auditlog isolation & no-store headers',
+      c9Passed,
+      c9Details
     );
   } finally {
     // ─────────────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { Role } from '@prisma/client';
 import { authenticate, authorize } from '../middleware/auth.middleware';
 import { branchScope } from '../middleware/branchScope.middleware';
+import { noCache } from '../middleware/noCache.middleware';
 import {
   getUsers,
   updateUserBranch,
@@ -20,7 +21,7 @@ router.get('/', authenticate, authorize(Role.ADMIN, Role.TEACHER), branchScope, 
 router.patch('/:userId/branch', authenticate, authorize(Role.SUPER_ADMIN), updateUserBranch);
 
 // Admin reset of user password
-router.post('/:id/reset-password', authenticate, authorize(Role.ADMIN), adminResetPassword);
+router.post('/:id/reset-password', authenticate, authorize(Role.ADMIN), noCache, adminResetPassword);
 
 // Activate/Deactivate user
 router.patch('/:id/status', authenticate, authorize(Role.ADMIN), updateUserStatus);
@@ -29,6 +30,6 @@ router.patch('/:id/status', authenticate, authorize(Role.ADMIN), updateUserStatu
 router.delete('/:id', authenticate, authorize(Role.ADMIN), deleteUser);
 
 // Bulk CSV import
-router.post('/import', authenticate, authorize(Role.ADMIN), importUsers);
+router.post('/import', authenticate, authorize(Role.ADMIN), noCache, importUsers);
 
 export default router;

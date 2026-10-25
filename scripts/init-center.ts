@@ -1,6 +1,8 @@
 import { PrismaClient, Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import crypto from 'crypto';
+import path from 'path';
+import fs from 'fs';
 
 const prisma = new PrismaClient();
 
@@ -15,6 +17,28 @@ function generateRandomPassword(length = 14): string {
 
 async function main() {
   const isDryRun = process.argv.includes('--dry-run');
+
+  // 0. Schema check: it must NOT run migrations; fail with clear message if not up to date
+  try {
+    const migrationsDir = path.resolve(__dirname, '../prisma/migrations');
+    const diskMigrations = fs.existsSync(migrationsDir)
+      ? fs.readdirSync(migrationsDir).filter((f) => fs.statSync(path.join(migrationsDir, f)).isDirectory() && !f.startsWith('.'))
+      : [];
+
+    const applied = await prisma.$queryRaw<Array<{ migration_name: string; finished_at: Date | null }>>`
+      SELECT migration_name, finished_at FROM "_prisma_migrations" WHERE finished_at IS NOT NULL
+    `;
+    const appliedNames = new Set(applied.map((m) => m.migration_name));
+    const unapplied = diskMigrations.filter((name) => !appliedNames.has(name));
+
+    if (unapplied.length > 0) {
+      console.error('Database schema is not up to date. Please run prisma migrate deploy first.');
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error('Database schema is not up to date. Please run prisma migrate deploy first.');
+    process.exit(1);
+  }
 
   // 1. Guard check: Refuse if center settings or users already exist
   const existingSettings = await prisma.centerSettings.findUnique({

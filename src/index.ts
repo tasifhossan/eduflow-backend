@@ -143,6 +143,11 @@ app.use(
   })
 );
 
+import lectureRouter from './routes/lecture.routes';
+import assignmentRouter from './routes/assignment.routes';
+import attachmentRouter from './routes/attachment.routes';
+import notificationRouter from './routes/notification.routes';
+
 // Routes
 app.use('/api/health', healthRouter);
 app.use('/api/public', publicLimiter, publicRouter);
@@ -173,6 +178,10 @@ app.use('/api', practiceRouter);
 app.use('/api/ai', requireFeature('aiAssistant'), aiRouter);
 app.use('/api/audit-logs', auditRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api', lectureRouter);
+app.use('/api', assignmentRouter);
+app.use('/api', attachmentRouter);
+app.use('/api', notificationRouter);
 
 
 // Global Error Handler

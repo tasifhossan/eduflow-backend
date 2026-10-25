@@ -8,7 +8,10 @@ export type FeatureFlagName =
   | 'reviews'
   | 'testimonials'
   | 'newsletter'
-  | 'showPoweredBy';
+  | 'showPoweredBy'
+  | 'lectures'
+  | 'assignments'
+  | 'onlineClasses';
 
 export function requireFeature(flag: FeatureFlagName) {
   return async (_req: Request, res: Response, next: NextFunction) => {

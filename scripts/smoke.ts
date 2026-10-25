@@ -911,25 +911,51 @@ async function runSmokeTests() {
     recordCheck('22', 'Contact form honeypot, validation & 5/hr rate limit', c22Passed, `Invalid: ${c22Invalid.status}, Honeypot saved: ${!!botMsgInDb}, Rate limited: ${c22RateLimitedStatus === 429}`);
 
     // Check 23: POST /api/newsletter idempotent (identical response, only 1 row)
-    const newsEmail = `smoke-news-${Date.now()}@example.com`;
-    createdNewsletterEmails.push(newsEmail);
-    const c23Call1 = await req('/api/newsletter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: newsEmail }),
+    const saForNews = await prisma.user.findFirst({
+      where: { role: Role.SUPER_ADMIN, isActive: true },
     });
-    const c23Call2 = await req('/api/newsletter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: newsEmail }),
-    });
-    const newsDbCount = await prisma.newsletterSubscriber.count({ where: { email: newsEmail } });
-    const c23Passed =
-      c23Call1.status === 200 &&
-      c23Call2.status === 200 &&
-      c23Call1.rawText === c23Call2.rawText &&
-      newsDbCount === 1;
-    recordCheck('23', 'Newsletter subscription idempotency', c23Passed, `Call 1: ${c23Call1.status}, Call 2: ${c23Call2.status}, Rows in DB: ${newsDbCount}`);
+    const saCookie23 = saForNews
+      ? `token=${jwt.sign({ userId: saForNews.id, role: Role.SUPER_ADMIN, branchId: saForNews.branchId }, env.JWT_SECRET, { expiresIn: '1h' })}`
+      : '';
+    const cSettingsBefore = await prisma.centerSettings.findFirst();
+    const origNews = (cSettingsBefore?.features as any)?.newsletter;
+    if (!origNews && saCookie23) {
+      await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: saCookie23 },
+        body: JSON.stringify({ features: { newsletter: true } }),
+      });
+    }
+
+    try {
+      const newsEmail = `smoke-news-${Date.now()}@example.com`;
+      createdNewsletterEmails.push(newsEmail);
+      const c23Call1 = await req('/api/newsletter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: newsEmail }),
+      });
+      const c23Call2 = await req('/api/newsletter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: newsEmail }),
+      });
+      const newsDbCount = await prisma.newsletterSubscriber.count({ where: { email: newsEmail } });
+      const c23Passed =
+        c23Call1.status === 200 &&
+        c23Call2.status === 200 &&
+        c23Call1.rawText === c23Call2.rawText &&
+        newsDbCount === 1;
+      recordCheck('23', 'Newsletter subscription idempotency', c23Passed, `Call 1: ${c23Call1.status}, Call 2: ${c23Call2.status}, Rows in DB: ${newsDbCount}`);
+    } finally {
+      if (!origNews && saCookie23) {
+        await req('/api/settings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Cookie: saCookie23 },
+          body: JSON.stringify({ features: { newsletter: false } }),
+        });
+      }
+    }
 
     // Check 24: Blog only published posts; testimonials and FAQ return data
     const draftPost = await prisma.blogPost.create({
@@ -1969,6 +1995,11 @@ async function runSmokeTests() {
         await prisma.feePayment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.batch.deleteMany({ where: { id: { in: createdBatchIds } } });
       }
+      await prisma.enrollment.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
+      await prisma.routineSlot.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
+      await prisma.review.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
+      await prisma.attendance.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
+      await prisma.feePayment.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
       await prisma.batch.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
 
       if (createdUserIds.length > 0) {

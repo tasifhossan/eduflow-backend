@@ -1478,263 +1478,355 @@ async function runSmokeTests() {
     );
     const superAdminCookie = `token=${superAdminToken}`;
 
-    // Check 39: Settings GET/PATCH authorization (SUPER_ADMIN only)
-    const c39NoAuth = await req('/api/settings');
-    const c39Admin = await req('/api/settings', { headers: { Cookie: adminCookie } });
-    const c39SuperAdminGet = await req('/api/settings', { headers: { Cookie: superAdminCookie } });
-    const c39Passed =
-      c39NoAuth.status === 401 &&
-      c39Admin.status === 403 &&
-      c39SuperAdminGet.status === 200 &&
-      c39SuperAdminGet.body?.data?.key === 'center';
-    recordCheck(
-      '39',
-      'Settings GET/PATCH access control (SUPER_ADMIN only)',
-      c39Passed,
-      `NoAuth: ${c39NoAuth.status}, Admin: ${c39Admin.status}, SuperAdmin: ${c39SuperAdminGet.status}`
-    );
-
-    // Check 40: Settings input validation (hex color, url, phone)
-    const c40BadHex = await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({ primaryColor: 'invalid-blue' }),
+    // Snapshot full CenterSettings row before settings checks
+    const initialCenterSettings = await prisma.centerSettings.findUnique({
+      where: { key: 'center' },
     });
-    const c40BadUrl = await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({ logoUrl: 'ftp://invalidscheme.com/logo.png' }),
-    });
-    const c40BadPhone = await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({ contactPhone: 'bad-phone-number' }),
-    });
-    const c40Passed =
-      c40BadHex.status === 400 &&
-      c40BadUrl.status === 400 &&
-      c40BadPhone.status === 400;
-    recordCheck(
-      '40',
-      'Settings PATCH strict validation (hex colors, https URLs, phone)',
-      c40Passed,
-      `BadHex: ${c40BadHex.status}, BadUrl: ${c40BadUrl.status}, BadPhone: ${c40BadPhone.status}`
-    );
-
-    // Check 41: Public center endpoint has zero private fields
-    const c41Res = await req('/api/public/center');
-    const c41Data = c41Res.body?.data || {};
-    const privateKeysFound = ['receiptHeader', 'receiptFooter', 'academicYearStartMonth', 'createdAt', 'updatedAt', 'id', 'key'].filter(
-      (k) => k in c41Data
-    );
-    const c41Passed =
-      c41Res.status === 200 &&
-      !!c41Data.name &&
-      !!c41Data.features &&
-      privateKeysFound.length === 0;
-    recordCheck(
-      '41',
-      'Public center endpoint (/api/public/center) strips private fields',
-      c41Passed,
-      c41Passed
-        ? `Status 200, name: "${c41Data.name}", 0 private fields exposed`
-        : `Status: ${c41Res.status}, Leaked private keys: ${privateKeysFound.join(', ')}`
-    );
-
-    // Check 42: Feature flag runtime gating and re-enabling
-    // Disable blog feature
-    const c42PatchOff = await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({ features: { blog: false } }),
-    });
-    const c42GatedRes = await req('/api/blog');
-    // Re-enable blog feature
-    const c42PatchOn = await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({ features: { blog: true } }),
-    });
-    const c42UngatedRes = await req('/api/blog');
-    const c42Passed =
-      c42PatchOff.status === 200 &&
-      c42GatedRes.status === 404 &&
-      c42GatedRes.body?.message === 'Not available' &&
-      c42PatchOn.status === 200 &&
-      c42UngatedRes.status === 200;
-    recordCheck(
-      '42',
-      'Feature flag runtime gating (404 Not available) and re-enabling',
-      c42Passed,
-      `Gated: ${c42GatedRes.status} (${c42GatedRes.body?.message}), Re-enabled: ${c42UngatedRes.status}`
-    );
-
-    // Check 43: init-center safety refusal on populated database
-    let c43RefusalOutput = '';
-    let c43ExitCode = 0;
-    try {
-      c43RefusalOutput = execSync('npx tsx scripts/init-center.ts --dry-run', {
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      c43ExitCode = 0;
-    } catch (e: any) {
-      c43ExitCode = e.status || 1;
-      c43RefusalOutput = (e.stdout || '') + (e.stderr || '');
+    if (!initialCenterSettings) {
+      throw new Error('CenterSettings row missing before smoke tests');
     }
-    const c43Passed =
-      c43ExitCode !== 0 &&
-      c43RefusalOutput.includes('Refusing to initialize: center already initialized or users exist in database');
-    recordCheck(
-      '43',
-      'init-center refuses execution on populated database',
-      c43Passed,
-      `ExitCode: ${c43ExitCode}, Refusal message detected: ${c43Passed}`
-    );
 
-    // Check 44: check-deploy fails when DEMO_MODE=true
-    let c44DeployOutput = '';
-    let c44ExitCode = 0;
     try {
-      c44DeployOutput = execSync('npx tsx scripts/check-deploy.ts', {
-        encoding: 'utf8',
-        env: { ...process.env, DEMO_MODE: 'true' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      c44ExitCode = 0;
-    } catch (e: any) {
-      c44ExitCode = e.status || 1;
-      c44DeployOutput = (e.stdout || '') + (e.stderr || '');
-    }
-    const c44Passed =
-      c44ExitCode !== 0 &&
-      c44DeployOutput.includes('[FAIL] DEMO_MODE is disabled');
-    recordCheck(
-      '44',
-      'check-deploy fails with non-zero exit when DEMO_MODE=true',
-      c44Passed,
-      `ExitCode: ${c44ExitCode}, FAIL line detected: ${c44Passed}`
-    );
-
-    // Check 45: Homepage settings in GET /api/public/center and PATCH /api/settings
-    const c45Patch = await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({
-        homepage: {
-          heroTitle: 'SMOKE-Hero-Title',
-          heroSubtitle: 'SMOKE-Hero-Subtitle',
-          showFees: false,
-          announcement: { enabled: true, text: 'SMOKE-Announcement' },
-        },
-      }),
-    });
-    const c45PublicAfter = await req('/api/public/center');
-    const c45Passed =
-      c45Patch.status === 200 &&
-      c45PublicAfter.status === 200 &&
-      c45PublicAfter.body?.data?.homepage?.heroTitle === 'SMOKE-Hero-Title' &&
-      c45PublicAfter.body?.data?.homepage?.showFees === false &&
-      c45PublicAfter.body?.data?.homepage?.announcement?.enabled === true;
-    recordCheck(
-      '45',
-      'Homepage settings update and public exposure (/api/public/center)',
-      c45Passed,
-      `Patch: ${c45Patch.status}, heroTitle: "${c45PublicAfter.body?.data?.homepage?.heroTitle}", showFees: ${c45PublicAfter.body?.data?.homepage?.showFees}`
-    );
-
-    // Check 46: Server-side fee omission when showFees=false & null rating for zero reviews
-    const c46BatchesRes = await req('/api/public/batches?limit=10');
-    const c46Items = c46BatchesRes.body?.data?.items || [];
-    const allFeesOmitted = c46Items.length > 0 && c46Items.every((item: any) => item.fee === null);
-    const unreviewedBatchHasNullAvgRating = c46Items.some((item: any) => item.reviewCount === 0 && item.avgRating === null);
-
-    // Restore showFees to true
-    await req('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
-      body: JSON.stringify({
-        homepage: {
-          showFees: true,
-        },
-      }),
-    });
-    const c46RestoredRes = await req('/api/public/batches?limit=10');
-    const c46RestoredItems = c46RestoredRes.body?.data?.items || [];
-    const feesRestored = c46RestoredItems.length > 0 && c46RestoredItems.some((item: any) => item.fee !== null);
-
-    const c46Passed = allFeesOmitted && (unreviewedBatchHasNullAvgRating || c46Items.length > 0) && feesRestored;
-    recordCheck(
-      '46',
-      'Server-side fee omission when showFees=false and zero-review rating=null',
-      c46Passed,
-      `All fees null: ${allFeesOmitted}, Rating null on 0 reviews: ${unreviewedBatchHasNullAvgRating}, Fees restored: ${feesRestored}`
-    );
-
-    // Check 47: Enquiry submission, phone normalization, honeypot, and branch isolation
-    const c47SubmitRes = await req('/api/contact', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Forwarded-For': '198.51.100.47',
-      },
-      body: JSON.stringify({
-        name: 'SMOKE-Enquiry-Student',
-        phone: '01712-345678',
-        interestedBatchId: smokeBatch1.id,
-        interestedGrade: 'Class 10',
-        message: 'Interested in admissions',
-      }),
-    });
-
-    const c47HoneypotRes = await req('/api/contact', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Forwarded-For': '198.51.100.48',
-      },
-      body: JSON.stringify({
-        name: 'SMOKE-Bot-Spam',
-        phone: '01712-999999',
-        website: 'https://spam-bot.com',
-      }),
-    });
-    const honeypotInDb = await prisma.contactMessage.findFirst({
-      where: { name: 'SMOKE-Bot-Spam' },
-    });
-
-    const c47SuperAdminList = await req('/api/contact', {
-      headers: { Cookie: superAdminCookie },
-    });
-    const superAdminSawEnquiry =
-      c47SuperAdminList.status === 200 &&
-      (c47SuperAdminList.body?.data?.items || []).some(
-        (m: any) => m.name === 'SMOKE-Enquiry-Student' && m.phone === '01712345678'
+      // Check 39: Settings GET/PATCH authorization (SUPER_ADMIN only)
+      const c39NoAuth = await req('/api/settings');
+      const c39Admin = await req('/api/settings', { headers: { Cookie: adminCookie } });
+      const c39SuperAdminGet = await req('/api/settings', { headers: { Cookie: superAdminCookie } });
+      const c39Passed =
+        c39NoAuth.status === 401 &&
+        c39Admin.status === 403 &&
+        c39SuperAdminGet.status === 200 &&
+        c39SuperAdminGet.body?.data?.key === 'center';
+      recordCheck(
+        '39',
+        'Settings GET/PATCH access control (SUPER_ADMIN only)',
+        c39Passed,
+        `NoAuth: ${c39NoAuth.status}, Admin: ${c39Admin.status}, SuperAdmin: ${c39SuperAdminGet.status}`
       );
 
-    const c47AdminList = await req('/api/contact', {
-      headers: { Cookie: adminCookie },
-    });
-    const adminListItems = c47AdminList.body?.data?.items || [];
-    const adminEnquiryBranchMatched =
-      c47AdminList.status === 200 &&
-      adminListItems.every(
-        (m: any) => !m.interestedBatch || m.interestedBatch.branchId === demoAdmin.branchId
+      // Check 40: Settings input validation (hex color, url, phone)
+      const c40BadHex = await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ primaryColor: 'invalid-blue' }),
+      });
+      const c40BadUrl = await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ logoUrl: 'ftp://invalidscheme.com/logo.png' }),
+      });
+      const c40BadPhone = await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ contactPhone: 'bad-phone-number' }),
+      });
+      const c40Passed =
+        c40BadHex.status === 400 &&
+        c40BadUrl.status === 400 &&
+        c40BadPhone.status === 400;
+      recordCheck(
+        '40',
+        'Settings PATCH strict validation (hex colors, https URLs, phone)',
+        c40Passed,
+        `BadHex: ${c40BadHex.status}, BadUrl: ${c40BadUrl.status}, BadPhone: ${c40BadPhone.status}`
       );
 
-    const c47Passed =
-      c47SubmitRes.status === 200 &&
-      c47HoneypotRes.status === 200 &&
-      !honeypotInDb &&
-      superAdminSawEnquiry &&
-      adminEnquiryBranchMatched;
+      // Check 41: Public center endpoint has zero private fields
+      const c41Res = await req('/api/public/center');
+      const c41Data = c41Res.body?.data || {};
+      const privateKeysFound = ['receiptHeader', 'receiptFooter', 'academicYearStartMonth', 'createdAt', 'updatedAt', 'id', 'key'].filter(
+        (k) => k in c41Data
+      );
+      const c41Passed =
+        c41Res.status === 200 &&
+        !!c41Data.name &&
+        !!c41Data.features &&
+        privateKeysFound.length === 0;
+      recordCheck(
+        '41',
+        'Public center endpoint (/api/public/center) strips private fields',
+        c41Passed,
+        c41Passed
+          ? `Status 200, name: "${c41Data.name}", 0 private fields exposed`
+          : `Status: ${c41Res.status}, Leaked private keys: ${privateKeysFound.join(', ')}`
+      );
+
+      // Check 42: Feature flag runtime gating and re-enabling
+      // Disable blog feature
+      const c42PatchOff = await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ features: { blog: false } }),
+      });
+      const c42GatedRes = await req('/api/blog');
+      // Re-enable blog feature
+      const c42PatchOn = await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ features: { blog: true } }),
+      });
+      const c42UngatedRes = await req('/api/blog');
+      const c42Passed =
+        c42PatchOff.status === 200 &&
+        c42GatedRes.status === 404 &&
+        c42GatedRes.body?.message === 'Not available' &&
+        c42PatchOn.status === 200 &&
+        c42UngatedRes.status === 200;
+      recordCheck(
+        '42',
+        'Feature flag runtime gating (404 Not available) and re-enabling',
+        c42Passed,
+        `Gated: ${c42GatedRes.status} (${c42GatedRes.body?.message}), Re-enabled: ${c42UngatedRes.status}`
+      );
+
+      // Check 43: init-center safety refusal on populated database
+      let c43RefusalOutput = '';
+      let c43ExitCode = 0;
+      try {
+        c43RefusalOutput = execSync('npx tsx scripts/init-center.ts --dry-run', {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        c43ExitCode = 0;
+      } catch (e: any) {
+        c43ExitCode = e.status || 1;
+        c43RefusalOutput = (e.stdout || '') + (e.stderr || '');
+      }
+      const c43Passed =
+        c43ExitCode !== 0 &&
+        c43RefusalOutput.includes('Refusing to initialize: center already initialized or users exist in database');
+      recordCheck(
+        '43',
+        'init-center refuses execution on populated database',
+        c43Passed,
+        `ExitCode: ${c43ExitCode}, Refusal message detected: ${c43Passed}`
+      );
+
+      // Check 44: check-deploy fails when DEMO_MODE=true
+      let c44DeployOutput = '';
+      let c44ExitCode = 0;
+      try {
+        c44DeployOutput = execSync('npx tsx scripts/check-deploy.ts', {
+          encoding: 'utf8',
+          env: { ...process.env, DEMO_MODE: 'true' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        c44ExitCode = 0;
+      } catch (e: any) {
+        c44ExitCode = e.status || 1;
+        c44DeployOutput = (e.stdout || '') + (e.stderr || '');
+      }
+      const c44Passed =
+        c44ExitCode !== 0 &&
+        c44DeployOutput.includes('[FAIL] DEMO_MODE is disabled');
+      recordCheck(
+        '44',
+        'check-deploy fails with non-zero exit when DEMO_MODE=true',
+        c44Passed,
+        `ExitCode: ${c44ExitCode}, FAIL line detected: ${c44Passed}`
+      );
+
+      // Check 45: Homepage settings in GET /api/public/center and PATCH /api/settings
+      const c45Patch = await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({
+          homepage: {
+            heroBadge: 'SMOKE-Hero-Badge',
+            heroPoints: ['SMOKE-Point-1', 'SMOKE-Point-2'],
+            heroTitle: 'SMOKE-Hero-Title',
+            heroSubtitle: 'SMOKE-Hero-Subtitle',
+            showFees: false,
+            announcement: { enabled: true, text: 'SMOKE-Announcement' },
+          },
+        }),
+      });
+      const c45PublicAfter = await req('/api/public/center');
+      const c45Passed =
+        c45Patch.status === 200 &&
+        c45PublicAfter.status === 200 &&
+        c45PublicAfter.body?.data?.homepage?.heroBadge === 'SMOKE-Hero-Badge' &&
+        Array.isArray(c45PublicAfter.body?.data?.homepage?.heroPoints) &&
+        c45PublicAfter.body?.data?.homepage?.heroPoints.length === 2 &&
+        c45PublicAfter.body?.data?.homepage?.heroTitle === 'SMOKE-Hero-Title' &&
+        c45PublicAfter.body?.data?.homepage?.showFees === false &&
+        c45PublicAfter.body?.data?.homepage?.announcement?.enabled === true;
+      recordCheck(
+        '45',
+        'Homepage settings update and public exposure (/api/public/center)',
+        c45Passed,
+        `Patch: ${c45Patch.status}, heroBadge: "${c45PublicAfter.body?.data?.homepage?.heroBadge}", heroPoints: ${c45PublicAfter.body?.data?.homepage?.heroPoints?.length}, showFees: ${c45PublicAfter.body?.data?.homepage?.showFees}`
+      );
+
+      // Check 46: Server-side fee omission when showFees=false & null rating for zero reviews
+      const c46BatchesRes = await req('/api/public/batches?limit=10');
+      const c46Items = c46BatchesRes.body?.data?.items || [];
+      const allFeesOmitted = c46Items.length > 0 && c46Items.every((item: any) => item.fee === null);
+      const unreviewedBatchHasNullAvgRating = c46Items.some((item: any) => item.reviewCount === 0 && item.avgRating === null);
+
+      // Restore showFees to true
+      await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({
+          homepage: {
+            showFees: true,
+          },
+        }),
+      });
+      const c46RestoredRes = await req('/api/public/batches?limit=10');
+      const c46RestoredItems = c46RestoredRes.body?.data?.items || [];
+      const feesRestored = c46RestoredItems.length > 0 && c46RestoredItems.some((item: any) => item.fee !== null);
+
+      const c46Passed = allFeesOmitted && (unreviewedBatchHasNullAvgRating || c46Items.length > 0) && feesRestored;
+      recordCheck(
+        '46',
+        'Server-side fee omission when showFees=false and zero-review rating=null',
+        c46Passed,
+        `All fees null: ${allFeesOmitted}, Rating null on 0 reviews: ${unreviewedBatchHasNullAvgRating}, Fees restored: ${feesRestored}`
+      );
+
+      // Check 47: Enquiry submission, phone normalization, honeypot, and branch isolation
+      const c47SubmitRes = await req('/api/contact', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': '198.51.100.47',
+        },
+        body: JSON.stringify({
+          name: 'SMOKE-Enquiry-Student',
+          phone: '01712-345678',
+          interestedBatchId: smokeBatch1.id,
+          interestedGrade: 'Class 10',
+          message: 'Interested in admissions',
+        }),
+      });
+
+      const c47HoneypotRes = await req('/api/contact', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': '198.51.100.48',
+        },
+        body: JSON.stringify({
+          name: 'SMOKE-Bot-Spam',
+          phone: '01712-999999',
+          website: 'https://spam-bot.com',
+        }),
+      });
+      const honeypotInDb = await prisma.contactMessage.findFirst({
+        where: { name: 'SMOKE-Bot-Spam' },
+      });
+
+      const c47SuperAdminList = await req('/api/contact', {
+        headers: { Cookie: superAdminCookie },
+      });
+      const superAdminSawEnquiry =
+        c47SuperAdminList.status === 200 &&
+        (c47SuperAdminList.body?.data?.items || []).some(
+          (m: any) => m.name === 'SMOKE-Enquiry-Student' && m.phone === '01712345678'
+        );
+
+      const c47AdminList = await req('/api/contact', {
+        headers: { Cookie: adminCookie },
+      });
+      const adminListItems = c47AdminList.body?.data?.items || [];
+      const adminEnquiryBranchMatched =
+        c47AdminList.status === 200 &&
+        adminListItems.every(
+          (m: any) => !m.interestedBatch || m.interestedBatch.branchId === demoAdmin.branchId
+        );
+
+      const c47Passed =
+        c47SubmitRes.status === 200 &&
+        c47HoneypotRes.status === 200 &&
+        !honeypotInDb &&
+        superAdminSawEnquiry &&
+        adminEnquiryBranchMatched;
+
+      recordCheck(
+        '47',
+        'Enquiry submission, phone normalization, honeypot, and branch isolation',
+        c47Passed,
+        `Submit: ${c47SubmitRes.status}, Honeypot ignored: ${!honeypotInDb}, SuperAdmin found: ${superAdminSawEnquiry}, Admin scoped: ${adminEnquiryBranchMatched}`
+      );
+    } finally {
+      // 1. Strictly restore exact snapshot of CenterSettings row
+      if (initialCenterSettings) {
+        await prisma.centerSettings.update({
+          where: { key: 'center' },
+          data: {
+            name: initialCenterSettings.name,
+            shortName: initialCenterSettings.shortName,
+            tagline: initialCenterSettings.tagline,
+            logoUrl: initialCenterSettings.logoUrl,
+            faviconUrl: initialCenterSettings.faviconUrl,
+            primaryColor: initialCenterSettings.primaryColor,
+            contactEmail: initialCenterSettings.contactEmail,
+            contactPhone: initialCenterSettings.contactPhone,
+            whatsapp: initialCenterSettings.whatsapp,
+            address: initialCenterSettings.address,
+            socials: (initialCenterSettings.socials ?? undefined) as any,
+            currency: initialCenterSettings.currency,
+            currencySymbol: initialCenterSettings.currencySymbol,
+            timezone: initialCenterSettings.timezone,
+            defaultLocale: initialCenterSettings.defaultLocale,
+            academicYearStartMonth: initialCenterSettings.academicYearStartMonth,
+            receiptHeader: initialCenterSettings.receiptHeader,
+            receiptFooter: initialCenterSettings.receiptFooter,
+            features: initialCenterSettings.features as any,
+            homepage: initialCenterSettings.homepage as any,
+          },
+        });
+      }
+
+      // 2. Clean up contact messages created during smoke test
+      await prisma.contactMessage.deleteMany({
+        where: {
+          OR: [
+            { name: { startsWith: 'SMOKE-' } },
+            { email: { startsWith: 'smoke-' } },
+            { phone: '01712345678' },
+            { phone: '01712999999' },
+          ],
+        },
+      });
+
+      // 3. Clean up newsletter subscriptions created during smoke test
+      await prisma.newsletterSubscriber.deleteMany({
+        where: {
+          email: { startsWith: 'smoke-news-' },
+        },
+      });
+    }
+
+    // Check 48: Hygiene verification that CenterSettings equals snapshot & zero SMOKE- leakage
+    const restoredSettings = await prisma.centerSettings.findUnique({
+      where: { key: 'center' },
+    });
+    const restoredHp = (restoredSettings?.homepage as any) || {};
+    const hpStr = JSON.stringify(restoredHp);
+    const hasSmokeInHomepage = hpStr.includes('SMOKE-');
+    const initialHpStr = JSON.stringify(initialCenterSettings?.homepage || {});
+    const initialFeatStr = JSON.stringify(initialCenterSettings?.features || {});
+    const restoredFeatStr = JSON.stringify(restoredSettings?.features || {});
+
+    const isSettingsRestored =
+      !hasSmokeInHomepage &&
+      hpStr === initialHpStr &&
+      restoredFeatStr === initialFeatStr;
 
     recordCheck(
-      '47',
-      'Enquiry submission, phone normalization, honeypot, and branch isolation',
-      c47Passed,
-      `Submit: ${c47SubmitRes.status}, Honeypot ignored: ${!honeypotInDb}, SuperAdmin found: ${superAdminSawEnquiry}, Admin scoped: ${adminEnquiryBranchMatched}`
+      '48',
+      'CenterSettings hygiene: full restore & zero SMOKE- leakage',
+      isSettingsRestored,
+      isSettingsRestored
+        ? 'Settings fully restored to initial snapshot; 0 SMOKE- values leaked'
+        : `Restored: false (SMOKE in homepage: ${hasSmokeInHomepage})`
     );
+
+    if (hasSmokeInHomepage) {
+      throw new Error(`Smoke suite failed hygiene check: SMOKE- strings leaked in CenterSettings.homepage`);
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)

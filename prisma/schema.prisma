@@ -543,16 +543,16 @@ model FaqItem {
 model CenterSettings {
   id                     String   @id @default(cuid())
   key                    String   @unique @default("center")
-  name                   String   @default("EduFlow Coaching")
-  shortName              String   @default("EduFlow")
-  tagline                String   @default("Modern Coaching Center Management Platform")
+  name                   String   @default("Coaching Center")
+  shortName              String   @default("Center")
+  tagline                String   @default("")
   logoUrl                String?
   faviconUrl             String?
   primaryColor           String   @default("#4f46e5")
-  contactEmail           String   @default("contact@eduflow.local")
-  contactPhone           String   @default("01700000000")
+  contactEmail           String   @default("")
+  contactPhone           String   @default("")
   whatsapp               String?
-  address                String   @default("Dhaka, Bangladesh")
+  address                String   @default("")
   socials                Json?
   currency               String   @default("BDT")
   currencySymbol         String   @default("৳")
@@ -561,8 +561,8 @@ model CenterSettings {
   academicYearStartMonth Int      @default(1)
   receiptHeader          String?
   receiptFooter          String?
-  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":true,\"showPoweredBy\":true}")
-  homepage               Json     @default("{\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
+  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true}")
+  homepage               Json     @default("{\"heroBadge\":\"\",\"heroPoints\":[],\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }

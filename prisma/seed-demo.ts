@@ -1,4 +1,4 @@
-import { PrismaClient, Role, BatchType, FeeType, DayOfWeek, AttendanceStatus, PaymentStatus, TestType, QuestionType } from '@prisma/client';
+import { PrismaClient, Role, BatchType, FeeType, DayOfWeek, AttendanceStatus, PaymentStatus, TestType, QuestionType, LectureStatus, OnlineProvider, AssignmentMode, AssignmentSubmissionStatus, AttachmentKind, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import crypto from 'crypto';
 
@@ -59,6 +59,12 @@ async function main() {
         await prisma.test.deleteMany({ where: { id: { in: testIds } } });
       }
 
+      await prisma.attachment.deleteMany({ where: { branchId: demoBranch.id } });
+      await prisma.assignmentSubmission.deleteMany({
+        where: { assignment: { batchId: { in: demoBatchIds } } },
+      });
+      await prisma.assignment.deleteMany({ where: { batchId: { in: demoBatchIds } } });
+      await prisma.lecture.deleteMany({ where: { batchId: { in: demoBatchIds } } });
       await prisma.attendance.deleteMany({ where: { batchId: { in: demoBatchIds } } });
       await prisma.feePayment.deleteMany({ where: { batchId: { in: demoBatchIds } } });
       await prisma.routineSlot.deleteMany({ where: { batchId: { in: demoBatchIds } } });
@@ -67,6 +73,9 @@ async function main() {
       await prisma.batch.deleteMany({ where: { id: { in: demoBatchIds } } });
     }
 
+    await prisma.notification.deleteMany({
+      where: { user: { branchId: demoBranch.id } },
+    });
     await prisma.notice.deleteMany({ where: { branchId: demoBranch.id } });
     await prisma.guardianLink.deleteMany({
       where: {
@@ -589,6 +598,347 @@ async function main() {
     }
   }
 
+  // 10. Academics Demo Data: Chapters, Lectures, Materials, Assignments & Submissions
+  console.log('Seeding demo academics data (lectures, materials, assignments, notifications)...');
+  const mathBatch = await prisma.batch.findFirst({
+    where: { slug: 'demo-hsc-higher-math' },
+  });
+  const physicsBatch = await prisma.batch.findFirst({
+    where: { slug: 'demo-hsc-physics' },
+  });
+
+  if (mathBatch && physicsBatch) {
+    // 10a. Chapters for Higher Math
+    let calculusChap = await prisma.chapter.findFirst({
+      where: { name: 'Integral Calculus & Applications', subjectId: math.id },
+    });
+    if (!calculusChap) {
+      calculusChap = await prisma.chapter.create({
+        data: { name: 'Integral Calculus & Applications', subjectId: math.id },
+      });
+    }
+
+    let geometryChap = await prisma.chapter.findFirst({
+      where: { name: 'Straight Lines & Coordinate Geometry', subjectId: math.id },
+    });
+    if (!geometryChap) {
+      geometryChap = await prisma.chapter.create({
+        data: { name: 'Straight Lines & Coordinate Geometry', subjectId: math.id },
+      });
+    }
+
+    // 10b. Lectures for this week and last week
+    const now = new Date();
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    const lectureDefs = [
+      {
+        batchId: mathBatch.id,
+        subjectId: math.id,
+        chapterId: calculusChap.id,
+        teacherId: demoTeacher.id,
+        title: 'Definite Integral Substitution Techniques',
+        plannedTopics: 'Fundamental theorem of calculus, limits substitution, and standard integrals',
+        coveredTopics: 'Evaluated trigonometric definite integrals with limits substitution',
+        homeworkNote: 'Complete Chapter 10 exercises 10A (problems 1 to 15)',
+        startsAt: new Date(now.getTime() - 7 * dayMs),
+        endsAt: new Date(now.getTime() - 7 * dayMs + 90 * 60 * 1000),
+        status: LectureStatus.COMPLETED,
+        isPublished: true,
+        materialLink: {
+          title: 'Definite Integration Formula Sheet (BUET Prep)',
+          url: 'https://resources.eduflow.local/math/definite-integration-formulas.pdf',
+        },
+      },
+      {
+        batchId: mathBatch.id,
+        subjectId: math.id,
+        chapterId: calculusChap.id,
+        teacherId: demoTeacher.id,
+        title: 'Integration by Parts & Reduction Formulas',
+        plannedTopics: 'LIATE rule, integration by parts, recursive reduction for sine and cosine powers',
+        coveredTopics: 'Standard reduction formula derivation for sine and cosine powers',
+        homeworkNote: 'Solve Exercise 10B questions 5-12',
+        startsAt: new Date(now.getTime() - 5 * dayMs),
+        endsAt: new Date(now.getTime() - 5 * dayMs + 90 * 60 * 1000),
+        status: LectureStatus.COMPLETED,
+        isPublished: true,
+        materialLink: {
+          title: 'Integration by Parts Examples Handout',
+          url: 'https://resources.eduflow.local/math/integration-by-parts-notes.pdf',
+        },
+      },
+      {
+        batchId: mathBatch.id,
+        subjectId: math.id,
+        chapterId: geometryChap.id,
+        teacherId: demoTeacher.id,
+        title: 'Area Bounded by Curves & Coordinate Geometry',
+        plannedTopics: 'Parabola and straight line intersection area calculation, definite integral applications',
+        coveredTopics: null,
+        homeworkNote: null,
+        startsAt: new Date(now.getTime() + 2 * dayMs),
+        endsAt: new Date(now.getTime() + 2 * dayMs + 90 * 60 * 1000),
+        status: LectureStatus.PLANNED,
+        isPublished: true,
+        materialLink: {
+          title: 'Coordinate Curves Summary Sheet',
+          url: 'https://resources.eduflow.local/math/coordinate-curves-summary.pdf',
+        },
+      },
+      {
+        batchId: mathBatch.id,
+        subjectId: math.id,
+        chapterId: geometryChap.id,
+        teacherId: demoTeacher.id,
+        title: 'Weekend Doubt Resolution Session: Coordinate Geometry',
+        plannedTopics: 'Doubt resolution on vector products and coordinate geometry',
+        coveredTopics: null,
+        homeworkNote: null,
+        startsAt: new Date(now.getTime() - 3 * dayMs),
+        endsAt: new Date(now.getTime() - 3 * dayMs + 60 * 60 * 1000),
+        status: LectureStatus.CANCELLED,
+        cancelReason: 'Teacher indisposed due to illness; rescheduled to following Monday',
+        isPublished: true,
+        materialLink: null,
+      },
+      {
+        batchId: mathBatch.id,
+        subjectId: math.id,
+        chapterId: calculusChap.id,
+        teacherId: demoTeacher.id,
+        title: 'Special Online Problem Solving: Engineering Admission Math',
+        plannedTopics: 'Advanced integration tricks for BUET & CKET admission tests',
+        coveredTopics: null,
+        homeworkNote: null,
+        startsAt: new Date(now.getTime() + 4 * dayMs),
+        endsAt: new Date(now.getTime() + 4 * dayMs + 120 * 60 * 1000),
+        status: LectureStatus.PLANNED,
+        isPublished: true,
+        onlineProvider: OnlineProvider.MEET,
+        onlineUrl: 'https://meet.google.com/demo-edu-flow',
+        onlinePasscode: 'demo123',
+        materialLink: null,
+      },
+    ];
+
+    for (const l of lectureDefs) {
+      let lec = await prisma.lecture.findFirst({
+        where: {
+          batchId: l.batchId,
+          title: l.title,
+        },
+      });
+
+      if (!lec) {
+        lec = await prisma.lecture.create({
+          data: {
+            batchId: l.batchId,
+            subjectId: l.subjectId,
+            chapterId: l.chapterId,
+            teacherId: l.teacherId,
+            title: l.title,
+            plannedTopics: l.plannedTopics,
+            coveredTopics: l.coveredTopics,
+            homeworkNote: l.homeworkNote,
+            startsAt: l.startsAt,
+            endsAt: l.endsAt,
+            status: l.status,
+            cancelReason: (l as any).cancelReason || null,
+            isPublished: l.isPublished,
+            onlineProvider: (l as any).onlineProvider || null,
+            onlineUrl: (l as any).onlineUrl || null,
+            onlinePasscode: (l as any).onlinePasscode || null,
+            createdById: demoTeacher.id,
+          },
+        });
+      }
+
+      if (l.materialLink) {
+        const existingAtt = await prisma.attachment.findFirst({
+          where: { lectureId: lec.id, title: l.materialLink.title },
+        });
+        if (!existingAtt) {
+          await prisma.attachment.create({
+            data: {
+              branchId: demoBranch.id,
+              lectureId: lec.id,
+              kind: AttachmentKind.LINK,
+              title: l.materialLink.title,
+              url: l.materialLink.url,
+              uploadedById: demoTeacher.id,
+            },
+          });
+        }
+      }
+    }
+
+    // 10c. Assignments: 1 Online with Submissions, 1 Offline with Bulk Marks
+    let onlineAssign = await prisma.assignment.findFirst({
+      where: { batchId: mathBatch.id, title: 'Calculus Problem Set 01: Definite Integrals' },
+    });
+    if (!onlineAssign) {
+      onlineAssign = await prisma.assignment.create({
+        data: {
+          batchId: mathBatch.id,
+          subjectId: math.id,
+          title: 'Calculus Problem Set 01: Definite Integrals',
+          instructions: 'Solve the attached 5 problems on definite integrals. Submit written solutions as PDF or scan, or write the answers in the text box.',
+          dueAt: new Date(now.getTime() + 3 * dayMs),
+          maxMarks: new Prisma.Decimal(25.0),
+          mode: AssignmentMode.ONLINE,
+          allowLate: true,
+          publishedAt: new Date(now.getTime() - 3 * dayMs),
+          createdById: demoTeacher.id,
+        },
+      });
+    }
+
+    // Student Submissions for online assignment
+    const tanvir = await prisma.user.findFirst({ where: { email: 'tanvir.hasan@demo.eduflow.local' } });
+
+    await prisma.assignmentSubmission.upsert({
+      where: {
+        assignmentId_studentId: {
+          assignmentId: onlineAssign.id,
+          studentId: demoStudent.id,
+        },
+      },
+      update: {},
+      create: {
+        assignmentId: onlineAssign.id,
+        studentId: demoStudent.id,
+        textAnswer: 'Submitted handwritten solution sheet with questions 1-5 completed.',
+        submittedAt: new Date(now.getTime() - 2 * dayMs),
+        isLate: false,
+        status: AssignmentSubmissionStatus.SUBMITTED,
+      },
+    });
+
+    if (tanvir) {
+      await prisma.assignmentSubmission.upsert({
+        where: {
+          assignmentId_studentId: {
+            assignmentId: onlineAssign.id,
+            studentId: tanvir.id,
+          },
+        },
+        update: {},
+        create: {
+          assignmentId: onlineAssign.id,
+          studentId: tanvir.id,
+          textAnswer: 'Calculated final integrals: Q1=pi/4, Q2=ln(2), Q3=1/2.',
+          submittedAt: new Date(now.getTime() - 2 * dayMs),
+          isLate: false,
+          marks: new Prisma.Decimal(23.5),
+          feedback: 'Excellent calculation on problem 3. Watch limit signs on Q2.',
+          status: AssignmentSubmissionStatus.GRADED,
+          gradedById: demoTeacher.id,
+          gradedAt: new Date(now.getTime() - 1 * dayMs),
+        },
+      });
+    }
+
+    let offlineAssign = await prisma.assignment.findFirst({
+      where: { batchId: physicsBatch.id, title: 'Newtonian Mechanics Lab Report & Numerical Test' },
+    });
+    if (!offlineAssign) {
+      offlineAssign = await prisma.assignment.create({
+        data: {
+          batchId: physicsBatch.id,
+          subjectId: physics.id,
+          title: 'Newtonian Mechanics Lab Report & Numerical Test',
+          instructions: 'Offline physical lab and written test conducted during weekly session. Maximum marks: 20.',
+          dueAt: new Date(now.getTime() - 1 * dayMs),
+          maxMarks: new Prisma.Decimal(20.0),
+          mode: AssignmentMode.OFFLINE,
+          allowLate: false,
+          publishedAt: new Date(now.getTime() - 5 * dayMs),
+          createdById: demoTeacher.id,
+        },
+      });
+    }
+
+    // Bulk offline marks for 3 students
+    const nabila = await prisma.user.findFirst({ where: { email: 'nabila.tabassum@demo.eduflow.local' } });
+    const offlineMarks = [
+      { studentId: demoStudent.id, marks: new Prisma.Decimal(18.0), feedback: 'Great free-body diagrams and friction calculation.' },
+      ...(tanvir ? [{ studentId: tanvir.id, marks: new Prisma.Decimal(19.5), feedback: 'Accurate momentum conservation derivations.' }] : []),
+      ...(nabila ? [{ studentId: nabila.id, marks: new Prisma.Decimal(16.0), feedback: 'Good effort. Revisit projectile motion angle component.' }] : []),
+    ];
+
+    for (const om of offlineMarks) {
+      await prisma.assignmentSubmission.upsert({
+        where: {
+          assignmentId_studentId: {
+            assignmentId: offlineAssign.id,
+            studentId: om.studentId,
+          },
+        },
+        update: {},
+        create: {
+          assignmentId: offlineAssign.id,
+          studentId: om.studentId,
+          marks: om.marks,
+          feedback: om.feedback,
+          status: AssignmentSubmissionStatus.GRADED,
+          gradedById: demoTeacher.id,
+          gradedAt: new Date(now.getTime() - 1 * dayMs),
+          submittedAt: new Date(now.getTime() - 2 * dayMs),
+        },
+      });
+    }
+
+    // 10d. Notifications for demo student and guardian
+    const demoNotifs = [
+      {
+        userId: demoStudent.id,
+        type: 'LECTURE_PUBLISHED',
+        title: 'New Lecture Scheduled: Definite Integral Substitution',
+        body: 'A new lecture has been scheduled on Definite Integral Substitution Techniques.',
+        entityType: 'Lecture',
+      },
+      {
+        userId: demoStudent.id,
+        type: 'ASSIGNMENT_PUBLISHED',
+        title: 'New Assignment: Calculus Problem Set 01',
+        body: 'Calculus Problem Set 01 has been posted. Submission deadline: 3 days.',
+        entityType: 'Assignment',
+      },
+      {
+        userId: demoStudent.id,
+        type: 'SUBMISSION_GRADED',
+        title: 'Lab Report Graded: Newtonian Mechanics',
+        body: 'Your Newtonian Mechanics lab test has been graded. Marks: 18.0/20.0',
+        entityType: 'AssignmentSubmission',
+      },
+      {
+        userId: demoGuardian.id,
+        type: 'SUBMISSION_GRADED',
+        title: 'Student Test Graded: Newtonian Mechanics',
+        body: 'Demo Student received 18.0/20.0 on the Newtonian Mechanics lab test.',
+        entityType: 'AssignmentSubmission',
+      },
+    ];
+
+    for (const dn of demoNotifs) {
+      const existingNotif = await prisma.notification.findFirst({
+        where: { userId: dn.userId, title: dn.title },
+      });
+      if (!existingNotif) {
+        await prisma.notification.create({
+          data: {
+            userId: dn.userId,
+            type: dn.type,
+            title: dn.title,
+            body: dn.body,
+            entityType: dn.entityType,
+          },
+        });
+      }
+    }
+  }
+
   console.log('Demo branch data successfully populated:');
   console.log(`- Demo Branch: ${demoBranch.name}`);
   console.log(`- Batches: 3 (all unpublished)`);
@@ -596,6 +946,9 @@ async function main() {
   console.log(`- Attendance: 30 days history across all batches`);
   console.log(`- Payments: September & October records with PAID/PARTIAL/DUE`);
   console.log(`- Tests: 3 (1 currently open, 2 past with results)`);
+  console.log(`- Lectures: 5 (completed, planned, cancelled, online Meet class)`);
+  console.log(`- Assignments: 2 (1 online with student submissions, 1 offline with graded marks)`);
+  console.log(`- Materials & Notifications seeded successfully`);
   console.log(`- Notices: 3 campus announcements`);
 }
 

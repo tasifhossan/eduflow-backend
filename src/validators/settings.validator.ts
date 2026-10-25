@@ -147,6 +147,9 @@ export const updateSettingsSchema = z
         testimonials: z.boolean().optional(),
         newsletter: z.boolean().optional(),
         showPoweredBy: z.boolean().optional(),
+        lectures: z.boolean().optional(),
+        assignments: z.boolean().optional(),
+        onlineClasses: z.boolean().optional(),
       })
       .partial()
       .optional(),

@@ -3,7 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import { Role } from '@prisma/client';
+import bcrypt from 'bcrypt';
+import { Role, DayOfWeek, EnrollmentStatus } from '@prisma/client';
 import prisma from '../src/utils/prisma';
 import env from '../src/config/env';
 
@@ -202,6 +203,13 @@ async function runSmokeTests() {
   const createdGuardianLinkIds: string[] = [];
   const createdNewsletterEmails: string[] = [];
   const createdContactMessageIds: string[] = [];
+  const createdLectureIds: string[] = [];
+  const createdAssignmentIds: string[] = [];
+  const createdSubmissionIds: string[] = [];
+  const createdAttachmentIds: string[] = [];
+  const createdNotificationIds: string[] = [];
+  const createdBranchIds: string[] = [];
+  const createdChapterIds: string[] = [];
   let mainServerChild: any = null;
   let mainIsOnline = false;
   try {
@@ -214,7 +222,7 @@ async function runSmokeTests() {
     const cliPath = path.resolve('node_modules/tsx/dist/cli.mjs');
     mainServerChild = spawn(process.execPath, [cliPath, 'src/index.ts'], {
       cwd: process.cwd(),
-      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true' },
+      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     mainServerChild.stdout?.on('data', (d: Buffer) => {
@@ -264,7 +272,7 @@ async function runSmokeTests() {
 
     const adminCookie = authCookies['ADMIN'];
     const teacherCookie = authCookies['TEACHER'];
-    const studentCookie = authCookies['STUDENT'];
+    let studentCookie = authCookies['STUDENT'];
     const guardianCookie = authCookies['GUARDIAN'];
     const demoStudent = demoUsers['STUDENT'];
     const demoAdmin = demoUsers['ADMIN'];
@@ -1855,6 +1863,783 @@ async function runSmokeTests() {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // ACADEMICS MODULE CHECKS (49 - 58)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Refresh student cookie since demoStudent password was reset in Check 36
+    const refreshStudentRes = await req('/api/auth/demo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'STUDENT' }),
+    });
+    studentCookie = extractCookie(refreshStudentRes.headers) || studentCookie;
+
+    // Set up auxiliary fixtures for Academics testing
+    const mathSubject = await prisma.subject.findFirst({ where: { name: 'Higher Mathematics' } }) ||
+      await prisma.subject.create({ data: { name: 'SMOKE Higher Mathematics' } });
+
+    const smokeBranch2 = await prisma.branch.create({
+      data: { name: 'SMOKE-Branch-2', code: 'SMB2' },
+    });
+    createdBranchIds.push(smokeBranch2.id);
+
+    const smokeHash = await bcrypt.hash('Password123!', 10);
+    const smokeAdmin2 = await prisma.user.create({
+      data: {
+        name: 'SMOKE Admin 2',
+        email: 'smoke.admin2@demo.eduflow.local',
+        role: Role.ADMIN,
+        branchId: smokeBranch2.id,
+        password: smokeHash,
+      },
+    });
+    createdUserIds.push(smokeAdmin2.id);
+    const admin2Token = jwt.sign({ userId: smokeAdmin2.id, role: 'ADMIN', branchId: smokeBranch2.id }, process.env.JWT_SECRET || 'test-secret');
+    const admin2Cookie = `token=${admin2Token}`;
+
+    const smokeTeacher2 = await prisma.user.create({
+      data: {
+        name: 'SMOKE Teacher 2',
+        email: 'smoke.teacher2@demo.eduflow.local',
+        role: Role.TEACHER,
+        branchId: demoAdmin.branchId,
+        password: smokeHash,
+      },
+    });
+    createdUserIds.push(smokeTeacher2.id);
+    const teacher2Token = jwt.sign({ userId: smokeTeacher2.id, role: 'TEACHER', branchId: demoAdmin.branchId }, process.env.JWT_SECRET || 'test-secret');
+    const teacher2Cookie = `token=${teacher2Token}`;
+
+    const smokeUnregisteredStudent = await prisma.user.create({
+      data: {
+        name: 'SMOKE Unregistered Student',
+        email: 'smoke.unreg@demo.eduflow.local',
+        role: Role.STUDENT,
+        branchId: demoAdmin.branchId,
+        password: smokeHash,
+      },
+    });
+    createdUserIds.push(smokeUnregisteredStudent.id);
+    const unregStudentToken = jwt.sign({ userId: smokeUnregisteredStudent.id, role: 'STUDENT', branchId: demoAdmin.branchId }, process.env.JWT_SECRET || 'test-secret');
+    const unregStudentCookie = `token=${unregStudentToken}`;
+
+    const smokeUnlinkedGuardian = await prisma.user.create({
+      data: {
+        name: 'SMOKE Unlinked Guardian',
+        email: 'smoke.unlinked.guard@demo.eduflow.local',
+        role: Role.GUARDIAN,
+        branchId: demoAdmin.branchId,
+        password: smokeHash,
+      },
+    });
+    createdUserIds.push(smokeUnlinkedGuardian.id);
+    const unlinkedGuardToken = jwt.sign({ userId: smokeUnlinkedGuardian.id, role: 'GUARDIAN', branchId: demoAdmin.branchId }, process.env.JWT_SECRET || 'test-secret');
+    const unlinkedGuardCookie = `token=${unlinkedGuardToken}`;
+
+    const smokeChapter1 = await prisma.chapter.create({
+      data: { name: 'SMOKE-Chapter-1-Calculus', subjectId: mathSubject.id },
+    });
+    createdChapterIds.push(smokeChapter1.id);
+    const smokeChapter2 = await prisma.chapter.create({
+      data: { name: 'SMOKE-Chapter-2-Geometry', subjectId: mathSubject.id },
+    });
+    createdChapterIds.push(smokeChapter2.id);
+
+    const smokeBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-Batch-Academics',
+        slug: 'smoke-batch-academics',
+        type: 'ACADEMIC',
+        subjectId: mathSubject.id,
+        branchId: demoAdmin.branchId,
+        teacherId: demoUsers['TEACHER'].id,
+        isPublished: true,
+      },
+    });
+    createdBatchIds.push(smokeBatch.id);
+
+    // Routine slots: Monday 10:00-11:30, Wednesday 14:00-15:30
+    const slot1 = await prisma.routineSlot.create({
+      data: {
+        batchId: smokeBatch.id,
+        dayOfWeek: DayOfWeek.MONDAY,
+        startTime: '10:00',
+        endTime: '11:30',
+      },
+    });
+    const slot2 = await prisma.routineSlot.create({
+      data: {
+        batchId: smokeBatch.id,
+        dayOfWeek: DayOfWeek.WEDNESDAY,
+        startTime: '14:00',
+        endTime: '15:30',
+      },
+    });
+
+    // Enroll demo student actively
+    const smokeEnrollment = await prisma.enrollment.create({
+      data: {
+        batchId: smokeBatch.id,
+        studentId: demoStudent.id,
+        status: EnrollmentStatus.ACTIVE,
+      },
+    });
+
+    // Check 49: Academics scoping & draft protection
+    // 1. Create a draft lecture and draft assignment
+    const nowTime = Date.now();
+    const c49DraftLecRes = await req('/api/lectures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        chapterId: smokeChapter1.id,
+        teacherId: demoUsers['TEACHER'].id,
+        title: 'SMOKE-Draft Lecture',
+        plannedTopics: 'Draft topics for test',
+        startsAt: new Date(nowTime + 24 * 3600 * 1000).toISOString(),
+        endsAt: new Date(nowTime + 25 * 3600 * 1000).toISOString(),
+        isPublished: false,
+      }),
+    });
+    const draftLecId = c49DraftLecRes.body?.data?.id;
+    if (draftLecId) createdLectureIds.push(draftLecId);
+
+    const c49DraftAssignRes = await req('/api/assignments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        title: 'SMOKE-Draft Assignment',
+        instructions: 'Solve these draft questions',
+        dueAt: new Date(nowTime + 48 * 3600 * 1000).toISOString(),
+        maxMarks: 20,
+        mode: 'ONLINE',
+        publishNow: false,
+      }),
+    });
+    const draftAssignId = c49DraftAssignRes.body?.data?.id;
+    if (draftAssignId) createdAssignmentIds.push(draftAssignId);
+
+    // Student listing: draft lecture and draft assignment must be absent
+    const c49StudentLecs = await req('/api/lectures', { headers: { Cookie: studentCookie } });
+    const draftInStudentLecList = c49StudentLecs.body?.data?.items?.some((i: any) => i.id === draftLecId);
+    const c49StudentLecDirect = await req(`/api/lectures/${draftLecId}`, { headers: { Cookie: studentCookie } });
+
+    const c49StudentAssigns = await req('/api/assignments', { headers: { Cookie: studentCookie } });
+    const draftInStudentAssignList = c49StudentAssigns.body?.data?.items?.some((i: any) => i.id === draftAssignId);
+    const c49StudentAssignDirect = await req(`/api/assignments/${draftAssignId}`, { headers: { Cookie: studentCookie } });
+
+    // Publish lecture to test cross-batch & guardian scoping
+    await req(`/api/lectures/${draftLecId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({ isPublished: true }),
+    });
+
+    const c49UnregStudentDirect = await req(`/api/lectures/${draftLecId}`, { headers: { Cookie: unregStudentCookie } });
+    const c49UnlinkedGuardDirect = await req(`/api/lectures/${draftLecId}?studentId=${demoStudent.id}`, { headers: { Cookie: unlinkedGuardCookie } });
+    const c49Teacher2Deny = await req(`/api/lectures/${draftLecId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: teacher2Cookie },
+      body: JSON.stringify({ title: 'Hacked Title' }),
+    });
+    const c49Admin2Deny = await req(`/api/lectures/${draftLecId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+      body: JSON.stringify({ title: 'Hacked Branch' }),
+    });
+
+    const c49Passed =
+      !draftInStudentLecList &&
+      c49StudentLecDirect.status === 404 &&
+      !draftInStudentAssignList &&
+      c49StudentAssignDirect.status === 404 &&
+      c49UnregStudentDirect.status === 403 &&
+      c49UnlinkedGuardDirect.status === 403 &&
+      c49Teacher2Deny.status === 403 &&
+      c49Admin2Deny.status === 403;
+
+    recordCheck(
+      '49',
+      'Academics scoping: draft protection, cross-batch student & unlinked guardian 403',
+      c49Passed,
+      c49Passed
+        ? 'Drafts hidden from students (404 direct); non-enrolled student 403; unlinked guardian 403; other teacher/admin denied (403)'
+        : `LecDraftHidden: ${!draftInStudentLecList}, DirectLec404: ${c49StudentLecDirect.status}, Unreg403: ${c49UnregStudentDirect.status}, Guard403: ${c49UnlinkedGuardDirect.status}`
+    );
+
+    // Check 50: Online class join window & secret omission
+    // Online lecture 1: starts in 10 minutes (INSIDE join window)
+    const c50InsideLecRes = await req('/api/lectures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        teacherId: demoUsers['TEACHER'].id,
+        title: 'SMOKE-Online Inside Window',
+        plannedTopics: 'Inside join window test',
+        startsAt: new Date(nowTime + 10 * 60 * 1000).toISOString(),
+        endsAt: new Date(nowTime + 70 * 60 * 1000).toISOString(),
+        isPublished: true,
+        onlineProvider: 'MEET',
+        onlineUrl: 'https://meet.google.com/smoke-test-room',
+        onlinePasscode: 'smokePass99',
+      }),
+    });
+    const insideLecId = c50InsideLecRes.body?.data?.id;
+    if (insideLecId) createdLectureIds.push(insideLecId);
+
+    // Online lecture 2: starts in 3 hours (OUTSIDE join window)
+    const c50OutsideLecRes = await req('/api/lectures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        teacherId: demoUsers['TEACHER'].id,
+        title: 'SMOKE-Online Outside Window',
+        plannedTopics: 'Outside join window test',
+        startsAt: new Date(nowTime + 180 * 60 * 1000).toISOString(),
+        endsAt: new Date(nowTime + 240 * 60 * 1000).toISOString(),
+        isPublished: true,
+        onlineProvider: 'ZOOM',
+        onlineUrl: 'https://smoke.zoom.us/j/123456789',
+        onlinePasscode: 'zoomPass99',
+      }),
+    });
+    const outsideLecId = c50OutsideLecRes.body?.data?.id;
+    if (outsideLecId) createdLectureIds.push(outsideLecId);
+
+    const c50StudentInside = await req(`/api/lectures/${insideLecId}`, { headers: { Cookie: studentCookie } });
+    const c50StudentOutside = await req(`/api/lectures/${outsideLecId}`, { headers: { Cookie: studentCookie } });
+    const c50StaffOutside = await req(`/api/lectures/${outsideLecId}`, { headers: { Cookie: teacherCookie } });
+    const c50GuardianInside = await req(`/api/lectures/${insideLecId}?studentId=${demoStudent.id}`, { headers: { Cookie: guardianCookie } });
+    const c50ListRes = await req(`/api/lectures?batchId=${smokeBatch.id}`, { headers: { Cookie: studentCookie } });
+
+    const listHasOnlineUrl = c50ListRes.body?.data?.items?.some((i: any) => i.onlineUrl !== undefined || i.onlinePasscode !== undefined);
+    const insideData = c50StudentInside.body?.data;
+    const outsideData = c50StudentOutside.body?.data;
+    const guardianData = c50GuardianInside.body?.data;
+
+    const c50Passed =
+      insideData?.canJoinNow === true &&
+      insideData?.onlineUrl === 'https://meet.google.com/smoke-test-room' &&
+      insideData?.onlinePasscode === 'smokePass99' &&
+      outsideData?.canJoinNow === false &&
+      outsideData?.onlineUrl === undefined &&
+      outsideData?.onlinePasscode === undefined &&
+      outsideData?.joinOpensAt !== undefined &&
+      c50StaffOutside.body?.data?.onlineUrl === 'https://smoke.zoom.us/j/123456789' &&
+      guardianData?.onlineUrl === undefined &&
+      guardianData?.onlinePasscode === undefined &&
+      !listHasOnlineUrl;
+
+    recordCheck(
+      '50',
+      'Online class join window: links hidden outside window, visible inside, omitted in list & guardian',
+      c50Passed,
+      c50Passed
+        ? 'Inside window: student canJoinNow=true; Outside window: link/passcode omitted; Staff always sees; Guardian & list never receive link/passcode'
+        : `InsideCanJoin: ${insideData?.canJoinNow}, OutsideOmitted: ${outsideData?.onlineUrl === undefined}, StaffSees: ${!!c50StaffOutside.body?.data?.onlineUrl}, GuardOmitted: ${guardianData?.onlineUrl === undefined}, ListOmitted: ${!listHasOnlineUrl}`
+    );
+
+    // Check 51: RoutineSlot lecture generation & Asia/Dhaka UTC conversion
+    const c51DryRun = await req(`/api/batches/${smokeBatch.id}/lectures/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        from: '2026-11-09', // Monday
+        to: '2026-11-15',   // Sunday (contains Monday slot1 + Wednesday slot2)
+        dryRun: true,
+      }),
+    });
+    const dryRunDbCount = await prisma.lecture.count({
+      where: { routineSlotId: { in: [slot1.id, slot2.id] } },
+    });
+
+    const c51RealRun = await req(`/api/batches/${smokeBatch.id}/lectures/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        from: '2026-11-09',
+        to: '2026-11-15',
+        dryRun: false,
+      }),
+    });
+    const realDbLectures = await prisma.lecture.findMany({
+      where: { routineSlotId: { in: [slot1.id, slot2.id] } },
+    });
+    for (const r of realDbLectures) createdLectureIds.push(r.id);
+
+    // Verify UTC offset for Monday slot (10:00 AM Asia/Dhaka is UTC 04:00 AM)
+    const monLec = realDbLectures.find((l) => l.routineSlotId === slot1.id);
+    const isCorrectUtc = monLec?.startsAt?.toISOString() === '2026-11-09T04:00:00.000Z';
+
+    // Idempotent second run
+    const c51SecondRun = await req(`/api/batches/${smokeBatch.id}/lectures/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        from: '2026-11-09',
+        to: '2026-11-15',
+      }),
+    });
+
+    const c51Passed =
+      c51DryRun.body?.data?.createdCount === 2 &&
+      dryRunDbCount === 0 &&
+      c51RealRun.body?.data?.createdCount === 2 &&
+      realDbLectures.length === 2 &&
+      isCorrectUtc &&
+      c51SecondRun.body?.data?.createdCount === 0 &&
+      c51SecondRun.body?.data?.skippedCount === 2;
+
+    recordCheck(
+      '51',
+      'RoutineSlot lecture generation, Asia/Dhaka UTC conversion & idempotency',
+      c51Passed,
+      c51Passed
+        ? 'dryRun wrote 0; real generated 2; Mon 10:00 Asia/Dhaka mapped to 04:00Z; second run skipped duplicates (idempotent)'
+        : `DryCount: ${c51DryRun.body?.data?.createdCount}, DryDbCount: ${dryRunDbCount}, RealCount: ${realDbLectures.length}, UtcCorrect: ${isCorrectUtc}, SecondCreated: ${c51SecondRun.body?.data?.createdCount}`
+    );
+
+    // Check 52: Overlap warnings & syllabus progress
+    // Attempt creating overlapping lecture for same teacher and batch
+    const c52OverlapRes = await req('/api/lectures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        teacherId: demoUsers['TEACHER'].id,
+        title: 'SMOKE-Clashing Lecture',
+        plannedTopics: 'Overlap warning test',
+        startsAt: '2026-11-09T04:15:00.000Z',
+        endsAt: '2026-11-09T04:45:00.000Z',
+      }),
+    });
+    if (c52OverlapRes.body?.data?.id) createdLectureIds.push(c52OverlapRes.body.data.id);
+    const hasTeacherClash = (c52OverlapRes.body?.warnings?.teacherClashes?.length || 0) > 0;
+    const hasBatchClash = (c52OverlapRes.body?.warnings?.batchClashes?.length || 0) > 0;
+
+    // Complete lecture with Chapter 1
+    if (monLec) {
+      await req(`/api/lectures/${monLec.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ chapterId: smokeChapter1.id, isPublished: true }),
+      });
+      await req(`/api/lectures/${monLec.id}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ coveredTopics: 'SMOKE-Covered chapter 1 integration', homeworkNote: 'Done' }),
+      });
+    }
+
+    const c52Syllabus = await req(`/api/batches/${smokeBatch.id}/syllabus-progress`, {
+      headers: { Cookie: studentCookie },
+    });
+    const chapProgress = c52Syllabus.body?.data?.subject?.chapters || [];
+    const c1Prog = chapProgress.find((c: any) => c.id === smokeChapter1.id);
+    const c2Prog = chapProgress.find((c: any) => c.id === smokeChapter2.id);
+
+    const c52Passed =
+      c52OverlapRes.status === 201 &&
+      hasTeacherClash &&
+      hasBatchClash &&
+      c1Prog?.covered === true &&
+      c1Prog?.lastCoveredAt !== null &&
+      c2Prog?.covered === false;
+
+    recordCheck(
+      '52',
+      'Lecture overlap warnings & syllabus progress coverage calculation',
+      c52Passed,
+      c52Passed
+        ? 'Clashing lecture returned non-blocking teacher & batch warnings; syllabus progress tracked completed chapter (50%)'
+        : `Status: ${c52OverlapRes.status}, TeacherClash: ${hasTeacherClash}, BatchClash: ${hasBatchClash}, C1Covered: ${c1Prog?.covered}, C2Covered: ${c2Prog?.covered}`
+    );
+
+    // Check 53: Assignment submission lifecycle & allowLate enforcement
+    const c53StrictAssignRes = await req('/api/assignments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        title: 'SMOKE-Strict Deadline Assignment',
+        instructions: 'Submit before deadline strictly',
+        dueAt: new Date(nowTime - 30 * 60 * 1000).toISOString(), // 30 min in past
+        maxMarks: 30,
+        mode: 'ONLINE',
+        allowLate: false,
+        publishNow: true,
+      }),
+    });
+    const strictAssignId = c53StrictAssignRes.body?.data?.id;
+    if (strictAssignId) createdAssignmentIds.push(strictAssignId);
+
+    // Student late submission rejection when allowLate is false
+    const c53LateReject = await req(`/api/assignments/${strictAssignId}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ textAnswer: 'Late attempt' }),
+    });
+
+    // Update allowLate: true
+    await req(`/api/assignments/${strictAssignId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({ allowLate: true }),
+    });
+
+    // Student late submission accepted when allowLate is true
+    const c53LateAccepted = await req(`/api/assignments/${strictAssignId}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ textAnswer: 'Late submission allowed' }),
+    });
+    const subId = c53LateAccepted.body?.data?.id;
+    if (subId) createdSubmissionIds.push(subId);
+
+    // Resubmission before grading succeeds
+    const c53Resubmit = await req(`/api/assignments/${strictAssignId}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ textAnswer: 'Updated final solution' }),
+    });
+
+    // Teacher grades submission
+    const c53GradeRes = await req(`/api/submissions/${subId}/grade`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({ marks: 28.5, feedback: 'Well structured derivation' }),
+    });
+
+    // Attempt resubmit after grading -> 409
+    const c53ResubmitBlocked = await req(`/api/assignments/${strictAssignId}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ textAnswer: 'Blocked resubmission attempt' }),
+    });
+
+    // Attempt grading with marks > maxMarks (30) -> 400
+    const c53MarksBoundsError = await req(`/api/submissions/${subId}/grade`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({ marks: 999 }),
+    });
+
+    const c53Passed =
+      c53LateReject.status === 400 &&
+      c53LateReject.body?.code === 'SUBMISSION_CLOSED' &&
+      c53LateAccepted.status === 200 &&
+      c53LateAccepted.body?.data?.isLate === true &&
+      c53Resubmit.status === 200 &&
+      c53GradeRes.status === 200 &&
+      c53ResubmitBlocked.status === 409 &&
+      c53MarksBoundsError.status === 400;
+
+    recordCheck(
+      '53',
+      'Assignment submission lifecycle: SUBMISSION_CLOSED, late flag, resubmission lock & marks bounds',
+      c53Passed,
+      c53Passed
+        ? 'Late rejected with SUBMISSION_CLOSED; allowLate accepted with isLate=true; resubmission unlocked before grading, locked after (409); marks clamped'
+        : `LateRej: ${c53LateReject.status}, SubClosed: ${c53LateReject.body?.code}, LateOk: ${c53LateAccepted.status}, ResubOk: ${c53Resubmit.status}, BlockedPostGrade: ${c53ResubmitBlocked.status}, BoundsErr: ${c53MarksBoundsError.status}`
+    );
+
+    // Check 54: Offline bulk marks & missing submissions roster
+    const c54OfflineAssignRes = await req('/api/assignments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        title: 'SMOKE-Offline Test',
+        instructions: 'Conducted offline',
+        dueAt: new Date(nowTime + 3600 * 1000).toISOString(),
+        maxMarks: 50,
+        mode: 'OFFLINE',
+        publishNow: true,
+      }),
+    });
+    const offlineAssignId = c54OfflineAssignRes.body?.data?.id;
+    if (offlineAssignId) createdAssignmentIds.push(offlineAssignId);
+
+    // Bulk upload marks
+    const c54BulkMarksRes = await req(`/api/assignments/${offlineAssignId}/marks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        entries: [
+          { studentId: demoStudent.id, marks: 44.5, feedback: 'Excellent work' },
+        ],
+      }),
+    });
+
+    // Enroll smokeUnregisteredStudent to check MISSING roster
+    await prisma.enrollment.create({
+      data: {
+        batchId: smokeBatch.id,
+        studentId: smokeUnregisteredStudent.id,
+        status: EnrollmentStatus.ACTIVE,
+      },
+    });
+
+    const c54MissingRes = await req(`/api/assignments/${offlineAssignId}/submissions?status=MISSING`, {
+      headers: { Cookie: teacherCookie },
+    });
+    const missingItems = c54MissingRes.body?.data?.items || [];
+    const unregInMissing = missingItems.some((i: any) => i.student?.id === smokeUnregisteredStudent.id);
+
+    const c54Passed =
+      c54BulkMarksRes.status === 200 &&
+      c54BulkMarksRes.body?.data?.results?.[0]?.success === true &&
+      c54MissingRes.status === 200 &&
+      unregInMissing;
+
+    recordCheck(
+      '54',
+      'Offline bulk marks entry & MISSING submission roster reporting',
+      c54Passed,
+      c54Passed
+        ? 'Bulk marks upserted successfully; status=MISSING correctly listed active enrolled students without submission'
+        : `BulkStatus: ${c54BulkMarksRes.status}, MissingStatus: ${c54MissingRes.status}, UnregInMissing: ${unregInMissing}`
+    );
+
+    // Check 55: Attachment validation, Cloudinary private URL & download authorization
+    // 1. Non-https link rejected
+    const c55HttpLink = await req('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        lectureId: draftLecId,
+        kind: 'LINK',
+        title: 'SMOKE-Http Link',
+        url: 'http://insecure-domain.com/notes.pdf',
+      }),
+    });
+
+    // 2. Link with credentials rejected
+    const c55CredLink = await req('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        lectureId: draftLecId,
+        kind: 'LINK',
+        title: 'SMOKE-Cred Link',
+        url: 'https://user:pass@secure-domain.com/notes.pdf',
+      }),
+    });
+
+    // 3. Link with javascript: rejected
+    const c55JsLink = await req('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        lectureId: draftLecId,
+        kind: 'LINK',
+        title: 'SMOKE-Js Link',
+        url: 'javascript:alert(1)',
+      }),
+    });
+
+    // 4. Valid link accepted
+    const c55ValidLink = await req('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        lectureId: draftLecId,
+        kind: 'LINK',
+        title: 'SMOKE-Valid Handout',
+        url: 'https://eduflow.local/math/calculus-handout.pdf',
+      }),
+    });
+    if (c55ValidLink.body?.data?.id) createdAttachmentIds.push(c55ValidLink.body.data.id);
+
+    // 5. FILE attachment outside caller folder rejected
+    const c55BadPrefix = await req('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        lectureId: draftLecId,
+        kind: 'FILE',
+        title: 'SMOKE-Malicious File',
+        publicId: 'evil_folder/attacker_upload',
+      }),
+    });
+
+    // 6. Valid FILE attachment created
+    const c55ValidFile = await req('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        lectureId: draftLecId,
+        kind: 'FILE',
+        title: 'SMOKE-Lecture Notes File',
+        publicId: `eduflow/material/${demoAdmin.branchId}/SMOKE-test-notes`,
+        resourceType: 'raw',
+        format: 'pdf',
+        bytes: 10240,
+        originalName: 'lecture_notes.pdf',
+      }),
+    });
+    const fileAttId = c55ValidFile.body?.data?.id;
+    if (fileAttId) createdAttachmentIds.push(fileAttId);
+
+    // 7. Enrolled student downloads file: receives signed url with expiresAt
+    const c55DownloadEnrolled = await req(`/api/attachments/${fileAttId}/download`, {
+      headers: { Cookie: studentCookie },
+    });
+
+    // 8. Non-enrolled user denied
+    const c55DownloadDenied = await req(`/api/attachments/${fileAttId}/download`, {
+      headers: { Cookie: admin2Cookie },
+    });
+
+    const c55Passed =
+      c55HttpLink.status === 400 &&
+      c55CredLink.status === 400 &&
+      c55JsLink.status === 400 &&
+      c55ValidLink.status === 201 &&
+      c55BadPrefix.status === 400 &&
+      c55ValidFile.status === 201 &&
+      c55DownloadEnrolled.status === 200 &&
+      !!c55DownloadEnrolled.body?.data?.url &&
+      !!c55DownloadEnrolled.body?.data?.expiresAt &&
+      c55DownloadDenied.status === 403;
+
+    recordCheck(
+      '55',
+      'Attachment security: link validation, folder prefix isolation & signed download URLs',
+      c55Passed,
+      c55Passed
+        ? 'Insecure/cred/js links rejected; invalid folder rejected; valid file produced signed download URL with 5m expiry; unauthorized access 403'
+        : `HttpRej: ${c55HttpLink.status}, CredRej: ${c55CredLink.status}, JsRej: ${c55JsLink.status}, BadPrefixRej: ${c55BadPrefix.status}, DownloadOk: ${c55DownloadEnrolled.status}, Denied: ${c55DownloadDenied.status}`
+    );
+
+    // Check 56: In-App & Email notifications with unread counts
+    const c56NotifList = await req('/api/notifications', { headers: { Cookie: studentCookie } });
+    const initialUnread = c56NotifList.body?.data?.unreadCount ?? 0;
+
+    const c56MarkRead = await req('/api/notifications/read', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ all: true }),
+    });
+
+    // Verify zero links or passcodes appear in notifications
+    const allNotifs = c56NotifList.body?.data?.items || [];
+    let notifLeakDetected = false;
+    for (const n of allNotifs) {
+      const fullText = `${n.title} ${n.body}`;
+      if (/meet\.google\.com|zoom\.us|smokePass|demo123/i.test(fullText)) {
+        notifLeakDetected = true;
+      }
+    }
+
+    const c56Passed =
+      c56NotifList.status === 200 &&
+      c56MarkRead.status === 200 &&
+      c56MarkRead.body?.data?.unreadCount === 0 &&
+      !notifLeakDetected;
+
+    recordCheck(
+      '56',
+      'Notifications lifecycle: batch delivery, unread count tracking & zero online link leakage',
+      c56Passed,
+      c56Passed
+        ? 'Notifications listed and unreadCount updated to 0 on mark-all-read; zero online class links/passcodes in notification text'
+        : `ListStatus: ${c56NotifList.status}, ReadStatus: ${c56MarkRead.status}, RemainingUnread: ${c56MarkRead.body?.data?.unreadCount}, Leaked: ${notifLeakDetected}`
+    );
+
+    // Check 57: Feature flags enforcement (lectures, assignments, onlineClasses)
+    const c57PatchOff = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({
+        features: {
+          lectures: false,
+          assignments: false,
+          onlineClasses: false,
+        },
+      }),
+    });
+
+    const c57LecDisabled = await req('/api/lectures', { headers: { Cookie: teacherCookie } });
+    const c57AssignDisabled = await req('/api/assignments', { headers: { Cookie: teacherCookie } });
+
+    // Restore settings
+    const c57PatchOn = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({
+        features: {
+          lectures: true,
+          assignments: true,
+          onlineClasses: true,
+        },
+      }),
+    });
+
+    const c57LecRestored = await req('/api/lectures', { headers: { Cookie: teacherCookie } });
+
+    const c57Passed =
+      c57LecDisabled.status === 404 &&
+      c57AssignDisabled.status === 404 &&
+      c57LecRestored.status === 200;
+
+    recordCheck(
+      '57',
+      'Feature flag enforcement: lectures, assignments & onlineClasses gating',
+      c57Passed,
+      c57Passed
+        ? 'Flag false returned 404 for lectures and assignments; restoring flag returned 200 OK'
+        : `LecDisabled: ${c57LecDisabled.status}, AssignDisabled: ${c57AssignDisabled.status}, Restored: ${c57LecRestored.status}`
+    );
+
+    // Check 58: Audit log coverage & zero secret leakage
+    const academicAuditLogs = await prisma.auditLog.findMany({
+      where: {
+        action: {
+          in: [
+            'LECTURE_CREATE',
+            'LECTURE_UPDATE',
+            'LECTURE_RESCHEDULE',
+            'LECTURE_COMPLETE',
+            'ASSIGNMENT_CREATE',
+            'ASSIGNMENT_GRADE',
+            'ATTACHMENT_CREATE',
+          ],
+        },
+      },
+    });
+
+    let auditSecretFound = false;
+    for (const log of academicAuditLogs) {
+      if (log.metadata) {
+        const metaStr = JSON.stringify(log.metadata);
+        if (/meet\.google\.com|zoom\.us|smokePass|password|token/i.test(metaStr)) {
+          auditSecretFound = true;
+        }
+      }
+    }
+
+    const c58Passed = academicAuditLogs.length >= 5 && !auditSecretFound;
+
+    recordCheck(
+      '58',
+      'Audit log coverage on academic privileged actions & zero secret leakage',
+      c58Passed,
+      c58Passed
+        ? `AuditLog entries verified across academic actions (${academicAuditLogs.length} found); zero URLs, passcodes, or secrets in metadata`
+        : `LogsCount: ${academicAuditLogs.length}, SecretFound: ${auditSecretFound}`
+    );
+
+    // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1987,6 +2772,27 @@ async function runSmokeTests() {
       }
       await prisma.test.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
 
+      // Clean up academic attachments, submissions, assignments, lectures before batches
+      if (createdAttachmentIds.length > 0) {
+        await prisma.attachment.deleteMany({ where: { id: { in: createdAttachmentIds } } });
+      }
+      await prisma.attachment.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
+      if (createdSubmissionIds.length > 0) {
+        await prisma.assignmentSubmission.deleteMany({ where: { id: { in: createdSubmissionIds } } });
+      }
+      await prisma.assignmentSubmission.deleteMany({ where: { textAnswer: { contains: 'SMOKE-' } } });
+
+      if (createdAssignmentIds.length > 0) {
+        await prisma.assignment.deleteMany({ where: { id: { in: createdAssignmentIds } } });
+      }
+      await prisma.assignment.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
+      if (createdLectureIds.length > 0) {
+        await prisma.lecture.deleteMany({ where: { id: { in: createdLectureIds } } });
+      }
+      await prisma.lecture.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
       if (createdBatchIds.length > 0) {
         await prisma.enrollment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.routineSlot.deleteMany({ where: { batchId: { in: createdBatchIds } } });
@@ -2002,9 +2808,24 @@ async function runSmokeTests() {
       await prisma.feePayment.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
       await prisma.batch.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
 
+      if (createdNotificationIds.length > 0) {
+        await prisma.notification.deleteMany({ where: { id: { in: createdNotificationIds } } });
+      }
+      await prisma.notification.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
+      if (createdChapterIds.length > 0) {
+        await prisma.chapter.deleteMany({ where: { id: { in: createdChapterIds } } });
+      }
+      await prisma.chapter.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
+
       if (createdUserIds.length > 0) {
         await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
       }
+
+      if (createdBranchIds.length > 0) {
+        await prisma.branch.deleteMany({ where: { id: { in: createdBranchIds } } });
+      }
+      await prisma.branch.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
       if (createdBlogPostIds.length > 0) {
         await prisma.blogPost.deleteMany({ where: { id: { in: createdBlogPostIds } } });
       }

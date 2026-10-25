@@ -80,6 +80,34 @@ enum ContactMessageStatus {
   ARCHIVED
 }
 
+enum LectureStatus {
+  PLANNED
+  COMPLETED
+  CANCELLED
+}
+
+enum OnlineProvider {
+  MEET
+  ZOOM
+  OTHER
+}
+
+enum AssignmentMode {
+  ONLINE
+  OFFLINE
+}
+
+enum AssignmentSubmissionStatus {
+  SUBMITTED
+  GRADED
+}
+
+enum AttachmentKind {
+  FILE
+  LINK
+}
+
+
 model Branch {
   id        String   @id @default(cuid())
   name      String
@@ -89,6 +117,7 @@ model Branch {
   users     User[]
   batches   Batch[]
   notices   Notice[]
+  attachments Attachment[]
 }
 
 model User {
@@ -131,6 +160,14 @@ model User {
   practiceSessions     PracticeSession[]
   reviews              Review[]
   passwordResetTokens  PasswordResetToken[]
+  notifyByEmail        Boolean                 @default(true)
+  teacherLectures      Lecture[]               @relation(name: "TeacherLectures")
+  createdLectures      Lecture[]               @relation(name: "CreatedLectures")
+  createdAssignments   Assignment[]            @relation(name: "CreatedAssignments")
+  assignmentSubmissions AssignmentSubmission[] @relation(name: "StudentAssignmentSubmissions")
+  gradedSubmissions    AssignmentSubmission[]  @relation(name: "GradedSubmissions")
+  uploadedAttachments  Attachment[]            @relation(name: "UploadedAttachments")
+  notifications        Notification[]          @relation(name: "UserNotifications")
 
   @@index([branchId])
   @@index([role])
@@ -189,8 +226,10 @@ model GuardianInfoChangeLog {
 model Subject {
   id       String    @id @default(cuid())
   name     String
-  chapters Chapter[]
-  batches  Batch[]
+  chapters    Chapter[]
+  batches     Batch[]
+  lectures    Lecture[]
+  assignments Assignment[]
 }
 
 model Chapter {
@@ -200,6 +239,7 @@ model Chapter {
   subject   Subject    @relation(fields: [subjectId], references: [id])
   tests     Test[]
   resources Resource[]
+  lectures  Lecture[]
 
   @@index([subjectId])
 }
@@ -235,6 +275,9 @@ model Batch {
   practiceSessions PracticeSession[]
   reviews          Review[]
   contactMessages  ContactMessage[]
+  lectures         Lecture[]
+  assignments      Assignment[]
+
 
   @@index([branchId])
   @@index([subjectId])
@@ -268,6 +311,7 @@ model RoutineSlot {
   dayOfWeek DayOfWeek
   startTime String
   endTime   String
+  lectures  Lecture[]
 
   @@index([batchId])
 }
@@ -561,10 +605,142 @@ model CenterSettings {
   academicYearStartMonth Int      @default(1)
   receiptHeader          String?
   receiptFooter          String?
-  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true}")
+  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true}")
   homepage               Json     @default("{\"heroBadge\":\"\",\"heroPoints\":[],\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
+
+model Lecture {
+  id             String          @id @default(cuid())
+  batchId        String
+  batch          Batch           @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  subjectId      String
+  subject        Subject         @relation(fields: [subjectId], references: [id])
+  chapterId      String?
+  chapter        Chapter?        @relation(fields: [chapterId], references: [id])
+  teacherId      String
+  teacher        User            @relation(name: "TeacherLectures", fields: [teacherId], references: [id])
+  routineSlotId  String?
+  routineSlot    RoutineSlot?    @relation(fields: [routineSlotId], references: [id], onDelete: SetNull)
+  title          String?
+  plannedTopics  String
+  coveredTopics  String?
+  homeworkNote   String?
+  startsAt       DateTime
+  endsAt         DateTime
+  status         LectureStatus   @default(PLANNED)
+  cancelReason   String?
+  rescheduledAt  DateTime?
+  isPublished    Boolean         @default(false)
+  onlineProvider OnlineProvider?
+  onlineUrl      String?
+  onlinePasscode String?
+  createdById    String
+  createdBy      User            @relation(name: "CreatedLectures", fields: [createdById], references: [id])
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  attachments    Attachment[]
+  assignments    Assignment[]
+
+  @@unique([routineSlotId, startsAt])
+  @@index([batchId, startsAt])
+  @@index([teacherId, startsAt])
+  @@index([status])
+}
+
+model Assignment {
+  id           String                 @id @default(cuid())
+  batchId      String
+  batch        Batch                  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  subjectId    String?
+  subject      Subject?               @relation(fields: [subjectId], references: [id])
+  lectureId    String?
+  lecture      Lecture?               @relation(fields: [lectureId], references: [id], onDelete: SetNull)
+  title        String
+  instructions String
+  dueAt        DateTime
+  maxMarks     Decimal                @db.Decimal(6, 2)
+  mode         AssignmentMode
+  allowLate    Boolean                @default(false)
+  publishedAt  DateTime?
+  createdById  String
+  createdBy    User                   @relation(name: "CreatedAssignments", fields: [createdById], references: [id])
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  submissions  AssignmentSubmission[]
+  attachments  Attachment[]
+
+  @@index([batchId, dueAt])
+  @@index([publishedAt])
+}
+
+model AssignmentSubmission {
+  id           String                     @id @default(cuid())
+  assignmentId String
+  assignment   Assignment                 @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      User                       @relation(name: "StudentAssignmentSubmissions", fields: [studentId], references: [id], onDelete: Cascade)
+  textAnswer   String?
+  submittedAt  DateTime?
+  isLate       Boolean                    @default(false)
+  marks        Decimal?                   @db.Decimal(6, 2)
+  feedback     String?
+  status       AssignmentSubmissionStatus @default(SUBMITTED)
+  gradedById   String?
+  gradedBy     User?                      @relation(name: "GradedSubmissions", fields: [gradedById], references: [id])
+  gradedAt     DateTime?
+  createdAt    DateTime                   @default(now())
+  updatedAt    DateTime                   @updatedAt
+  attachments  Attachment[]
+
+  @@unique([assignmentId, studentId])
+  @@index([assignmentId, status])
+  @@index([studentId])
+}
+
+model Attachment {
+  id           String                @id @default(cuid())
+  branchId     String
+  branch       Branch                @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  lectureId    String?
+  lecture      Lecture?              @relation(fields: [lectureId], references: [id], onDelete: Cascade)
+  assignmentId String?
+  assignment   Assignment?           @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  submissionId String?
+  submission   AssignmentSubmission? @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  kind         AttachmentKind
+  title        String
+  url          String?
+  publicId     String?
+  resourceType String?
+  format       String?
+  bytes        Int?
+  originalName String?
+  uploadedById String
+  uploadedBy   User                  @relation(name: "UploadedAttachments", fields: [uploadedById], references: [id])
+  createdAt    DateTime              @default(now())
+
+  @@index([branchId])
+  @@index([lectureId])
+  @@index([assignmentId])
+  @@index([submissionId])
+}
+
+model Notification {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(name: "UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
+  type       String
+  title      String
+  body       String
+  entityType String?
+  entityId   String?
+  readAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, readAt, createdAt])
+}
+
 
 

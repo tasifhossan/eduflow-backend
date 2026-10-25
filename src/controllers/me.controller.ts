@@ -10,6 +10,7 @@ export const updateProfileSchema = z.object({
   avatarUrl: z.string().trim().url('Invalid avatar URL').nullable().optional().or(z.literal('')),
   bio: z.string().trim().max(1000, 'Bio cannot exceed 1000 characters').nullable().optional(),
   headline: z.string().trim().max(200, 'Headline cannot exceed 200 characters').nullable().optional(),
+  notifyByEmail: z.boolean().optional(),
 });
 
 export const updatePasswordSchema = z.object({
@@ -43,6 +44,7 @@ export async function getProfile(req: Request, res: Response) {
         avatarUrl: true,
         bio: true,
         headline: true,
+        notifyByEmail: true,
         createdAt: true,
       },
     });
@@ -69,7 +71,7 @@ export async function getProfile(req: Request, res: Response) {
 
 /**
  * PATCH /me
- * Updates self profile fields (name, phone, avatarUrl, bio, headline only; never email, role, branchId).
+ * Updates self profile fields (name, phone, avatarUrl, bio, headline, notifyByEmail; never email, role, branchId).
  */
 export async function updateProfile(req: Request, res: Response) {
   try {
@@ -89,7 +91,7 @@ export async function updateProfile(req: Request, res: Response) {
       });
     }
 
-    const { name, phone, avatarUrl, bio, headline } = parseResult.data;
+    const { name, phone, avatarUrl, bio, headline, notifyByEmail } = parseResult.data;
     const updateData: Prisma.UserUpdateInput = {};
 
     if (name !== undefined) updateData.name = name;
@@ -97,6 +99,7 @@ export async function updateProfile(req: Request, res: Response) {
     if (avatarUrl !== undefined) updateData.avatarUrl = avatarUrl === '' ? null : avatarUrl;
     if (bio !== undefined) updateData.bio = bio;
     if (headline !== undefined) updateData.headline = headline;
+    if (notifyByEmail !== undefined) updateData.notifyByEmail = notifyByEmail;
 
     const updatedUser = await prisma.user.update({
       where: { id: req.user.userId },
@@ -112,6 +115,7 @@ export async function updateProfile(req: Request, res: Response) {
         avatarUrl: true,
         bio: true,
         headline: true,
+        notifyByEmail: true,
         createdAt: true,
       },
     });

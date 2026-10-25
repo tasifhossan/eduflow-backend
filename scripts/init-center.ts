@@ -131,6 +131,9 @@ async function main() {
           testimonials: true,
           newsletter: false,
           showPoweredBy: true,
+          lectures: true,
+          assignments: true,
+          onlineClasses: true,
         },
         homepage: {
           heroBadge: '',

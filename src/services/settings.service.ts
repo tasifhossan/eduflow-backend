@@ -25,6 +25,9 @@ export interface CenterPublicData {
     testimonials?: boolean;
     newsletter?: boolean;
     showPoweredBy?: boolean;
+    lectures?: boolean;
+    assignments?: boolean;
+    onlineClasses?: boolean;
     [key: string]: unknown;
   };
   homepage: {
@@ -90,6 +93,9 @@ export async function getCenterSettings(forceRefresh = false) {
           testimonials: true,
           newsletter: false,
           showPoweredBy: true,
+          lectures: true,
+          assignments: true,
+          onlineClasses: true,
         },
         homepage: {
           heroBadge: '',
@@ -115,6 +121,14 @@ export async function getCenterSettings(forceRefresh = false) {
 
 export async function getPublicCenterSettings(forceRefresh = false): Promise<CenterPublicData> {
   const settings = await getCenterSettings(forceRefresh);
+  const rawFeatures = (settings.features as Record<string, boolean>) || {};
+  const features: CenterPublicData['features'] = {
+    ...rawFeatures,
+    lectures: rawFeatures.lectures !== false,
+    assignments: rawFeatures.assignments !== false,
+    onlineClasses: rawFeatures.onlineClasses !== false,
+  };
+
   return {
     name: settings.name,
     shortName: settings.shortName,
@@ -131,7 +145,7 @@ export async function getPublicCenterSettings(forceRefresh = false): Promise<Cen
     currencySymbol: settings.currencySymbol,
     timezone: settings.timezone,
     defaultLocale: settings.defaultLocale,
-    features: (settings.features as CenterPublicData['features']) || {},
+    features,
     homepage: (settings.homepage as CenterPublicData['homepage']) || {
       heroBadge: '',
       heroPoints: [],

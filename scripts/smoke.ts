@@ -7,6 +7,7 @@ import bcrypt from 'bcrypt';
 import { Role, DayOfWeek, EnrollmentStatus } from '@prisma/client';
 import prisma from '../src/utils/prisma';
 import env from '../src/config/env';
+import { ATTACHMENT_CONFIG } from '../src/config/academics.config';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION & GLOBAL STATE
@@ -2500,6 +2501,27 @@ async function runSmokeTests() {
       headers: { Cookie: admin2Cookie },
     });
 
+    // 9. Zero FILE url/secureUrl exposure verification across responses
+    const fileCreateHasNoUrl = c55ValidFile.body?.data?.url === undefined && c55ValidFile.body?.data?.secureUrl === undefined;
+
+    const c55LecDetail = await req(`/api/lectures/${draftLecId}`, {
+      headers: { Cookie: teacherCookie },
+    });
+    const lecFileAtt = c55LecDetail.body?.data?.attachments?.find((a: any) => a.kind === 'FILE');
+    const lecDetailHasNoUrl = lecFileAtt ? (lecFileAtt.url === undefined && lecFileAtt.secureUrl === undefined) : true;
+
+    // Signature verification: upload type is authenticated and download expiry is 300s (5m)
+    const c55SigRes = await req('/api/uploads/signature', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({ purpose: 'material' }),
+    });
+    const sigIsAuth = c55SigRes.body?.data?.type === 'authenticated';
+    const configExpiryIs5m = ATTACHMENT_CONFIG.DOWNLOAD_URL_EXPIRES_IN_SECONDS === 300;
+    const downloadExpiresIn5m =
+      !!c55DownloadEnrolled.body?.data?.expiresAt &&
+      Math.abs(new Date(c55DownloadEnrolled.body.data.expiresAt).getTime() - (Date.now() + 300 * 1000)) < 15000;
+
     const c55Passed =
       c55HttpLink.status === 400 &&
       c55CredLink.status === 400 &&
@@ -2507,23 +2529,101 @@ async function runSmokeTests() {
       c55ValidLink.status === 201 &&
       c55BadPrefix.status === 400 &&
       c55ValidFile.status === 201 &&
+      fileCreateHasNoUrl &&
+      lecDetailHasNoUrl &&
+      sigIsAuth &&
+      configExpiryIs5m &&
       c55DownloadEnrolled.status === 200 &&
       !!c55DownloadEnrolled.body?.data?.url &&
-      !!c55DownloadEnrolled.body?.data?.expiresAt &&
+      downloadExpiresIn5m &&
       c55DownloadDenied.status === 403;
 
     recordCheck(
       '55',
-      'Attachment security: link validation, folder prefix isolation & signed download URLs',
+      'Attachment security: link validation, zero FILE url exposure & signed authenticated downloads',
       c55Passed,
       c55Passed
-        ? 'Insecure/cred/js links rejected; invalid folder rejected; valid file produced signed download URL with 5m expiry; unauthorized access 403'
-        : `HttpRej: ${c55HttpLink.status}, CredRej: ${c55CredLink.status}, JsRej: ${c55JsLink.status}, BadPrefixRej: ${c55BadPrefix.status}, DownloadOk: ${c55DownloadEnrolled.status}, Denied: ${c55DownloadDenied.status}`
+        ? 'Insecure links rejected; valid FILE created with 0 url/secureUrl fields in response & detail; signed download URL verified authenticated with 5m expiry; unauthorized access 403'
+        : `HttpRej: ${c55HttpLink.status}, NoUrlCreate: ${fileCreateHasNoUrl}, NoUrlDetail: ${lecDetailHasNoUrl}, SigAuth: ${sigIsAuth}, Expiry5m: ${downloadExpiresIn5m}, Denied: ${c55DownloadDenied.status}`
     );
 
-    // Check 56: In-App & Email notifications with unread counts
+    // Check 56: Notifications lifecycle: zero notifications on draft/unpublished; notifications on publish/reschedule/cancel/grading
+    const studentNotifsBefore = await prisma.notification.count({ where: { userId: demoStudent.id } });
+
+    // 1. Create unpublished lecture -> 0 notifications
+    const c56DraftLec = await req('/api/lectures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        teacherId: demoUsers['TEACHER'].id,
+        title: 'SMOKE-Unpublished Notif Test',
+        plannedTopics: 'Testing zero notifs',
+        startsAt: new Date(nowTime + 48 * 3600 * 1000).toISOString(),
+        endsAt: new Date(nowTime + 49 * 3600 * 1000).toISOString(),
+        isPublished: false,
+      }),
+    });
+    if (c56DraftLec.body?.data?.id) createdLectureIds.push(c56DraftLec.body.data.id);
+
+    // 2. Edit unpublished lecture -> 0 notifications
+    if (c56DraftLec.body?.data?.id) {
+      await req(`/api/lectures/${c56DraftLec.body.data.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ plannedTopics: 'Edited draft topics' }),
+      });
+    }
+
+    // 3. Create draft assignment -> 0 notifications
+    const c56DraftAssign = await req('/api/assignments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        title: 'SMOKE-Draft Assign Notif Test',
+        instructions: 'Draft instructions',
+        dueAt: new Date(nowTime + 96 * 3600 * 1000).toISOString(),
+        maxMarks: 25,
+        mode: 'ONLINE',
+        publishNow: false,
+      }),
+    });
+    if (c56DraftAssign.body?.data?.id) createdAssignmentIds.push(c56DraftAssign.body.data.id);
+
+    // 4. Edit draft assignment -> 0 notifications
+    if (c56DraftAssign.body?.data?.id) {
+      await req(`/api/assignments/${c56DraftAssign.body.data.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ instructions: 'Edited draft instructions' }),
+      });
+    }
+
+    const studentNotifsAfterDrafts = await prisma.notification.count({ where: { userId: demoStudent.id } });
+    const draftNotifsCreated = studentNotifsAfterDrafts - studentNotifsBefore; // Must be 0!
+
+    let c56PatchStatus = 0;
+    let c56PatchErr = '';
+    // 5. Publish the lecture -> student receives notification
+    if (c56DraftLec.body?.data?.id) {
+      const patchRes = await req(`/api/lectures/${c56DraftLec.body.data.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ isPublished: true }),
+      });
+      c56PatchStatus = patchRes.status;
+      if (patchRes.status !== 200) {
+        c56PatchErr = JSON.stringify(patchRes.body);
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    const studentNotifsAfterPublish = await prisma.notification.count({ where: { userId: demoStudent.id } });
+    const publishNotifsCreated = studentNotifsAfterPublish - studentNotifsAfterDrafts; // Must be 1!
+
     const c56NotifList = await req('/api/notifications', { headers: { Cookie: studentCookie } });
-    const initialUnread = c56NotifList.body?.data?.unreadCount ?? 0;
 
     const c56MarkRead = await req('/api/notifications/read', {
       method: 'PATCH',
@@ -2542,6 +2642,8 @@ async function runSmokeTests() {
     }
 
     const c56Passed =
+      draftNotifsCreated === 0 &&
+      publishNotifsCreated >= 1 &&
       c56NotifList.status === 200 &&
       c56MarkRead.status === 200 &&
       c56MarkRead.body?.data?.unreadCount === 0 &&
@@ -2549,11 +2651,11 @@ async function runSmokeTests() {
 
     recordCheck(
       '56',
-      'Notifications lifecycle: batch delivery, unread count tracking & zero online link leakage',
+      'Notifications lifecycle: zero notifs on draft/unpublished, delivered on publish, zero link leak',
       c56Passed,
       c56Passed
-        ? 'Notifications listed and unreadCount updated to 0 on mark-all-read; zero online class links/passcodes in notification text'
-        : `ListStatus: ${c56NotifList.status}, ReadStatus: ${c56MarkRead.status}, RemainingUnread: ${c56MarkRead.body?.data?.unreadCount}, Leaked: ${notifLeakDetected}`
+        ? 'Creating/editing unpublished lecture or draft assignment created 0 notifications; notification fired on first publish; zero online meeting links leaked in notification bodies'
+        : `DraftLecStatus: ${c56DraftLec.status}, PatchStatus: ${c56PatchStatus}, PatchErr: ${c56PatchErr}, DraftNotifs: ${draftNotifsCreated}, PublishNotifs: ${publishNotifsCreated}, ListStatus: ${c56NotifList.status}`
     );
 
     // Check 57: Feature flags enforcement (lectures, assignments, onlineClasses)
@@ -2571,6 +2673,21 @@ async function runSmokeTests() {
 
     const c57LecDisabled = await req('/api/lectures', { headers: { Cookie: teacherCookie } });
     const c57AssignDisabled = await req('/api/assignments', { headers: { Cookie: teacherCookie } });
+    const c57OnlineDisabled = await req('/api/online-classes', { headers: { Cookie: teacherCookie } });
+    const c57CreateOnlineOff = await req('/api/lectures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+      body: JSON.stringify({
+        batchId: smokeBatch.id,
+        subjectId: mathSubject.id,
+        teacherId: demoUsers['TEACHER'].id,
+        title: 'SMOKE-Online Rejected',
+        plannedTopics: 'Testing online class flag',
+        startsAt: new Date(nowTime + 3600 * 1000).toISOString(),
+        endsAt: new Date(nowTime + 7200 * 1000).toISOString(),
+        onlineUrl: 'https://meet.google.com/test-room',
+      }),
+    });
 
     // Restore settings
     const c57PatchOn = await req('/api/settings', {
@@ -2586,19 +2703,27 @@ async function runSmokeTests() {
     });
 
     const c57LecRestored = await req('/api/lectures', { headers: { Cookie: teacherCookie } });
+    const c57OnlineRestored = await req('/api/online-classes', { headers: { Cookie: teacherCookie } });
 
     const c57Passed =
       c57LecDisabled.status === 404 &&
+      c57LecDisabled.body?.message === 'Not available' &&
       c57AssignDisabled.status === 404 &&
-      c57LecRestored.status === 200;
+      c57AssignDisabled.body?.message === 'Not available' &&
+      c57OnlineDisabled.status === 404 &&
+      c57OnlineDisabled.body?.message === 'Not available' &&
+      c57CreateOnlineOff.status === 404 &&
+      c57CreateOnlineOff.body?.message === 'Not available' &&
+      c57LecRestored.status === 200 &&
+      c57OnlineRestored.status === 200;
 
     recordCheck(
       '57',
-      'Feature flag enforcement: lectures, assignments & onlineClasses gating',
+      'Feature flag enforcement: lectures, assignments & onlineClasses gating with 404 Not available',
       c57Passed,
       c57Passed
-        ? 'Flag false returned 404 for lectures and assignments; restoring flag returned 200 OK'
-        : `LecDisabled: ${c57LecDisabled.status}, AssignDisabled: ${c57AssignDisabled.status}, Restored: ${c57LecRestored.status}`
+        ? 'Disabled flags strictly returned 404 { success: false, message: "Not available" }; restoring flags returned 200 OK'
+        : `Lec: ${c57LecDisabled.status}, Assign: ${c57AssignDisabled.status}, Online: ${c57OnlineDisabled.status}, CreateOnline: ${c57CreateOnlineOff.status}, Restored: ${c57LecRestored.status}`
     );
 
     // Check 58: Audit log coverage & zero secret leakage
@@ -2637,6 +2762,85 @@ async function runSmokeTests() {
       c58Passed
         ? `AuditLog entries verified across academic actions (${academicAuditLogs.length} found); zero URLs, passcodes, or secrets in metadata`
         : `LogsCount: ${academicAuditLogs.length}, SecretFound: ${auditSecretFound}`
+    );
+
+    // Check 59: CenterSettings.weekStartsOn: default 6 (Saturday), validator (0-6), public response
+    const c59PublicBefore = await req('/api/public/center');
+    const defaultWeekStartsOn = c59PublicBefore.body?.data?.weekStartsOn;
+
+    // Super Admin updates weekStartsOn to 0 (Sunday)
+    const c59UpdateSun = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ weekStartsOn: 0 }),
+    });
+
+    // Invalid weekStartsOn (> 6) rejected with 400
+    const c59Invalid = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ weekStartsOn: 7 }),
+    });
+
+    // Restore to 6 (Saturday)
+    const c59Restore = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ weekStartsOn: 6 }),
+    });
+
+    const c59PublicAfter = await req('/api/public/center');
+
+    const c59Passed =
+      defaultWeekStartsOn === 6 &&
+      c59UpdateSun.status === 200 &&
+      c59UpdateSun.body?.data?.weekStartsOn === 0 &&
+      c59Invalid.status === 400 &&
+      c59Restore.status === 200 &&
+      c59Restore.body?.data?.weekStartsOn === 6 &&
+      c59PublicAfter.body?.data?.weekStartsOn === 6;
+
+    recordCheck(
+      '59',
+      'CenterSettings.weekStartsOn: default 6 (Saturday), validator (0-6), public response',
+      c59Passed,
+      c59Passed
+        ? 'Default weekStartsOn is 6 (Saturday); invalid values rejected (400); PATCH and GET /api/public/center verified'
+        : `Default: ${defaultWeekStartsOn}, UpdateSun: ${c59UpdateSun.status}, Invalid: ${c59Invalid.status}, Restored: ${c59Restore.status}`
+    );
+
+    // Check 60: GET /api/dashboard/academic-summary role-scoped single-query counts
+    const c60SuperAdmin = await req('/api/dashboard/academic-summary', { headers: { Cookie: superAdminCookie } });
+    const c60SuperAdminBranch = await req(`/api/dashboard/academic-summary?branchId=${demoAdmin.branchId}`, { headers: { Cookie: superAdminCookie } });
+    const c60Admin = await req('/api/dashboard/academic-summary', { headers: { Cookie: adminCookie } });
+    const c60Teacher = await req('/api/dashboard/academic-summary', { headers: { Cookie: teacherCookie } });
+    const c60Student = await req('/api/dashboard/academic-summary', { headers: { Cookie: studentCookie } });
+    const c60GuardianLinked = await req(`/api/dashboard/academic-summary?studentId=${demoStudent.id}`, { headers: { Cookie: guardianCookie } });
+    const c60GuardianUnlinked = await req(`/api/dashboard/academic-summary?studentId=${smokeUnregisteredStudent.id}`, { headers: { Cookie: guardianCookie } });
+
+    const c60Passed =
+      c60SuperAdmin.status === 200 &&
+      typeof c60SuperAdmin.body?.data?.lecturesToday === 'number' &&
+      typeof c60SuperAdmin.body?.data?.lecturesThisWeek === 'number' &&
+      typeof c60SuperAdmin.body?.data?.overdueAssignments === 'number' &&
+      typeof c60SuperAdmin.body?.data?.needsGrading === 'number' &&
+      typeof c60SuperAdmin.body?.data?.upcomingAssignments === 'number' &&
+      typeof c60SuperAdmin.body?.data?.unreadNotifications === 'number' &&
+      c60SuperAdminBranch.status === 200 &&
+      c60Admin.status === 200 &&
+      c60Teacher.status === 200 &&
+      c60Student.status === 200 &&
+      c60Student.body?.data?.needsGrading === 0 &&
+      c60GuardianLinked.status === 200 &&
+      c60GuardianUnlinked.status === 403;
+
+    recordCheck(
+      '60',
+      'GET /api/dashboard/academic-summary role scoping & aggregate count verification',
+      c60Passed,
+      c60Passed
+        ? 'SuperAdmin, Admin, Teacher, Student, Guardian verified; student needsGrading=0; unlinked guardian returns 403'
+        : `SuperAdmin: ${c60SuperAdmin.status}, Admin: ${c60Admin.status}, Teacher: ${c60Teacher.status}, Student: ${c60Student.status}, GuardLinked: ${c60GuardianLinked.status}, GuardUnlinked: ${c60GuardianUnlinked.status}`
     );
 
     // ─────────────────────────────────────────────────────────────────────────

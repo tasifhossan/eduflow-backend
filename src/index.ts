@@ -178,6 +178,9 @@ app.use('/api', practiceRouter);
 app.use('/api/ai', requireFeature('aiAssistant'), aiRouter);
 app.use('/api/audit-logs', auditRouter);
 app.use('/api/settings', settingsRouter);
+app.get('/api/online-classes', requireFeature('onlineClasses'), (_req: Request, res: Response) => {
+  return res.status(200).json({ success: true, message: 'Online classes feature active', data: [] });
+});
 app.use('/api', lectureRouter);
 app.use('/api', assignmentRouter);
 app.use('/api', attachmentRouter);

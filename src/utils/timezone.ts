@@ -56,3 +56,60 @@ export function localTimeToUtc(
 
   return new Date(targetUtcTime);
 }
+
+export function getZonedDateParts(date: Date, timeZone: string) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const partMap: Record<string, string> = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') {
+      partMap[p.type] = p.value;
+    }
+  }
+  const year = parseInt(partMap.year, 10);
+  const month = parseInt(partMap.month, 10);
+  const day = parseInt(partMap.day, 10);
+  const weekdayStr = partMap.weekday; // 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+  const dayOfWeek = weekdayMap[weekdayStr] ?? 0;
+  return { year, month, day, dayOfWeek };
+}
+
+export function getAcademicDateRanges(now: Date, timeZone: string, weekStartsOn: number = 6) {
+  const { year, month, day, dayOfWeek } = getZonedDateParts(now, timeZone);
+  const monthStr = String(month).padStart(2, '0');
+  const dayStr = String(day).padStart(2, '0');
+
+  const todayStart = localTimeToUtc(`${year}-${monthStr}-${dayStr}`, '00:00:00', timeZone);
+  const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+  const diff = (dayOfWeek - weekStartsOn + 7) % 7;
+  const startDayObj = new Date(Date.UTC(year, month - 1, day - diff));
+  const sYear = startDayObj.getUTCFullYear();
+  const sMonth = String(startDayObj.getUTCMonth() + 1).padStart(2, '0');
+  const sDay = String(startDayObj.getUTCDate()).padStart(2, '0');
+
+  const weekStart = localTimeToUtc(`${sYear}-${sMonth}-${sDay}`, '00:00:00', timeZone);
+  const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000 - 1);
+
+  return { todayStart, todayEnd, weekStart, weekEnd };
+}
+

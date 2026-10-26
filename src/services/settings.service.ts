@@ -17,6 +17,7 @@ export interface CenterPublicData {
   currencySymbol: string;
   timezone: string;
   defaultLocale: string;
+  weekStartsOn: number;
   features: {
     publicSite?: boolean;
     aiAssistant?: boolean;
@@ -145,6 +146,7 @@ export async function getPublicCenterSettings(forceRefresh = false): Promise<Cen
     currencySymbol: settings.currencySymbol,
     timezone: settings.timezone,
     defaultLocale: settings.defaultLocale,
+    weekStartsOn: settings.weekStartsOn ?? 6,
     features,
     homepage: (settings.homepage as CenterPublicData['homepage']) || {
       heroBadge: '',

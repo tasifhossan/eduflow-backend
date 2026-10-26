@@ -322,10 +322,13 @@ export async function createAttachment(req: Request, res: Response) {
       },
     });
 
+    const { url: attUrl, ...safeAttachment } = attachment;
+    const responseData = attachment.kind === 'LINK' ? attachment : safeAttachment;
+
     return res.status(201).json({
       success: true,
       message: 'Attachment created successfully',
-      data: attachment,
+      data: responseData,
     });
   } catch (error) {
     console.error('Create attachment error:', error);

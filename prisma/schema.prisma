@@ -603,6 +603,7 @@ model CenterSettings {
   timezone               String   @default("Asia/Dhaka")
   defaultLocale          String   @default("en")
   academicYearStartMonth Int      @default(1)
+  weekStartsOn           Int      @default(6)
   receiptHeader          String?
   receiptFooter          String?
   features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true}")

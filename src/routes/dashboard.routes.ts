@@ -2,9 +2,19 @@ import { Router } from 'express';
 import { Role } from '@prisma/client';
 import { authenticate, authorize } from '../middleware/auth.middleware';
 import { branchScope } from '../middleware/branchScope.middleware';
-import { getDashboardSummary, getSuperAdminDashboard } from '../controllers/dashboard.controller';
+import {
+  getDashboardSummary,
+  getSuperAdminDashboard,
+  getAcademicSummary,
+} from '../controllers/dashboard.controller';
 
 const router = Router();
+
+router.get(
+  '/academic-summary',
+  authenticate,
+  getAcademicSummary,
+);
 
 router.get(
   '/summary',

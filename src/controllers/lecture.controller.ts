@@ -184,6 +184,13 @@ export async function createLecture(req: Request, res: Response) {
     const features = (settings.features as Record<string, boolean>) || {};
     const onlineClassesAllowed = features.onlineClasses !== false;
 
+    if (!onlineClassesAllowed && (onlineProvider || onlineUrl)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Not available',
+      });
+    }
+
     const startsAtDate = new Date(startsAt);
     const endsAtDate = new Date(endsAt);
 
@@ -243,7 +250,7 @@ export async function createLecture(req: Request, res: Response) {
     });
 
     if (lecture.isPublished && notify) {
-      sendAcademicNotification({
+      await sendAcademicNotification({
         type: 'LECTURE_PUBLISHED',
         title: `New Lecture Scheduled: ${lecture.title || batch.name}`,
         body: `A new lecture has been scheduled on ${startsAtDate.toLocaleDateString()}. Topic: ${plannedTopics}`,
@@ -382,6 +389,13 @@ export async function updateLecture(req: Request, res: Response) {
     const features = (settings.features as Record<string, boolean>) || {};
     const onlineClassesAllowed = features.onlineClasses !== false;
 
+    if (!onlineClassesAllowed && (data.onlineProvider || data.onlineUrl)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Not available',
+      });
+    }
+
     if (onlineClassesAllowed) {
       if (data.onlineProvider !== undefined) {
         updateData.onlineProvider = data.onlineProvider;
@@ -451,7 +465,7 @@ export async function updateLecture(req: Request, res: Response) {
 
     // Notifications
     if (isRescheduled && (lecture.isPublished || updatedLecture.isPublished)) {
-      sendAcademicNotification({
+      await sendAcademicNotification({
         type: 'LECTURE_RESCHEDULED',
         title: `Lecture Rescheduled: ${updatedLecture.title || lecture.batch.name}`,
         body: `The lecture has been rescheduled to ${newStartsAt.toLocaleDateString()} at ${newStartsAt.toLocaleTimeString()}.`,
@@ -461,8 +475,8 @@ export async function updateLecture(req: Request, res: Response) {
         emailSubject: `Lecture Rescheduled: ${updatedLecture.title || lecture.batch.name}`,
         emailBodyHtml: `The lecture has been rescheduled to <strong>${newStartsAt.toUTCString()}</strong>.`,
       });
-    } else if (isNewlyPublished && data.notify !== false) {
-      sendAcademicNotification({
+    } else if (isNewlyPublished) {
+      await sendAcademicNotification({
         type: 'LECTURE_PUBLISHED',
         title: `Lecture Published: ${updatedLecture.title || lecture.batch.name}`,
         body: `A lecture has been published for ${newStartsAt.toLocaleDateString()}. Topic: ${updatedLecture.plannedTopics}`,
@@ -688,7 +702,7 @@ export async function cancelLecture(req: Request, res: Response) {
     });
 
     if (lecture.isPublished) {
-      sendAcademicNotification({
+      await sendAcademicNotification({
         type: 'LECTURE_CANCELLED',
         title: `Lecture Cancelled: ${lecture.title || lecture.batch.name}`,
         body: `The lecture scheduled for ${lecture.startsAt.toLocaleDateString()} has been cancelled. Reason: ${reason}`,
@@ -1339,17 +1353,22 @@ export async function getLectureById(req: Request, res: Response) {
       // GUARDIANs never receive the onlineUrl or onlinePasscode
     }
 
-    // Attachments: omit url for FILE attachments
-    const safeAttachments = lecture.attachments.map((a) => ({
-      id: a.id,
-      title: a.title,
-      kind: a.kind,
-      url: a.kind === 'LINK' ? a.url : null,
-      format: a.format,
-      bytes: a.bytes,
-      originalName: a.originalName,
-      createdAt: a.createdAt,
-    }));
+    // Attachments: omit url for FILE attachments (only LINK attachments expose url)
+    const safeAttachments = lecture.attachments.map((a) => {
+      const base: Record<string, any> = {
+        id: a.id,
+        title: a.title,
+        kind: a.kind,
+        format: a.format,
+        bytes: a.bytes,
+        originalName: a.originalName,
+        createdAt: a.createdAt,
+      };
+      if (a.kind === 'LINK') {
+        base.url = a.url;
+      }
+      return base;
+    });
 
     const responseData: Record<string, any> = {
       id: lecture.id,

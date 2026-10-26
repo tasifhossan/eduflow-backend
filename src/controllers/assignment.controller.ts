@@ -140,7 +140,7 @@ export async function createAssignment(req: Request, res: Response) {
     });
 
     if (publishedAt) {
-      sendAcademicNotification({
+      await sendAcademicNotification({
         type: 'ASSIGNMENT_PUBLISHED',
         title: `New Assignment Published: ${title}`,
         body: `A new ${mode} assignment has been posted for your batch. Due date: ${dueAtDate.toLocaleDateString()}.`,
@@ -305,7 +305,7 @@ export async function updateAssignment(req: Request, res: Response) {
     });
 
     if (isNewlyPublished) {
-      sendAcademicNotification({
+      await sendAcademicNotification({
         type: 'ASSIGNMENT_PUBLISHED',
         title: `Assignment Published: ${updated.title}`,
         body: `An assignment has been published for your batch. Due date: ${updated.dueAt.toLocaleDateString()}.`,
@@ -782,17 +782,22 @@ export async function getAssignmentById(req: Request, res: Response) {
       }
     }
 
-    // Attachments: omit url for FILE
-    const safeAttachments = assignment.attachments.map((a) => ({
-      id: a.id,
-      title: a.title,
-      kind: a.kind,
-      url: a.kind === 'LINK' ? a.url : null,
-      format: a.format,
-      bytes: a.bytes,
-      originalName: a.originalName,
-      createdAt: a.createdAt,
-    }));
+    // Attachments: omit url for FILE attachments (only LINK attachments expose url)
+    const safeAttachments = assignment.attachments.map((a) => {
+      const base: Record<string, any> = {
+        id: a.id,
+        title: a.title,
+        kind: a.kind,
+        format: a.format,
+        bytes: a.bytes,
+        originalName: a.originalName,
+        createdAt: a.createdAt,
+      };
+      if (a.kind === 'LINK') {
+        base.url = a.url;
+      }
+      return base;
+    });
 
     let mySubmission = null;
     if (user.role === Role.STUDENT) {
@@ -1389,7 +1394,7 @@ export async function gradeSubmission(req: Request, res: Response) {
       },
     });
 
-    sendAcademicNotification({
+    await sendAcademicNotification({
       type: 'SUBMISSION_GRADED',
       title: `Assignment Graded: ${submission.assignment.title}`,
       body: `Your submission for '${submission.assignment.title}' has been graded. Marks: ${numMarks}/${maxMarks}`,

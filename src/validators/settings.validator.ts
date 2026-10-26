@@ -136,6 +136,7 @@ export const updateSettingsSchema = z
     timezone: z.string().trim().min(1).max(50).optional(),
     defaultLocale: z.enum(['en', 'bn']).optional(),
     academicYearStartMonth: z.number().int().min(1).max(12).optional(),
+    weekStartsOn: z.number().int().min(0).max(6).optional(),
     receiptHeader: z.string().trim().max(500).optional().nullable(),
     receiptFooter: z.string().trim().max(500).optional().nullable(),
     features: z

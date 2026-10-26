@@ -102,7 +102,9 @@ export async function getSignedUploadParams(req: Request, res: Response) {
         folder,
         type: isPrivate ? 'authenticated' : undefined,
         allowed_formats: allowedFormats,
+        allowedFormats: allowedFormats ? allowedFormats.split(',') : undefined,
         max_bytes: maxBytes,
+        maxBytes: maxBytes,
       },
     });
   } catch (error) {

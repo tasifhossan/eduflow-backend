@@ -668,3 +668,195 @@ export async function getPublicTeachers(req: Request, res: Response) {
     });
   }
 }
+
+/**
+ * GET /pages/:key
+ * Retrieves content for public static pages: about, privacy, terms.
+ * - 'about' requires publicSite feature flag and returns 404 when empty.
+ * - 'privacy' and 'terms' return override text or null, and remain accessible even if publicSite is false.
+ */
+export async function getPublicPageByKey(req: Request, res: Response) {
+  try {
+    const rawKey = req.params.key;
+    const key = typeof rawKey === 'string' ? rawKey.toLowerCase() : '';
+    if (!['about', 'privacy', 'terms'].includes(key)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Page not found',
+      });
+    }
+
+    const settings = await getCenterSettings();
+    const features = (settings.features as Record<string, boolean>) || {};
+
+    if (key === 'about') {
+      if (features.publicSite === false) {
+        return res.status(404).json({
+          success: false,
+          message: 'Page not found',
+        });
+      }
+
+      const about = (settings.about as Record<string, any>) || null;
+      const hasAbout = Boolean(
+        about && (
+          (typeof about.body === 'string' && about.body.trim().length > 0) ||
+          (typeof about.headline === 'string' && about.headline.trim().length > 0)
+        )
+      );
+
+      if (!hasAbout || !about) {
+        return res.status(404).json({
+          success: false,
+          message: 'About page content not found',
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          headline: about.headline || null,
+          body: about.body || null,
+          mission: about.mission || null,
+          vision: about.vision || null,
+          facilities: Array.isArray(about.facilities) ? about.facilities : [],
+        },
+      });
+    }
+
+    // privacy and terms: available even when publicSite is off
+    const legal = (settings.legal as Record<string, any>) || {};
+    if (key === 'privacy') {
+      const text = typeof legal.privacyText === 'string' && legal.privacyText.trim().length > 0
+        ? legal.privacyText
+        : null;
+      const updatedOn = typeof legal.updatedOn === 'string' && legal.updatedOn.trim().length > 0
+        ? legal.updatedOn
+        : null;
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          text,
+          updatedOn,
+        },
+      });
+    }
+
+    if (key === 'terms') {
+      const text = typeof legal.termsText === 'string' && legal.termsText.trim().length > 0
+        ? legal.termsText
+        : null;
+      const updatedOn = typeof legal.updatedOn === 'string' && legal.updatedOn.trim().length > 0
+        ? legal.updatedOn
+        : null;
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          text,
+          updatedOn,
+        },
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching public page:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve page',
+    });
+  }
+}
+
+// In-memory cache for GET /sitemap (5 minutes)
+interface CachedSitemap {
+  data: {
+    batches: Array<{ slug: string; updatedAt: Date }>;
+    blogPosts: Array<{ slug: string; updatedAt: Date }>;
+  };
+  expiresAt: number;
+}
+
+let cachedSitemap: CachedSitemap | null = null;
+const SITEMAP_CACHE_TTL_MS = 5 * 60 * 1000;
+
+export function invalidateSitemapCache() {
+  cachedSitemap = null;
+}
+
+/**
+ * GET /sitemap
+ * Feed of published batches and published blog posts (slug and updatedAt, max 1000 each).
+ * Respects publicSite and blog feature flags (returns empty arrays when off).
+ * Cached for 5 minutes.
+ */
+export async function getPublicSitemap(_req: Request, res: Response) {
+  try {
+    const now = Date.now();
+    if (cachedSitemap && now < cachedSitemap.expiresAt) {
+      return res.status(200).json({
+        success: true,
+        data: cachedSitemap.data,
+      });
+    }
+
+    const settings = await getCenterSettings();
+    const features = (settings.features as Record<string, boolean>) || {};
+
+    let batches: Array<{ slug: string; updatedAt: Date }> = [];
+    let blogPosts: Array<{ slug: string; updatedAt: Date }> = [];
+
+    if (features.publicSite !== false) {
+      const publishedBatches = await prisma.batch.findMany({
+        where: {
+          isPublished: true,
+          slug: { not: null },
+        },
+        select: {
+          slug: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 1000,
+      });
+      batches = publishedBatches.map((b) => ({
+        slug: b.slug as string,
+        updatedAt: b.createdAt,
+      }));
+
+      if (features.blog !== false) {
+        const publishedPosts = await prisma.blogPost.findMany({
+          where: {
+            isPublished: true,
+            slug: { not: '' },
+          },
+          select: {
+            slug: true,
+            updatedAt: true,
+          },
+          orderBy: { updatedAt: 'desc' },
+          take: 1000,
+        });
+        blogPosts = publishedPosts as Array<{ slug: string; updatedAt: Date }>;
+      }
+    }
+
+    const data = { batches, blogPosts };
+    cachedSitemap = {
+      data,
+      expiresAt: now + SITEMAP_CACHE_TTL_MS,
+    };
+
+    return res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    console.error('Error generating public sitemap:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve sitemap',
+    });
+  }
+}
+

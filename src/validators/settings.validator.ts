@@ -23,6 +23,46 @@ const hexColorSchema = z
     message: 'Primary color must be a 6-digit hex code in #RRGGBB format',
   });
 
+const controlCharRegex = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+const htmlTagRegex = /<[^>]+>/;
+
+export const plainText = (maxLen: number) =>
+  z
+    .string()
+    .trim()
+    .max(maxLen, `Must not exceed ${maxLen} characters`)
+    .refine((val) => !controlCharRegex.test(val), {
+      message: 'Control characters are not allowed',
+    })
+    .refine((val) => !htmlTagRegex.test(val), {
+      message: 'HTML tags are not allowed',
+    });
+
+export const aboutSchema = z
+  .object({
+    headline: plainText(90).optional().nullable(),
+    body: plainText(4000).optional().nullable(),
+    mission: plainText(400).optional().nullable(),
+    vision: plainText(400).optional().nullable(),
+    facilities: z.array(plainText(60)).max(8, 'Maximum 8 facilities allowed').optional().nullable(),
+  })
+  .strict();
+
+export const legalSchema = z
+  .object({
+    privacyText: plainText(20000).optional().nullable(),
+    termsText: plainText(20000).optional().nullable(),
+    updatedOn: z
+      .string()
+      .trim()
+      .refine((val) => val === '' || !isNaN(Date.parse(val)), {
+        message: 'Must be a valid ISO date',
+      })
+      .optional()
+      .nullable(),
+  })
+  .strict();
+
 export const LUCIDE_ICON_WHITELIST = [
   'BookOpen',
   'GraduationCap',
@@ -136,6 +176,7 @@ export const updateSettingsSchema = z
     timezone: z.string().trim().min(1).max(50).optional(),
     defaultLocale: z.enum(['en', 'bn']).optional(),
     academicYearStartMonth: z.number().int().min(1).max(12).optional(),
+    weekStartsOn: z.number().int().min(0).max(6).optional(),
     receiptHeader: z.string().trim().max(500).optional().nullable(),
     receiptFooter: z.string().trim().max(500).optional().nullable(),
     features: z
@@ -154,6 +195,9 @@ export const updateSettingsSchema = z
       .partial()
       .optional(),
     homepage: homepageSchema.partial().optional(),
+    officeHours: plainText(120).optional().nullable(),
+    about: aboutSchema.partial().optional().nullable(),
+    legal: legalSchema.partial().optional().nullable(),
   })
   .strict();
 

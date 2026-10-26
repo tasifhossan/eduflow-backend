@@ -146,9 +146,55 @@ export async function getBlogPostBySlug(req: Request, res: Response) {
       });
     }
 
+    const relatedSelect = {
+      id: true,
+      slug: true,
+      title: true,
+      excerpt: true,
+      coverImage: true,
+      category: true,
+      authorName: true,
+      publishedAt: true,
+      createdAt: true,
+    };
+
+    let relatedPosts = await prisma.blogPost.findMany({
+      where: {
+        isPublished: true,
+        id: { not: post.id },
+        category: { equals: post.category, mode: 'insensitive' },
+      },
+      take: 3,
+      orderBy: [
+        { publishedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
+      select: relatedSelect,
+    });
+
+    if (relatedPosts.length < 3) {
+      const excludedIds = [post.id, ...relatedPosts.map((p) => p.id)];
+      const fallbackPosts = await prisma.blogPost.findMany({
+        where: {
+          isPublished: true,
+          id: { notIn: excludedIds },
+        },
+        take: 3 - relatedPosts.length,
+        orderBy: [
+          { publishedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        select: relatedSelect,
+      });
+      relatedPosts = [...relatedPosts, ...fallbackPosts];
+    }
+
     return res.status(200).json({
       success: true,
-      data: post,
+      data: {
+        ...post,
+        relatedPosts,
+      },
     });
   } catch (error) {
     console.error('Error fetching blog post by slug:', error);
@@ -598,6 +644,20 @@ export async function submitContactMessage(req: Request, res: Response) {
     const normalizedPhone = phone ? normalizePhone(phone) : null;
     const batchIdToSet = interestedBatchId && interestedBatchId.trim().length > 0 ? interestedBatchId.trim() : null;
 
+    let validatedBatchId: string | null = null;
+    if (batchIdToSet) {
+      const publishedBatch = await prisma.batch.findFirst({
+        where: {
+          id: batchIdToSet,
+          isPublished: true,
+        },
+        select: { id: true },
+      });
+      if (publishedBatch) {
+        validatedBatchId = publishedBatch.id;
+      }
+    }
+
     await prisma.contactMessage.create({
       data: {
         name: name.trim(),
@@ -605,7 +665,7 @@ export async function submitContactMessage(req: Request, res: Response) {
         phone: normalizedPhone,
         subject: subject && subject.trim().length > 0 ? subject.trim() : 'Enquiry',
         message: message && message.trim().length > 0 ? message.trim() : null,
-        interestedBatchId: batchIdToSet,
+        interestedBatchId: validatedBatchId,
         interestedGrade: interestedGrade && interestedGrade.trim().length > 0 ? interestedGrade.trim() : null,
         source: source || 'WEBSITE',
         status: ContactMessageStatus.NEW,

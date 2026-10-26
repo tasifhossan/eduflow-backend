@@ -5,6 +5,7 @@ import {
   getPublicCenterSettings,
   invalidateSettingsCache,
 } from '../services/settings.service';
+import { invalidateSitemapCache } from './public.controller';
 import { updateSettingsSchema } from '../validators/settings.validator';
 import { createAuditLog } from '../utils/audit';
 
@@ -85,12 +86,39 @@ export async function updateSettings(req: Request, res: Response) {
       };
     }
 
+    // Deep merge about object if provided
+    if (parseResult.data.about !== undefined) {
+      if (parseResult.data.about === null) {
+        updateData.about = null;
+      } else {
+        const existingAbout = (currentSettings.about as Record<string, unknown>) || {};
+        updateData.about = {
+          ...existingAbout,
+          ...parseResult.data.about,
+        };
+      }
+    }
+
+    // Deep merge legal object if provided
+    if (parseResult.data.legal !== undefined) {
+      if (parseResult.data.legal === null) {
+        updateData.legal = null;
+      } else {
+        const existingLegal = (currentSettings.legal as Record<string, unknown>) || {};
+        updateData.legal = {
+          ...existingLegal,
+          ...parseResult.data.legal,
+        };
+      }
+    }
+
     const updated = await prisma.centerSettings.update({
       where: { key: 'center' },
       data: updateData as any,
     });
 
     invalidateSettingsCache();
+    invalidateSitemapCache();
 
     // Audit log: record changed field names only (never values or secrets)
     await createAuditLog({

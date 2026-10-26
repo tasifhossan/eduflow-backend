@@ -211,6 +211,8 @@ async function runSmokeTests() {
   const createdNotificationIds: string[] = [];
   const createdBranchIds: string[] = [];
   const createdChapterIds: string[] = [];
+  const createdFaqIds: string[] = [];
+  let originalSettingsBeforeSmoke: any = null;
   let mainServerChild: any = null;
   let mainIsOnline = false;
   try {
@@ -277,6 +279,7 @@ async function runSmokeTests() {
     const guardianCookie = authCookies['GUARDIAN'];
     const demoStudent = demoUsers['STUDENT'];
     const demoAdmin = demoUsers['ADMIN'];
+    originalSettingsBeforeSmoke = await prisma.centerSettings.findUnique({ where: { key: 'center' } });
 
     // ─────────────────────────────────────────────────────────────────────────
     // SECURITY & AUTH CHECKS (1 - 9)
@@ -2932,7 +2935,460 @@ async function runSmokeTests() {
       c9Passed,
       c9Details
     );
-  } finally {
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK 10: PUBLIC CONTENT, EDITABLE ABOUT/LEGAL, SITEMAP & RELATED POSTS
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+      console.log('\n--- Check 10: Public Content, Editable About/Legal, Sitemap & Related Posts ---');
+    let c10Passed = true;
+    const c10Errors: string[] = [];
+
+    // 1. Authenticate or create a SUPER_ADMIN user
+    let superAdminUser = await prisma.user.findFirst({
+      where: { role: Role.SUPER_ADMIN, isActive: true },
+    });
+    if (!superAdminUser) {
+      superAdminUser = await prisma.user.create({
+        data: {
+          name: 'SMOKE-SuperAdmin',
+          email: 'smoke-superadmin-fixture@example.com',
+          role: Role.SUPER_ADMIN,
+          isActive: true,
+          passwordHash: await bcrypt.hash('Password123!', 10),
+          branchId: demoAdmin.branchId,
+        },
+      });
+      createdUserIds.push(superAdminUser.id);
+    }
+    const superAdminToken = jwt.sign(
+      { userId: superAdminUser.id, role: Role.SUPER_ADMIN, branchId: superAdminUser.branchId },
+      env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    const superAdminCookie = `token=${superAdminToken}`;
+
+    // 2. Settings Validation: Rejects HTML, oversized text, control characters
+    const htmlOfficeHoursRes = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ officeHours: '<script>alert(1)</script>' }),
+    });
+    if (htmlOfficeHoursRes.status !== 400) {
+      c10Passed = false;
+      c10Errors.push(`Expected officeHours HTML to be rejected with 400, got ${htmlOfficeHoursRes.status}`);
+    }
+
+    const htmlAboutRes = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ about: { headline: '<b>Headline</b>' } }),
+    });
+    if (htmlAboutRes.status !== 400) {
+      c10Passed = false;
+      c10Errors.push(`Expected about.headline HTML to be rejected with 400, got ${htmlAboutRes.status}`);
+    }
+
+    const htmlLegalRes = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ legal: { privacyText: '<p>Paragraph</p>' } }),
+    });
+    if (htmlLegalRes.status !== 400) {
+      c10Passed = false;
+      c10Errors.push(`Expected legal.privacyText HTML to be rejected with 400, got ${htmlLegalRes.status}`);
+    }
+
+    const oversizedRes = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ officeHours: 'H'.repeat(125), about: { headline: 'H'.repeat(95) } }),
+    });
+    if (oversizedRes.status !== 400) {
+      c10Passed = false;
+      c10Errors.push(`Expected oversized text to be rejected with 400, got ${oversizedRes.status}`);
+    }
+
+    const controlCharRes = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ officeHours: 'Hours\x00' }),
+    });
+    if (controlCharRes.status !== 400) {
+      c10Passed = false;
+      c10Errors.push(`Expected control characters to be rejected with 400, got ${controlCharRes.status}`);
+    }
+
+    // 3. Valid Settings Update & Audit Log Check
+    const validSettingsUpdate = await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({
+        officeHours: 'SMOKE Sat-Thu 9am-6pm',
+        about: {
+          headline: 'SMOKE Future of Learning',
+          body: 'SMOKE First paragraph.\n\nSMOKE Second paragraph.',
+          mission: 'SMOKE Quality education for all.',
+          vision: 'SMOKE Global academic benchmark.',
+          facilities: ['SMOKE Lab 1', 'SMOKE Lab 2'],
+        },
+        legal: {
+          privacyText: 'SMOKE Custom Privacy Policy Content',
+          termsText: 'SMOKE Custom Terms of Service Content',
+          updatedOn: '2026-10-26T12:00:00.000Z',
+        },
+      }),
+    });
+    if (validSettingsUpdate.status !== 200) {
+      c10Passed = false;
+      c10Errors.push(`Expected valid settings update to return 200, got ${validSettingsUpdate.status}`);
+    }
+
+    // Verify audit log recorded changed field names only (never full content)
+    const latestAuditLog = await prisma.auditLog.findFirst({
+      where: { action: 'SETTINGS_UPDATED', entityType: 'CenterSettings' },
+      orderBy: { createdAt: 'desc' },
+    });
+    const changedFields = (latestAuditLog?.metadata as any)?.changedFields;
+    if (!Array.isArray(changedFields) || !changedFields.includes('about') || !changedFields.includes('officeHours')) {
+      c10Passed = false;
+      c10Errors.push('AuditLog metadata did not record changed field names properly');
+    }
+    const auditRaw = JSON.stringify(latestAuditLog?.metadata || {});
+    if (auditRaw.includes('SMOKE Future of Learning') || auditRaw.includes('SMOKE Custom Privacy')) {
+      c10Passed = false;
+      c10Errors.push('AuditLog leaked sensitive content into metadata');
+    }
+
+    // 4. Public Center & Content Summary
+    const publicCenterRes = await req('/api/public/center');
+    if (publicCenterRes.status !== 200) {
+      c10Passed = false;
+      c10Errors.push(`GET /api/public/center returned status ${publicCenterRes.status}`);
+    }
+    if (publicCenterRes.body?.data?.officeHours !== 'SMOKE Sat-Thu 9am-6pm') {
+      c10Passed = false;
+      c10Errors.push(`officeHours not returned correctly in /api/public/center`);
+    }
+    const content = publicCenterRes.body?.data?.content;
+    if (!content || typeof content.hasAbout !== 'boolean' || content.hasAbout !== true) {
+      c10Passed = false;
+      c10Errors.push(`content.hasAbout should be true when about headline/body is set`);
+    }
+
+    // 5. Pages Endpoints
+    const aboutPageRes = await req('/api/public/pages/about');
+    if (aboutPageRes.status !== 200 || aboutPageRes.body?.data?.headline !== 'SMOKE Future of Learning') {
+      c10Passed = false;
+      c10Errors.push(`GET /api/public/pages/about failed: status ${aboutPageRes.status}`);
+    }
+
+    const privacyPageRes = await req('/api/public/pages/privacy');
+    if (privacyPageRes.status !== 200 || privacyPageRes.body?.data?.text !== 'SMOKE Custom Privacy Policy Content') {
+      c10Passed = false;
+      c10Errors.push(`GET /api/public/pages/privacy failed: status ${privacyPageRes.status}`);
+    }
+
+    const termsPageRes = await req('/api/public/pages/terms');
+    if (termsPageRes.status !== 200 || termsPageRes.body?.data?.text !== 'SMOKE Custom Terms of Service Content') {
+      c10Passed = false;
+      c10Errors.push(`GET /api/public/pages/terms failed: status ${termsPageRes.status}`);
+    }
+
+    // Toggle publicSite off: privacy & terms stay 200, about becomes 404
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { publicSite: false } }),
+    });
+
+    const aboutOffRes = await req('/api/public/pages/about');
+    if (aboutOffRes.status !== 404) {
+      c10Passed = false;
+      c10Errors.push(`Expected /pages/about to return 404 when publicSite is off, got ${aboutOffRes.status}`);
+    }
+
+    const privacyOffRes = await req('/api/public/pages/privacy');
+    if (privacyOffRes.status !== 200 || !privacyOffRes.body?.data?.text) {
+      c10Passed = false;
+      c10Errors.push(`Expected /pages/privacy to stay available (200) when publicSite is off, got ${privacyOffRes.status}`);
+    }
+
+    const termsOffRes = await req('/api/public/pages/terms');
+    if (termsOffRes.status !== 200 || !termsOffRes.body?.data?.text) {
+      c10Passed = false;
+      c10Errors.push(`Expected /pages/terms to stay available (200) when publicSite is off, got ${termsOffRes.status}`);
+    }
+
+    // Dynamic content summary reflection: when publicSite is off, all content flags are false
+    const centerOffRes = await req('/api/public/center');
+    const contentOff = centerOffRes.body?.data?.content;
+    if (
+      contentOff?.hasPublishedBatches !== false ||
+      contentOff?.hasBlog !== false ||
+      contentOff?.hasAbout !== false ||
+      contentOff?.hasFaq !== false
+    ) {
+      c10Passed = false;
+      c10Errors.push(`Expected all content flags to be false when publicSite is off`);
+    }
+
+    // Re-enable publicSite
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { publicSite: true, blog: true } }),
+    });
+
+    // Empty about returns 404
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ about: null }),
+    });
+    const aboutEmptyRes = await req('/api/public/pages/about');
+    if (aboutEmptyRes.status !== 404) {
+      c10Passed = false;
+      c10Errors.push(`Expected /pages/about to return 404 when about is null, got ${aboutEmptyRes.status}`);
+    }
+
+    // 6. Sitemap Feed Verification
+    const sampleSubject = await prisma.subject.findFirst();
+    const sId = sampleSubject ? sampleSubject.id : (await prisma.subject.create({ data: { name: 'SMOKE Subject' } })).id;
+
+    const pubBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-Pub-Batch-Sitemap',
+        slug: `smoke-pub-batch-${Date.now()}`,
+        type: 'ACADEMIC',
+        isPublished: true,
+        subjectId: sId,
+        branchId: demoAdmin.branchId,
+      },
+    });
+    createdBatchIds.push(pubBatch.id);
+
+    const unpubBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-Unpub-Batch-Sitemap',
+        slug: `smoke-unpub-batch-${Date.now()}`,
+        type: 'ACADEMIC',
+        isPublished: false,
+        subjectId: sId,
+        branchId: demoAdmin.branchId,
+      },
+    });
+    createdBatchIds.push(unpubBatch.id);
+
+    const pubPost = await prisma.blogPost.create({
+      data: {
+        title: 'SMOKE-Published-BlogPost',
+        slug: `smoke-pub-post-${Date.now()}`,
+        content: 'Content for published blog post',
+        category: 'SMOKE-TECH',
+        authorName: 'SMOKE Author',
+        isPublished: true,
+        publishedAt: new Date(),
+      },
+    });
+    createdBlogPostIds.push(pubPost.id);
+
+    const draftPost = await prisma.blogPost.create({
+      data: {
+        title: 'SMOKE-Draft-BlogPost',
+        slug: `smoke-draft-post-${Date.now()}`,
+        content: 'Content for draft blog post',
+        category: 'SMOKE-TECH',
+        authorName: 'SMOKE Author',
+        isPublished: false,
+      },
+    });
+    createdBlogPostIds.push(draftPost.id);
+
+    // Invalidate sitemap cache to ensure fresh query
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({}),
+    });
+
+    const sitemapRes = await req('/api/public/sitemap');
+    if (sitemapRes.status !== 200) {
+      c10Passed = false;
+      c10Errors.push(`GET /api/public/sitemap returned status ${sitemapRes.status}`);
+    }
+    const sitemapBatches = sitemapRes.body?.data?.batches || [];
+    const sitemapBlogPosts = sitemapRes.body?.data?.blogPosts || [];
+
+    const hasPubBatch = sitemapBatches.some((b: any) => b.slug === pubBatch.slug);
+    const hasUnpubBatch = sitemapBatches.some((b: any) => b.slug === unpubBatch.slug);
+    const hasPubPost = sitemapBlogPosts.some((p: any) => p.slug === pubPost.slug);
+    const hasDraftPost = sitemapBlogPosts.some((p: any) => p.slug === draftPost.slug);
+
+    if (!hasPubBatch || hasUnpubBatch) {
+      c10Passed = false;
+      c10Errors.push(`Sitemap batch filtering failed: hasPubBatch=${hasPubBatch}, hasUnpubBatch=${hasUnpubBatch}`);
+    }
+    if (!hasPubPost || hasDraftPost) {
+      c10Passed = false;
+      c10Errors.push(`Sitemap blog filtering failed: hasPubPost=${hasPubPost}, hasDraftPost=${hasDraftPost}`);
+    }
+
+    // Sitemap respects publicSite and blog flags
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { publicSite: false } }),
+    });
+    const sitemapDisabledRes = await req('/api/public/sitemap');
+    if (
+      sitemapDisabledRes.body?.data?.batches?.length !== 0 ||
+      sitemapDisabledRes.body?.data?.blogPosts?.length !== 0
+    ) {
+      c10Passed = false;
+      c10Errors.push(`Expected sitemap to return empty arrays when publicSite is off`);
+    }
+
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { publicSite: true, blog: false } }),
+    });
+    const sitemapBlogOffRes = await req('/api/public/sitemap');
+    if (sitemapBlogOffRes.body?.data?.blogPosts?.length !== 0) {
+      c10Passed = false;
+      c10Errors.push(`Expected sitemap blogPosts to be empty when blog flag is off`);
+    }
+
+    // Restore blog: true
+    await req('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+      body: JSON.stringify({ features: { blog: true } }),
+    });
+
+    // 7. Blog Related Posts Verification
+    const postA = await prisma.blogPost.create({
+      data: {
+        title: 'SMOKE Related Post A',
+        slug: `smoke-rel-a-${Date.now()}`,
+        content: 'Content A',
+        category: 'SMOKE-RELATED-CAT',
+        authorName: 'SMOKE Author',
+        isPublished: true,
+        publishedAt: new Date(Date.now() - 10000),
+      },
+    });
+    const postB = await prisma.blogPost.create({
+      data: {
+        title: 'SMOKE Related Post B',
+        slug: `smoke-rel-b-${Date.now()}`,
+        content: 'Content B',
+        category: 'SMOKE-RELATED-CAT',
+        authorName: 'SMOKE Author',
+        isPublished: true,
+        publishedAt: new Date(Date.now() - 5000),
+      },
+    });
+    const postC = await prisma.blogPost.create({
+      data: {
+        title: 'SMOKE Related Post C',
+        slug: `smoke-rel-c-${Date.now()}`,
+        content: 'Content C',
+        category: 'SMOKE-RELATED-CAT',
+        authorName: 'SMOKE Author',
+        isPublished: true,
+        publishedAt: new Date(),
+      },
+    });
+    createdBlogPostIds.push(postA.id, postB.id, postC.id);
+
+    const postDetailRes = await req(`/api/blog/${postA.slug}`);
+    if (postDetailRes.status !== 200) {
+      c10Passed = false;
+      c10Errors.push(`GET /api/blog/${postA.slug} failed: status ${postDetailRes.status}`);
+    }
+    const relatedPosts = postDetailRes.body?.data?.relatedPosts;
+    if (!Array.isArray(relatedPosts)) {
+      c10Passed = false;
+      c10Errors.push(`relatedPosts missing or not an array`);
+    } else {
+      const containsItself = relatedPosts.some((p: any) => p.slug === postA.slug);
+      const containsB = relatedPosts.some((p: any) => p.slug === postB.slug);
+      const containsC = relatedPosts.some((p: any) => p.slug === postC.slug);
+      if (containsItself) {
+        c10Passed = false;
+        c10Errors.push(`relatedPosts contains itself (postA)`);
+      }
+      if (!containsB || !containsC) {
+        c10Passed = false;
+        c10Errors.push(`relatedPosts did not contain same category posts (postB/postC)`);
+      }
+      if (relatedPosts.length > 3) {
+        c10Passed = false;
+        c10Errors.push(`relatedPosts length exceeds 3`);
+      }
+    }
+
+    // 8. Contact Enquiry with optional interestedBatchId
+    const validBatchContactRes = await req('/api/contact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '192.168.100.201' },
+      body: JSON.stringify({
+        name: 'SMOKE Batch Enquirer',
+        phone: '01711112233',
+        message: 'Interested in this published batch',
+        interestedBatchId: pubBatch.id,
+      }),
+    });
+    if (validBatchContactRes.status !== 200) {
+      c10Passed = false;
+      c10Errors.push(`Contact enquiry with published batch failed: ${validBatchContactRes.status}`);
+    }
+    const savedContactValid = await prisma.contactMessage.findFirst({
+      where: { name: 'SMOKE Batch Enquirer' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!savedContactValid || savedContactValid.interestedBatchId !== pubBatch.id) {
+      c10Passed = false;
+      c10Errors.push(`Expected contact message interestedBatchId to be ${pubBatch.id}, got ${savedContactValid?.interestedBatchId}`);
+    }
+
+    const invalidBatchContactRes = await req('/api/contact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '192.168.100.202' },
+      body: JSON.stringify({
+        name: 'SMOKE Invalid Batch Enquirer',
+        phone: '01711112233',
+        message: 'Interested in unpublished or non-existent batch',
+        interestedBatchId: unpubBatch.id,
+      }),
+    });
+    if (invalidBatchContactRes.status !== 200) {
+      c10Passed = false;
+      c10Errors.push(`Contact enquiry with unpublished batch should succeed silently, got ${invalidBatchContactRes.status}`);
+    }
+    const savedContactInvalid = await prisma.contactMessage.findFirst({
+      where: { name: 'SMOKE Invalid Batch Enquirer' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!savedContactInvalid || savedContactInvalid.interestedBatchId !== null) {
+      c10Passed = false;
+      c10Errors.push(`Expected contact message interestedBatchId to be null for unpublished batch, got ${savedContactInvalid?.interestedBatchId}`);
+    }
+
+    const c10Details = c10Passed
+      ? 'CenterSettings validation rejects HTML/oversized; content flags reflect toggles; pages & sitemap respect flags; relatedPosts exclude current post; interestedBatchId validated silently'
+      : c10Errors.join('; ');
+
+    recordCheck(
+      '10',
+      'Public content, editable about/legal, sitemap feed & related posts',
+      c10Passed,
+      c10Details
+    );
+  }
+} finally {
     // ─────────────────────────────────────────────────────────────────────────
     // FIXTURE CLEANUP
     // ─────────────────────────────────────────────────────────────────────────
@@ -3060,6 +3516,25 @@ async function runSmokeTests() {
         await prisma.auditLog.deleteMany({ where: { OR: [{ actorId: { in: sIds } }, { entityId: { in: sIds } }] } });
         await prisma.user.deleteMany({ where: { id: { in: sIds } } });
       }
+
+      // Restore CenterSettings
+      if (originalSettingsBeforeSmoke) {
+        await prisma.centerSettings.update({
+          where: { key: 'center' },
+          data: {
+            officeHours: originalSettingsBeforeSmoke.officeHours,
+            about: originalSettingsBeforeSmoke.about as any,
+            legal: originalSettingsBeforeSmoke.legal as any,
+            features: originalSettingsBeforeSmoke.features as any,
+          },
+        });
+      }
+
+      if (createdFaqIds.length > 0) {
+        await prisma.faqItem.deleteMany({ where: { id: { in: createdFaqIds } } });
+      }
+      await prisma.faqItem.deleteMany({ where: { question: { startsWith: 'SMOKE-' } } });
+
       console.log('Smoke test fixtures cleaned up successfully.');
     } catch (cleanupErr) {
       console.error('Error cleaning up fixtures:', cleanupErr);

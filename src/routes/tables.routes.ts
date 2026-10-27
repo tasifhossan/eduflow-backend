@@ -23,10 +23,10 @@ router.get(
   getTableUsers
 );
 
-// 2. GET /tables/students (ADMIN, TEACHER, SUPER_ADMIN)
+// 2. GET /tables/students (ADMIN, TEACHER, SUPER_ADMIN, ACCOUNTANT)
 router.get(
   ['/students', '/tables/students'],
-  authorize(Role.ADMIN, Role.TEACHER, Role.SUPER_ADMIN),
+  authorize(Role.ADMIN, Role.TEACHER, Role.SUPER_ADMIN, Role.ACCOUNTANT),
   branchScope,
   getTableStudents
 );

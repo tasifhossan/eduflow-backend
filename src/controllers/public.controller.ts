@@ -8,6 +8,7 @@ import {
   batchSlugParamSchema,
 } from '../validators/public.validator';
 import { getCenterSettings } from '../services/settings.service';
+import { moneyToNumber } from '../utils/money';
 
 // In-memory cache for GET /stats (5 minutes)
 interface CachedStats {
@@ -175,7 +176,7 @@ export async function getPublicBatches(req: Request, res: Response) {
         description: desc,
         subject: { id: b.subject.id, name: b.subject.name },
         branch: { id: b.branch.id, name: b.branch.name },
-        fee: showFees ? b.feeAmount : null,
+        fee: showFees ? moneyToNumber(b.feeAmount) : null,
         type: b.type,
         avgRating: stats.reviewCount > 0 ? stats.avgRating : null,
         reviewCount: stats.reviewCount || 0,
@@ -379,7 +380,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
       gallery: batch.gallery,
       highlights: batch.highlights,
       syllabus: batch.syllabus,
-      fee: showFees ? batch.feeAmount : null,
+      fee: showFees ? moneyToNumber(batch.feeAmount) : null,
       feeType: batch.feeType,
       type: batch.type,
       classLevel: batch.classLevel,
@@ -397,7 +398,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
         slug: rb.slug!,
         name: rb.name,
         imageUrl: rb.imageUrl,
-        fee: showFees ? rb.feeAmount : null,
+        fee: showFees ? moneyToNumber(rb.feeAmount) : null,
         type: rb.type,
         branch: rb.branch,
         subject: rb.subject,
@@ -456,8 +457,8 @@ export async function getPublicFilters(req: Request, res: Response) {
         branches,
         batchTypes: Object.values(BatchType),
         feeRange: {
-          minFee: feeAggregate._min.feeAmount ?? 0,
-          maxFee: feeAggregate._max.feeAmount ?? 0,
+          minFee: moneyToNumber(feeAggregate._min.feeAmount),
+          maxFee: moneyToNumber(feeAggregate._max.feeAmount),
         },
       },
     });

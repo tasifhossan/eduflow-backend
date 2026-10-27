@@ -4,6 +4,7 @@ import { calculateNetFee } from '../utils/fee-calculator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
 import { escapeHtml } from '../utils/escapeHtml';
+import { moneyToNumber } from '../utils/money';
 import prisma from '../utils/prisma';
 import {
   updateBatchFeeSchema,
@@ -193,12 +194,13 @@ export async function getStudentNetFee(req: Request, res: Response) {
       });
     }
 
-    const baseFee = enrollment.batch.feeAmount;
-    const effectiveBaseFee = enrollment.customFeeAmount ?? baseFee;
+    const baseFee = moneyToNumber(enrollment.batch.feeAmount);
+    const effectiveBaseFee = enrollment.customFeeAmount != null ? moneyToNumber(enrollment.customFeeAmount) : baseFee;
+    const discountVal = enrollment.discountValue != null ? moneyToNumber(enrollment.discountValue) : undefined;
     const netFee = calculateNetFee(
       effectiveBaseFee,
       enrollment.discountType,
-      enrollment.discountValue
+      discountVal
     );
 
     return res.status(200).json({
@@ -206,9 +208,9 @@ export async function getStudentNetFee(req: Request, res: Response) {
       message: 'Student net fee calculated successfully',
       data: {
         baseFee,
-        customFeeAmount: enrollment.customFeeAmount,
+        customFeeAmount: enrollment.customFeeAmount != null ? moneyToNumber(enrollment.customFeeAmount) : null,
         discountType: enrollment.discountType,
-        discountValue: enrollment.discountValue,
+        discountValue: discountVal ?? null,
         discountReason: enrollment.discountReason,
         netFee,
       },
@@ -275,11 +277,11 @@ export async function createPaymentRecord(req: Request, res: Response) {
     if (amountDue !== undefined) {
       finalAmountDue = amountDue;
     } else {
-      const effectiveBaseFee = enrollment.customFeeAmount ?? batch.feeAmount;
+      const effectiveBaseFee = enrollment.customFeeAmount != null ? moneyToNumber(enrollment.customFeeAmount) : moneyToNumber(batch.feeAmount);
       finalAmountDue = calculateNetFee(
         effectiveBaseFee,
         enrollment.discountType,
-        enrollment.discountValue
+        enrollment.discountValue != null ? moneyToNumber(enrollment.discountValue) : undefined
       );
     }
 
@@ -435,7 +437,7 @@ export async function createInstallmentPlan(req: Request, res: Response) {
     }
 
     // Check if any period already exists
-    const periods = installments.map((i) => i.period);
+    const periods = installments.map((i: any) => i.period);
     const existingPayments = await prisma.feePayment.findMany({
       where: {
         studentId,
@@ -453,7 +455,7 @@ export async function createInstallmentPlan(req: Request, res: Response) {
 
     // Execute creation inside transaction
     const createdPayments = await prisma.$transaction(
-      installments.map((inst) =>
+      installments.map((inst: any) =>
         prisma.feePayment.create({
           data: {
             studentId,

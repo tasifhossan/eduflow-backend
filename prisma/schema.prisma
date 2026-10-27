@@ -17,6 +17,59 @@ enum Role {
   STUDENT
   GUARDIAN
   SUPER_ADMIN
+  ACCOUNTANT
+}
+
+enum FeeBilling {
+  MONTHLY
+  ONE_TIME
+  NONE
+}
+
+enum FeeChargeKind {
+  TUITION
+  ADMISSION
+  EXAM
+  MATERIAL
+  OTHER
+}
+
+enum FeeChargeSource {
+  GENERATED
+  MANUAL
+  INSTALLMENT
+  MIGRATED
+}
+
+enum FeeChargeStatus {
+  ACTIVE
+  VOID
+}
+
+enum FeeAdjustmentType {
+  DISCOUNT
+  WAIVER
+  CORRECTION
+}
+
+enum FeeAdjustmentStatus {
+  ACTIVE
+  VOID
+}
+
+enum PaymentMethod {
+  CASH
+  BKASH
+  NAGAD
+  ROCKET
+  BANK
+  CARD
+  OTHER
+}
+
+enum PaymentSource {
+  MANUAL
+  MIGRATED
 }
 
 enum BatchType {
@@ -118,6 +171,12 @@ model Branch {
   batches   Batch[]
   notices   Notice[]
   attachments Attachment[]
+  feeCharges FeeCharge[]
+  feeAdjustments FeeAdjustment[]
+  payments Payment[]
+  paymentAllocations PaymentAllocation[]
+  paymentReversals PaymentReversal[]
+  receiptSequences ReceiptSequence[]
 }
 
 model User {
@@ -168,6 +227,15 @@ model User {
   gradedSubmissions    AssignmentSubmission[]  @relation(name: "GradedSubmissions")
   uploadedAttachments  Attachment[]            @relation(name: "UploadedAttachments")
   notifications        Notification[]          @relation(name: "UserNotifications")
+  feeChargesCreated    FeeCharge[]             @relation(name: "FeeChargesCreated")
+  feeChargesVoided     FeeCharge[]             @relation(name: "FeeChargesVoided")
+  studentFeeCharges    FeeCharge[]             @relation(name: "StudentFeeCharges")
+  feeAdjustmentsCreated FeeAdjustment[]        @relation(name: "FeeAdjustmentsCreated")
+  feeAdjustmentsVoided FeeAdjustment[]         @relation(name: "FeeAdjustmentsVoided")
+  studentPayments      Payment[]               @relation(name: "StudentPayments")
+  receivedPayments     Payment[]               @relation(name: "ReceivedPayments")
+  paymentReversals     PaymentReversal[]       @relation(name: "PaymentReversals")
+
 
   @@index([branchId])
   @@index([role])
@@ -251,7 +319,8 @@ model Batch {
   type             BatchType
   classLevel       String?
   feeType          FeeType           @default(MONTHLY)
-  feeAmount        Float             @default(0)
+  feeBilling       FeeBilling        @default(MONTHLY)
+  feeAmount        Decimal           @default(0) @db.Decimal(12, 2)
   description      String?
   imageUrl         String?
   gallery          String[]          @default([])
@@ -270,6 +339,7 @@ model Batch {
   attendances      Attendance[]
   tests            Test[]
   feePayments      FeePayment[]
+  feeCharges       FeeCharge[]
   notices          Notice[]
   resources        Resource[]
   practiceSessions PracticeSession[]
@@ -293,10 +363,11 @@ model Enrollment {
   batch           Batch            @relation(fields: [batchId], references: [id])
   enrolledAt      DateTime         @default(now())
   status          EnrollmentStatus @default(ACTIVE)
-  customFeeAmount Float?
+  customFeeAmount Decimal?         @db.Decimal(12, 2)
   discountType    DiscountType?
-  discountValue   Float?
+  discountValue   Decimal?         @db.Decimal(12, 2)
   discountReason  String?
+  feeCharges      FeeCharge[]
 
   @@unique([studentId, batchId])
   @@index([batchId])
@@ -604,6 +675,7 @@ model CenterSettings {
   defaultLocale          String   @default("en")
   academicYearStartMonth Int      @default(1)
   weekStartsOn           Int      @default(6)
+  feeDueDay              Int      @default(10)
   receiptHeader          String?
   receiptFooter          String?
   features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true}")
@@ -744,6 +816,133 @@ model Notification {
   createdAt  DateTime  @default(now())
 
   @@index([userId, readAt, createdAt])
+}
+
+model FeeCharge {
+  id           String          @id @default(cuid())
+  branchId     String
+  branch       Branch          @relation(fields: [branchId], references: [id])
+  studentId    String
+  student      User            @relation("StudentFeeCharges", fields: [studentId], references: [id])
+  batchId      String
+  batch        Batch           @relation(fields: [batchId], references: [id])
+  enrollmentId String?
+  enrollment   Enrollment?     @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  kind         FeeChargeKind
+  period       String?
+  description  String
+  amount       Decimal         @db.Decimal(12, 2)
+  dueDate      DateTime        @db.Date
+  source       FeeChargeSource
+  status       FeeChargeStatus @default(ACTIVE)
+  voidReason   String?
+  voidedAt     DateTime?
+  voidedById   String?
+  voidedBy     User?           @relation("FeeChargesVoided", fields: [voidedById], references: [id], onDelete: SetNull)
+  createdById  String
+  createdBy    User            @relation("FeeChargesCreated", fields: [createdById], references: [id])
+  createdAt    DateTime        @default(now())
+
+  adjustments  FeeAdjustment[]
+  allocations  PaymentAllocation[]
+
+  @@index([branchId])
+  @@index([studentId])
+  @@index([batchId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([period])
+}
+
+model FeeAdjustment {
+  id          String              @id @default(cuid())
+  branchId    String
+  branch      Branch              @relation(fields: [branchId], references: [id])
+  chargeId    String
+  charge      FeeCharge           @relation(fields: [chargeId], references: [id])
+  type        FeeAdjustmentType
+  amount      Decimal             @db.Decimal(12, 2)
+  reason      String              @db.VarChar(200)
+  status      FeeAdjustmentStatus @default(ACTIVE)
+  voidReason  String?
+  voidedAt    DateTime?
+  voidedById  String?
+  voidedBy    User?               @relation("FeeAdjustmentsVoided", fields: [voidedById], references: [id], onDelete: SetNull)
+  createdById String
+  createdBy   User                @relation("FeeAdjustmentsCreated", fields: [createdById], references: [id])
+  createdAt   DateTime            @default(now())
+
+  @@index([branchId])
+  @@index([chargeId])
+  @@index([status])
+}
+
+model Payment {
+  id             String              @id @default(cuid())
+  branchId       String
+  branch         Branch              @relation(fields: [branchId], references: [id])
+  studentId      String
+  student        User                @relation("StudentPayments", fields: [studentId], references: [id])
+  receiptNumber  String              @unique
+  receivedAt     DateTime
+  amount         Decimal             @db.Decimal(12, 2)
+  method         PaymentMethod
+  reference      String?
+  note           String?
+  receivedById   String
+  receivedBy     User                @relation("ReceivedPayments", fields: [receivedById], references: [id])
+  idempotencyKey String?
+  source         PaymentSource
+  createdAt      DateTime            @default(now())
+
+  allocations    PaymentAllocation[]
+  reversal       PaymentReversal?
+
+  @@index([branchId])
+  @@index([studentId])
+  @@index([receivedAt])
+  @@index([receivedById])
+}
+
+model PaymentAllocation {
+  id        String    @id @default(cuid())
+  branchId  String
+  branch    Branch    @relation(fields: [branchId], references: [id])
+  paymentId String
+  payment   Payment   @relation(fields: [paymentId], references: [id])
+  chargeId  String
+  charge    FeeCharge @relation(fields: [chargeId], references: [id])
+  amount    Decimal   @db.Decimal(12, 2)
+  createdAt DateTime  @default(now())
+
+  @@unique([paymentId, chargeId])
+  @@index([branchId])
+  @@index([paymentId])
+  @@index([chargeId])
+}
+
+model PaymentReversal {
+  id           String   @id @default(cuid())
+  branchId     String
+  branch       Branch   @relation(fields: [branchId], references: [id])
+  paymentId    String   @unique
+  payment      Payment  @relation(fields: [paymentId], references: [id])
+  reason       String
+  reversedById String
+  reversedBy   User     @relation("PaymentReversals", fields: [reversedById], references: [id])
+  reversedAt   DateTime @default(now())
+
+  @@index([branchId])
+}
+
+model ReceiptSequence {
+  id         String @id @default(cuid())
+  branchId   String
+  branch     Branch @relation(fields: [branchId], references: [id])
+  year       Int
+  lastNumber Int    @default(0)
+
+  @@unique([branchId, year])
 }
 
 

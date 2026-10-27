@@ -4,10 +4,12 @@ import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { Role, DayOfWeek, EnrollmentStatus } from '@prisma/client';
+import { Role, DayOfWeek, EnrollmentStatus, Prisma, PaymentMethod, FeeChargeKind, FeeAdjustmentType } from '@prisma/client';
 import prisma from '../src/utils/prisma';
 import env from '../src/config/env';
 import { ATTACHMENT_CONFIG } from '../src/config/academics.config';
+import { FeeLedgerService } from '../src/services/fee-ledger.service';
+import { reconcileFees } from './reconcile-fees';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION & GLOBAL STATE
@@ -3387,6 +3389,593 @@ async function runSmokeTests() {
       c10Passed,
       c10Details
     );
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 11. DECIMAL MONEY & APPEND-ONLY FEE LEDGER (FEE-LEDGER)
+    // ─────────────────────────────────────────────────────────────────────────
+    console.log('\n--- Running Check 11: Fee Ledger, Receipts, Dues, Reversals, Decimal Money & Accountant Role ---');
+    let c11Passed = true;
+    const c11Errors: string[] = [];
+
+    // 1. information_schema check: verify no Float or double precision money columns in active tables
+    const moneyCols: any[] = await prisma.$queryRaw`
+      SELECT table_name, column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name IN ('FeeCharge', 'FeeAdjustment', 'Payment', 'PaymentAllocation', 'Batch', 'Enrollment')
+        AND column_name IN ('feeAmount', 'customFeeAmount', 'discountValue', 'amount')
+        AND data_type NOT IN ('numeric', 'decimal');
+    `;
+    if (moneyCols.length > 0) {
+      c11Passed = false;
+      c11Errors.push(`Found non-decimal money columns: ${JSON.stringify(moneyCols)}`);
+    }
+
+    // 2. Exact Decimal arithmetic
+    const splits = FeeLedgerService.splitInstallments(new Prisma.Decimal('100.00'), 3);
+    if (
+      splits.length !== 3 ||
+      splits[0].toString() !== '33.33' ||
+      splits[1].toString() !== '33.33' ||
+      splits[2].toString() !== '33.34' ||
+      !splits[0].add(splits[1]).add(splits[2]).equals(new Prisma.Decimal('100.00'))
+    ) {
+      c11Passed = false;
+      c11Errors.push(`splitInstallments failed exact penny test: ${splits.map((s) => s.toString()).join(', ')}`);
+    }
+
+    const discountUnrounded = new Prisma.Decimal('100.00').mul(new Prisma.Decimal('15.555')).div(100);
+    const discountRounded = FeeLedgerService.round(discountUnrounded);
+    if (discountRounded.toString() !== '15.56') {
+      c11Passed = false;
+      c11Errors.push(`Decimal percent discount rounding expected 15.56, got ${discountRounded.toString()}`);
+    }
+
+    // 3. Legacy write endpoints return 410 Gone
+    const legacyPayRes = await req('/api/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ studentId: 'none', batchId: 'none', period: '2026-10' }),
+    });
+    if (legacyPayRes.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/payments expected 410, got ${legacyPayRes.status}`);
+    }
+
+    const legacyPatchRes = await req('/api/payments/test-id', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ amountPaid: 100 }),
+    });
+    if (legacyPatchRes.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`PATCH /api/payments/:id expected 410, got ${legacyPatchRes.status}`);
+    }
+
+    const legacyPlanRes = await req('/api/payments/installment-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ studentId: 'none', batchId: 'none', installments: [] }),
+    });
+    if (legacyPlanRes.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/payments/installment-plan expected 410, got ${legacyPlanRes.status}`);
+    }
+
+    // 4. Create smoke branch & fixtures
+    const smokeFeeBranch = await prisma.branch.create({
+      data: { name: 'SMOKE-FEE-BRANCH-DHAKA', address: 'Dhanmondi, Dhaka' },
+    });
+    createdBranchIds.push(smokeFeeBranch.id);
+
+    const smokeOtherBranch = await prisma.branch.create({
+      data: { name: 'SMOKE-FEE-BRANCH-OTHER', address: 'Chittagong' },
+    });
+    createdBranchIds.push(smokeOtherBranch.id);
+
+    // Create staff & student users
+    const pwdHash = await bcrypt.hash('SmokeSecret123!', 10);
+
+    const sAdmin = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Admin',
+        email: `smoke.fee.admin.${Date.now()}@smoke.local`,
+        role: Role.ADMIN,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sAdmin.id);
+
+    const sAccountant = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Accountant',
+        email: `smoke.fee.acc.${Date.now()}@smoke.local`,
+        role: Role.ACCOUNTANT,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sAccountant.id);
+
+    const sTeacher = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Teacher',
+        email: `smoke.fee.teacher.${Date.now()}@smoke.local`,
+        role: Role.TEACHER,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sTeacher.id);
+
+    const sStudent = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Student',
+        email: `smoke.fee.student.${Date.now()}@smoke.local`,
+        role: Role.STUDENT,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sStudent.id);
+
+    const sGuardian = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Guardian',
+        email: `smoke.fee.guardian.${Date.now()}@smoke.local`,
+        role: Role.GUARDIAN,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sGuardian.id);
+
+    const sOtherAdmin = await prisma.user.create({
+      data: {
+        name: 'SMOKE Other Admin',
+        email: `smoke.fee.otheradmin.${Date.now()}@smoke.local`,
+        role: Role.ADMIN,
+        branchId: smokeOtherBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sOtherAdmin.id);
+
+    // Link guardian to student
+    const gLink = await prisma.guardianLink.create({
+      data: { guardianId: sGuardian.id, studentId: sStudent.id },
+    });
+    createdGuardianLinkIds.push(gLink.id);
+
+    // Create batch & enrollment
+    const sSubj = (await prisma.subject.findFirst()) || (await prisma.subject.create({ data: { name: 'SMOKE Math' } }));
+    const sBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE Fee Math Batch',
+        type: 'ACADEMIC',
+        subjectId: sSubj.id,
+        branchId: smokeFeeBranch.id,
+        feeAmount: new Prisma.Decimal('1000.00'),
+        feeBilling: 'MONTHLY',
+      },
+    });
+    createdBatchIds.push(sBatch.id);
+
+    await prisma.enrollment.create({
+      data: {
+        studentId: sStudent.id,
+        batchId: sBatch.id,
+        status: 'ACTIVE',
+      },
+    });
+
+    // Generate tokens
+    const sAdminCookie = `token=${jwt.sign({ userId: sAdmin.id, email: sAdmin.email, role: Role.ADMIN, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sAccCookie = `token=${jwt.sign({ userId: sAccountant.id, email: sAccountant.email, role: Role.ACCOUNTANT, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sTeachCookie = `token=${jwt.sign({ userId: sTeacher.id, email: sTeacher.email, role: Role.TEACHER, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sStudentCookie = `token=${jwt.sign({ userId: sStudent.id, email: sStudent.email, role: Role.STUDENT, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sGuardianCookie = `token=${jwt.sign({ userId: sGuardian.id, email: sGuardian.email, role: Role.GUARDIAN, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sOtherAdminCookie = `token=${jwt.sign({ userId: sOtherAdmin.id, email: sOtherAdmin.email, role: Role.ADMIN, branchId: smokeOtherBranch.id }, env.JWT_SECRET)}`;
+
+    // 5. Role Matrix Denials
+    // TEACHER denied on fee endpoints
+    const teachDeniedRes = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sTeachCookie },
+      body: JSON.stringify({ studentId: sStudent.id, amount: 100, method: 'CASH' }),
+    });
+    if (teachDeniedRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`TEACHER on /api/fees/payments expected 403, got ${teachDeniedRes.status}`);
+    }
+
+    // Cross-branch admin denied
+    const crossBranchRes = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sOtherAdminCookie },
+    });
+    if (crossBranchRes.status !== 404 && crossBranchRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`Cross-branch admin on student account expected 403/404, got ${crossBranchRes.status}`);
+    }
+
+    // 6. Manual Charge creation & string money verification
+    const chargeRes = await req('/api/fees/charges', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        batchId: sBatch.id,
+        amount: 1000,
+        dueDate: '2026-11-15',
+        description: 'SMOKE First Tuition Charge',
+        kind: 'TUITION',
+        period: '2026-11',
+      }),
+    });
+    if (chargeRes.status !== 201 || !chargeRes.body?.data?.charge?.id) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/fees/charges failed: ${chargeRes.status} ${JSON.stringify(chargeRes.body)}`);
+    }
+    const charge1 = chargeRes.body?.data?.charge;
+    if (charge1?.amount !== '1000.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge amount in response expected string "1000.00", got ${typeof charge1?.amount} ${charge1?.amount}`);
+    }
+
+    // 7. Partial Payment then Full Payment
+    const pay1Res = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 400,
+        method: 'CASH',
+        note: 'Partial payment 400',
+      }),
+    });
+    if (pay1Res.status !== 201 || !pay1Res.body?.data?.payment) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/fees/payments (partial) failed: ${pay1Res.status} ${JSON.stringify(pay1Res.body)}`);
+    }
+    const pay1 = pay1Res.body?.data?.payment;
+    if (pay1?.amount !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`Payment amount expected "400.00", got ${pay1?.amount}`);
+    }
+
+    // Check account shows PARTIAL status
+    const acctAfterPay1 = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAccCookie },
+    });
+    const c1State = acctAfterPay1.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
+    if (c1State?.status !== 'PARTIAL' || c1State?.balance !== '600.00' || c1State?.paid !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge status after partial pay expected PARTIAL with balance 600.00, got ${c1State?.status} bal=${c1State?.balance}`);
+    }
+
+    // Void rules: cannot void charge with paid > 0
+    const voidChargeFail = await req(`/api/fees/charges/${charge1?.id}/void`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({ reason: 'Accidentally created' }),
+    });
+    if (voidChargeFail.status !== 400) {
+      c11Passed = false;
+      c11Errors.push(`Voiding charge with paid > 0 expected 400, got ${voidChargeFail.status}`);
+    }
+
+    // ACCOUNTANT cannot void charge
+    const accVoidRes = await req(`/api/fees/charges/${charge1?.id}/void`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ reason: 'Attempted accountant void' }),
+    });
+    if (accVoidRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`ACCOUNTANT void charge expected 403, got ${accVoidRes.status}`);
+    }
+
+    // Full payment for the remainder
+    const pay2Res = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 600,
+        method: 'BKASH',
+        reference: 'TRX-FULL-PAY',
+        note: 'Full payoff 600',
+      }),
+    });
+    if (pay2Res.status !== 201) {
+      c11Passed = false;
+      c11Errors.push(`Payment remainder failed: ${pay2Res.status}`);
+    }
+    const pay2 = pay2Res.body?.data?.payment;
+
+    // Check account shows PAID status
+    const acctAfterPay2 = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    const c1PaidState = acctAfterPay2.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
+    if (c1PaidState?.status !== 'PAID' || c1PaidState?.balance !== '0.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge status after full pay expected PAID with balance 0.00, got ${c1PaidState?.status} bal=${c1PaidState?.balance}`);
+    }
+
+    // 8. Reversal
+    // ACCOUNTANT cannot reverse
+    const accRevRes = await req(`/api/fees/payments/${pay2?.id}/reverse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ reason: 'Accountant trying to reverse' }),
+    });
+    if (accRevRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`ACCOUNTANT reverse payment expected 403, got ${accRevRes.status}`);
+    }
+
+    // ADMIN reverses pay2
+    const adminRevRes = await req(`/api/fees/payments/${pay2?.id}/reverse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({ reason: 'Reversing 600 payment for test' }),
+    });
+    if (adminRevRes.status !== 200 || !adminRevRes.body?.data?.reversal) {
+      c11Passed = false;
+      c11Errors.push(`ADMIN reverse payment failed: ${adminRevRes.status} ${JSON.stringify(adminRevRes.body)}`);
+    }
+
+    // Check account restored to PARTIAL with balance 600.00
+    const acctAfterRev = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    const c1RevState = acctAfterRev.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
+    if (c1RevState?.status !== 'PARTIAL' || c1RevState?.balance !== '600.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge balance after reversal expected 600.00, got ${c1RevState?.balance} status=${c1RevState?.status}`);
+    }
+
+    // 9. Overpayment becomes Student Credit & auto-applies
+    const overpayRes = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 1000,
+        method: 'CASH',
+        note: 'Overpaying to generate 400 credit',
+      }),
+    });
+    if (overpayRes.status !== 201) {
+      c11Passed = false;
+      c11Errors.push(`Overpayment failed: ${overpayRes.status}`);
+    }
+    const acctAfterOverpay = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    if (acctAfterOverpay.body?.data?.creditBalance !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`Credit balance expected 400.00, got ${acctAfterOverpay.body?.data?.creditBalance}`);
+    }
+
+    // Create a new charge of 500.00 and apply credit
+    const charge2Res = await req('/api/fees/charges', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        batchId: sBatch.id,
+        amount: 500,
+        dueDate: '2026-12-15',
+        description: 'SMOKE Charge to Test Credit Application',
+      }),
+    });
+    const charge2Id = charge2Res.body?.data?.charge?.id;
+
+    // Apply available credit via service
+    const creditApplied = await FeeLedgerService.applyAvailableCreditToCharge(charge2Id);
+    if (creditApplied.toString() !== '400.00' && creditApplied.toFixed?.(2) !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`applyAvailableCreditToCharge expected 400.00 applied, got ${creditApplied.toString()}`);
+    }
+
+    const acctAfterCreditApply = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    if (acctAfterCreditApply.body?.data?.creditBalance !== '0.00') {
+      c11Passed = false;
+      c11Errors.push(`Credit balance after apply expected 0.00, got ${acctAfterCreditApply.body?.data?.creditBalance}`);
+    }
+    const c2State = acctAfterCreditApply.body?.data?.charges?.find((c: any) => c.id === charge2Id);
+    if (c2State?.balance !== '100.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge 2 balance after credit apply expected 100.00, got ${c2State?.balance}`);
+    }
+
+    // 10. Idempotency test (same key returns original payment, 5 concurrent identical return 1)
+    const idemKey = `IDEM-TEST-${Date.now()}`;
+    const idemReqPayload = {
+      studentId: sStudent.id,
+      amount: 100,
+      method: 'CASH',
+      note: 'Idempotency test payload',
+    };
+
+    const idem1 = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idemKey, Cookie: sAdminCookie },
+      body: JSON.stringify(idemReqPayload),
+    });
+    const idem2 = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idemKey, Cookie: sAdminCookie },
+      body: JSON.stringify(idemReqPayload),
+    });
+
+    if (idem1.status !== 201 || idem2.status !== 200 || idem1.body?.data?.payment?.id !== idem2.body?.data?.payment?.id) {
+      c11Passed = false;
+      c11Errors.push(`Sequential idempotency failed: s1=${idem1.status} s2=${idem2.status} id1=${idem1.body?.data?.payment?.id} id2=${idem2.body?.data?.payment?.id}`);
+    }
+
+    // 5 concurrent requests with identical key
+    const concIdemKey = `CONC-IDEM-${Date.now()}`;
+    const concIdemPromises = Array.from({ length: 5 }, () =>
+      req('/api/fees/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': concIdemKey, Cookie: sAdminCookie },
+        body: JSON.stringify({ studentId: sStudent.id, amount: 50, method: 'CASH', note: 'Concurrent test' }),
+      })
+    );
+    const concIdemResults = await Promise.all(concIdemPromises);
+    const concSuccesses = concIdemResults.filter((r) => r.status === 200 || r.status === 201);
+    if (concSuccesses.length !== 5) {
+      c11Passed = false;
+      c11Errors.push(`Concurrent idempotency expected all 5 requests to resolve 200/201, got statuses: ${concIdemResults.map((r) => r.status).join(',')}`);
+    }
+    const uniqueConcIds = new Set(concSuccesses.map((r) => r.body?.data?.payment?.id));
+    if (uniqueConcIds.size !== 1) {
+      c11Passed = false;
+      c11Errors.push(`Concurrent idempotency expected exactly 1 distinct payment ID, got ${uniqueConcIds.size}`);
+    }
+
+    // 11. Concurrency test: 10 concurrent different payments yield gap-free receipts
+    const concDiffPromises = Array.from({ length: 10 }, (_, i) =>
+      req('/api/fees/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `CONC-DIFF-${Date.now()}-${i}`, Cookie: sAdminCookie },
+        body: JSON.stringify({ studentId: sStudent.id, amount: 10 + i, method: 'CASH', note: `Diff payment ${i}` }),
+      })
+    );
+    const concDiffResults = await Promise.all(concDiffPromises);
+    const diffReceipts = concDiffResults.map((r) => r.body?.data?.payment?.receiptNumber).filter(Boolean);
+    if (diffReceipts.length !== 10) {
+      c11Passed = false;
+      c11Errors.push(`10 concurrent payments expected 10 receipts, got ${diffReceipts.length}`);
+    }
+    const uniqueReceipts = new Set(diffReceipts);
+    if (uniqueReceipts.size !== 10) {
+      c11Passed = false;
+      c11Errors.push(`Expected 10 unique receipts, got duplicate: ${diffReceipts.join(', ')}`);
+    }
+
+    // 12. Dues Generation (dryRun & idempotency)
+    const genDryRun = await req('/api/fees/charges/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ month: '2027-01', dryRun: true }),
+    });
+    if (genDryRun.status !== 200 || !genDryRun.body?.data?.dryRun) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues dryRun expected 200 with dryRun: true, got ${genDryRun.status}`);
+    }
+    const dryRunDbCount = await prisma.feeCharge.count({ where: { period: '2027-01' } });
+    if (dryRunDbCount !== 0) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues dryRun wrote ${dryRunDbCount} charges to DB!`);
+    }
+
+    // Actual generate
+    const genActual1 = await req('/api/fees/charges/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ month: '2027-01', dryRun: false }),
+    });
+    if (genActual1.status !== 200 || genActual1.body?.data?.createdCount < 1) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues actual expected createdCount >= 1, got ${genActual1.body?.data?.createdCount}`);
+    }
+
+    // Run again for same month: must be 0 created
+    const genActual2 = await req('/api/fees/charges/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ month: '2027-01', dryRun: false }),
+    });
+    if (genActual2.status !== 200 || genActual2.body?.data?.createdCount !== 0) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues rerun expected createdCount: 0 (idempotent), got ${genActual2.body?.data?.createdCount}`);
+    }
+
+    // 13. CSV formula neutralization
+    const csvFormulaPay = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 25,
+        method: 'CASH',
+        note: '=SUM(A1:A10)',
+        reference: '+8801700000000',
+      }),
+    });
+    if (csvFormulaPay.status !== 201) {
+      c11Passed = false;
+      c11Errors.push(`Failed to create CSV formula payment: ${csvFormulaPay.status}`);
+    }
+
+    const csvRes = await req('/api/fees/payments?format=csv', {
+      headers: { Cookie: sAdminCookie },
+    });
+    if (csvRes.status !== 200 || !csvRes.headers.get('content-type')?.includes('text/csv')) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/fees/payments?format=csv failed: ${csvRes.status}`);
+    }
+    if (!csvRes.rawText.includes("'+8801700000000") && !csvRes.rawText.includes("'=SUM(A1:A10)")) {
+      c11Passed = false;
+      c11Errors.push(`CSV export did not neutralize formula prefixes! Found raw text: ${csvRes.rawText.slice(0, 300)}`);
+    }
+
+    // 14. Student & Guardian View Endpoints
+    const myAcctRes = await req('/api/fees/my-account', {
+      headers: { Cookie: sStudentCookie },
+    });
+    if (myAcctRes.status !== 200 || myAcctRes.body?.data?.student?.id !== sStudent.id) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/fees/my-account failed: ${myAcctRes.status}`);
+    }
+
+    const guardAcctRes = await req(`/api/fees/guardian/students/${sStudent.id}/account`, {
+      headers: { Cookie: sGuardianCookie },
+    });
+    if (guardAcctRes.status !== 200 || guardAcctRes.body?.data?.student?.id !== sStudent.id) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/fees/guardian/students/:id/account failed: ${guardAcctRes.status}`);
+    }
+
+    // 15. Reconciliation script execution
+    const reconResult = await reconcileFees(false);
+    if (!reconResult.isMatch || reconResult.mismatchCount > 0) {
+      c11Passed = false;
+      c11Errors.push(`reconcileFees failed: isMatch=${reconResult.isMatch} mismatches=${reconResult.mismatchCount}`);
+    }
+
+    // 16. Audit log hygiene
+    const feeAuditLogs = await prisma.auditLog.findMany({
+      where: {
+        action: { in: ['FEE_PAYMENT_RECORDED', 'FEE_PAYMENT_REVERSED', 'FEE_CHARGE_CREATED'] },
+      },
+      take: 5,
+    });
+    for (const log of feeAuditLogs) {
+      const metaStr = JSON.stringify(log.metadata || {});
+      if (metaStr.includes('TRX-') || metaStr.includes('password') || metaStr.includes('secret')) {
+        c11Passed = false;
+        c11Errors.push(`Audit log ${log.id} leaked sensitive references/notes in metadata: ${metaStr}`);
+      }
+    }
+
+    const c11Details = c11Passed
+      ? 'Decimal money exact arithmetic; AUTO/MANUAL allocations; partial/full payments; overpayment student credit; idempotency deduplication; 10 concurrent gap-free receipts; payment reversals; void guards; dryRun & idempotent dues generation; role matrix with ACCOUNTANT; CSV formula sanitization; legacy 410s; reconcileFees cent-for-cent pass'
+      : c11Errors.join('; ');
+
+    recordCheck(
+      '11',
+      'Decimal money, fee ledger, receipts, dues generation, reversals, accountant role',
+      c11Passed,
+      c11Details
+    );
   }
 } finally {
     // ─────────────────────────────────────────────────────────────────────────
@@ -3453,6 +4042,51 @@ async function runSmokeTests() {
       }
       await prisma.lecture.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
 
+      await prisma.paymentReversal.deleteMany({
+        where: {
+          OR: [
+            { payment: { student: { name: { startsWith: 'SMOKE-' } } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.paymentAllocation.deleteMany({
+        where: {
+          OR: [
+            { payment: { student: { name: { startsWith: 'SMOKE-' } } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.feeAdjustment.deleteMany({
+        where: {
+          OR: [
+            { charge: { student: { name: { startsWith: 'SMOKE-' } } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.payment.deleteMany({
+        where: {
+          OR: [
+            { student: { name: { startsWith: 'SMOKE-' } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.feeCharge.deleteMany({
+        where: {
+          OR: [
+            { student: { name: { startsWith: 'SMOKE-' } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+            { batchId: { in: createdBatchIds } },
+          ],
+        },
+      });
+      await prisma.receiptSequence.deleteMany({
+        where: { branch: { name: { startsWith: 'SMOKE-' } } },
+      });
+
       if (createdBatchIds.length > 0) {
         await prisma.enrollment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.routineSlot.deleteMany({ where: { batchId: { in: createdBatchIds } } });
@@ -3461,6 +4095,7 @@ async function runSmokeTests() {
         await prisma.feePayment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.batch.deleteMany({ where: { id: { in: createdBatchIds } } });
       }
+
       await prisma.enrollment.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
       await prisma.routineSlot.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
       await prisma.review.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });

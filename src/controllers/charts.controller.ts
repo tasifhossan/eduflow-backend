@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { Prisma, Role, PaymentStatus, AttendanceStatus } from '@prisma/client';
 import prisma from '../utils/prisma';
+import { moneyToNumber } from '../utils/money';
+import { FeeLedgerService } from '../services/fee-ledger.service';
 
 export const scoreDistributionQuerySchema = z.object({
   testId: z.string().optional(),
@@ -23,29 +25,19 @@ export async function getRevenueMonthlyChart(req: Request, res: Response) {
     const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
     const effectiveBranchId = req.effectiveBranchId;
 
-    const where: Prisma.FeePaymentWhereInput = {
-      amountPaid: { gt: 0 },
-      OR: [
-        { paidAt: { gte: twelveMonthsAgo } },
-        { paidAt: null, createdAt: { gte: twelveMonthsAgo } },
-      ],
+    const where: Prisma.PaymentWhereInput = {
+      reversal: null,
+      receivedAt: { gte: twelveMonthsAgo },
+      ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
     };
 
-    if (effectiveBranchId) {
-      where.batch = { branchId: effectiveBranchId };
-    }
-
-    const payments = await prisma.feePayment.findMany({
+    const payments = await prisma.payment.findMany({
       where,
       select: {
-        amountPaid: true,
-        paidAt: true,
-        createdAt: true,
-        batch: {
-          select: {
-            branchId: true,
-            branch: { select: { id: true, name: true } },
-          },
+        amount: true,
+        receivedAt: true,
+        branch: {
+          select: { id: true, name: true },
         },
       },
     });
@@ -72,16 +64,17 @@ export async function getRevenueMonthlyChart(req: Request, res: Response) {
     >();
 
     for (const p of payments) {
-      const date = p.paidAt || p.createdAt;
+      const date = p.receivedAt;
       const mKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      const amountPaid = moneyToNumber(p.amount);
       if (monthlyTotals.has(mKey)) {
-        monthlyTotals.set(mKey, (monthlyTotals.get(mKey) || 0) + p.amountPaid);
-        totalSum += p.amountPaid;
+        monthlyTotals.set(mKey, (monthlyTotals.get(mKey) || 0) + amountPaid);
+        totalSum += amountPaid;
       }
 
-      if (isSuperAdminAllBranches && p.batch?.branch) {
-        const bId = p.batch.branch.id;
-        const bName = p.batch.branch.name;
+      if (isSuperAdminAllBranches && p.branch) {
+        const bId = p.branch.id;
+        const bName = p.branch.name;
         if (!branchMap.has(bId)) {
           const map = new Map<string, number>();
           monthKeys.forEach((m) => map.set(m, 0));
@@ -89,8 +82,8 @@ export async function getRevenueMonthlyChart(req: Request, res: Response) {
         }
         const bEntry = branchMap.get(bId)!;
         if (bEntry.totals.has(mKey)) {
-          bEntry.totals.set(mKey, (bEntry.totals.get(mKey) || 0) + p.amountPaid);
-          bEntry.totalRevenue += p.amountPaid;
+          bEntry.totals.set(mKey, (bEntry.totals.get(mKey) || 0) + amountPaid);
+          bEntry.totalRevenue += amountPaid;
         }
       }
     }
@@ -354,12 +347,23 @@ export async function getFeeStatusChart(req: Request, res: Response) {
     }
 
     const effectiveBranchId = req.effectiveBranchId;
+    const settings = await prisma.centerSettings.findUnique({
+      where: { key: 'center' },
+      select: { timezone: true },
+    });
+    const todayStr = FeeLedgerService.getTodayInTimezone(settings?.timezone || 'Asia/Dhaka');
 
-    const groups = await prisma.feePayment.groupBy({
-      by: ['status'],
-      where: effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {},
-      _count: { _all: true },
-      _sum: { amountDue: true, amountPaid: true },
+    const charges = await prisma.feeCharge.findMany({
+      where: {
+        status: 'ACTIVE',
+        ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+      },
+      include: {
+        adjustments: true,
+        allocations: {
+          include: { payment: { select: { reversal: true } } },
+        },
+      },
     });
 
     const statusSummary = {
@@ -368,15 +372,35 @@ export async function getFeeStatusChart(req: Request, res: Response) {
       PAID: { count: 0, amountDue: 0, amountPaid: 0 },
     };
 
-    for (const g of groups) {
-      if (g.status in statusSummary) {
-        statusSummary[g.status] = {
-          count: g._count._all,
-          amountDue: Number((g._sum.amountDue || 0).toFixed(2)),
-          amountPaid: Number((g._sum.amountPaid || 0).toFixed(2)),
-        };
+    const branchCountsMap = new Map<string, { DUE: number; PARTIAL: number; PAID: number }>();
+
+    for (const ch of charges) {
+      const bal = FeeLedgerService.deriveChargeStatus(ch, todayStr);
+      let cat: 'DUE' | 'PARTIAL' | 'PAID' = 'DUE';
+      if (bal.status === 'PAID' || bal.status === 'WAIVED') {
+        cat = 'PAID';
+      } else if (bal.status === 'PARTIAL') {
+        cat = 'PARTIAL';
+      } else {
+        cat = 'DUE';
       }
+
+      statusSummary[cat].count += 1;
+      statusSummary[cat].amountDue += moneyToNumber(bal.effectiveAmount);
+      statusSummary[cat].amountPaid += moneyToNumber(bal.paidAmount);
+
+      if (!branchCountsMap.has(ch.branchId)) {
+        branchCountsMap.set(ch.branchId, { DUE: 0, PARTIAL: 0, PAID: 0 });
+      }
+      branchCountsMap.get(ch.branchId)![cat] += 1;
     }
+
+    statusSummary.DUE.amountDue = Number(statusSummary.DUE.amountDue.toFixed(2));
+    statusSummary.DUE.amountPaid = Number(statusSummary.DUE.amountPaid.toFixed(2));
+    statusSummary.PARTIAL.amountDue = Number(statusSummary.PARTIAL.amountDue.toFixed(2));
+    statusSummary.PARTIAL.amountPaid = Number(statusSummary.PARTIAL.amountPaid.toFixed(2));
+    statusSummary.PAID.amountDue = Number(statusSummary.PAID.amountDue.toFixed(2));
+    statusSummary.PAID.amountPaid = Number(statusSummary.PAID.amountPaid.toFixed(2));
 
     let branchBreakdown:
       | { branchId: string; branchName: string; statusCounts: Record<string, number> }[]
@@ -384,34 +408,14 @@ export async function getFeeStatusChart(req: Request, res: Response) {
 
     if (req.user.role === Role.SUPER_ADMIN && !effectiveBranchId) {
       const branches = await prisma.branch.findMany({
-        select: {
-          id: true,
-          name: true,
-          batches: {
-            select: {
-              feePayments: {
-                select: {
-                  status: true,
-                },
-              },
-            },
-          },
-        },
+        select: { id: true, name: true },
       });
 
-      branchBreakdown = branches.map((b) => {
-        const counts: Record<string, number> = { DUE: 0, PARTIAL: 0, PAID: 0 };
-        for (const batch of b.batches) {
-          for (const payment of batch.feePayments) {
-            counts[payment.status] = (counts[payment.status] || 0) + 1;
-          }
-        }
-        return {
-          branchId: b.id,
-          branchName: b.name,
-          statusCounts: counts,
-        };
-      });
+      branchBreakdown = branches.map((b) => ({
+        branchId: b.id,
+        branchName: b.name,
+        statusCounts: branchCountsMap.get(b.id) || { DUE: 0, PARTIAL: 0, PAID: 0 },
+      }));
     }
 
     return res.status(200).json({
@@ -566,7 +570,7 @@ export async function getOverviewChart(req: Request, res: Response) {
 
     // ─── STUDENT Overview ───────────────────────────────────────────────────
     if (role === Role.STUDENT) {
-      const [enrolledBatchesCount, attendanceGroups, scoreAgg, feeAgg] = await Promise.all([
+      const [enrolledBatchesCount, attendanceGroups, scoreAgg, feeCharges] = await Promise.all([
         prisma.enrollment.count({
           where: { studentId: userId, status: 'ACTIVE' },
         }),
@@ -580,13 +584,14 @@ export async function getOverviewChart(req: Request, res: Response) {
           _avg: { totalMarksObtained: true },
           _count: { _all: true },
         }),
-        prisma.feePayment.aggregate({
-          where: {
-            studentId: userId,
-            status: { in: [PaymentStatus.DUE, PaymentStatus.PARTIAL] },
+        prisma.feeCharge.findMany({
+          where: { studentId: userId, status: 'ACTIVE' },
+          include: {
+            adjustments: true,
+            allocations: {
+              include: { payment: { select: { reversal: true } } },
+            },
           },
-          _count: { _all: true },
-          _sum: { amountDue: true, amountPaid: true },
         }),
       ]);
 
@@ -599,10 +604,17 @@ export async function getOverviewChart(req: Request, res: Response) {
       const attendanceRate =
         totalAtt > 0 ? Number(((presentAtt / totalAtt) * 100).toFixed(1)) : 0;
 
-      const dues = feeAgg._count._all;
-      const dueAmount = Number(
-        ((feeAgg._sum.amountDue || 0) - (feeAgg._sum.amountPaid || 0)).toFixed(2)
-      );
+      let dues = 0;
+      let dueAmount = 0;
+      const todayStr = FeeLedgerService.getTodayInTimezone();
+      for (const ch of feeCharges) {
+        const bal = FeeLedgerService.deriveChargeStatus(ch, todayStr);
+        if (bal.balance.gt(0)) {
+          dues++;
+          dueAmount += moneyToNumber(bal.balance);
+        }
+      }
+      dueAmount = Number(dueAmount.toFixed(2));
 
       return res.status(200).json({
         success: true,
@@ -627,23 +639,32 @@ export async function getOverviewChart(req: Request, res: Response) {
       });
       const studentIds = links.map((l) => l.studentId);
 
-      const [enrolledBatchesCount, feeAgg] = await Promise.all([
+      const [enrolledBatchesCount, feeCharges] = await Promise.all([
         prisma.enrollment.count({
           where: { studentId: { in: studentIds }, status: 'ACTIVE' },
         }),
-        prisma.feePayment.aggregate({
-          where: {
-            studentId: { in: studentIds },
-            status: { in: [PaymentStatus.DUE, PaymentStatus.PARTIAL] },
+        prisma.feeCharge.findMany({
+          where: { studentId: { in: studentIds }, status: 'ACTIVE' },
+          include: {
+            adjustments: true,
+            allocations: {
+              include: { payment: { select: { reversal: true } } },
+            },
           },
-          _count: { _all: true },
-          _sum: { amountDue: true, amountPaid: true },
         }),
       ]);
 
-      const dueAmount = Number(
-        ((feeAgg._sum.amountDue || 0) - (feeAgg._sum.amountPaid || 0)).toFixed(2)
-      );
+      let duesCount = 0;
+      let dueAmount = 0;
+      const todayStr = FeeLedgerService.getTodayInTimezone();
+      for (const ch of feeCharges) {
+        const bal = FeeLedgerService.deriveChargeStatus(ch, todayStr);
+        if (bal.balance.gt(0)) {
+          duesCount++;
+          dueAmount += moneyToNumber(bal.balance);
+        }
+      }
+      dueAmount = Number(dueAmount.toFixed(2));
 
       return res.status(200).json({
         success: true,
@@ -651,7 +672,7 @@ export async function getOverviewChart(req: Request, res: Response) {
           role: 'GUARDIAN',
           childrenCount: studentIds.length,
           enrolledBatches: enrolledBatchesCount,
-          duesCount: feeAgg._count._all,
+          duesCount,
           dueAmount,
         },
       });
@@ -669,7 +690,7 @@ export async function getOverviewChart(req: Request, res: Response) {
       batchesCount,
       monthRevenueAgg,
       todayAttendanceGroups,
-      duesAgg,
+      branchCharges,
     ] = await Promise.all([
       prisma.user.count({
         where: {
@@ -686,16 +707,13 @@ export async function getOverviewChart(req: Request, res: Response) {
       prisma.batch.count({
         where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
       }),
-      prisma.feePayment.aggregate({
+      prisma.payment.aggregate({
         where: {
-          ...(effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {}),
-          amountPaid: { gt: 0 },
-          OR: [
-            { paidAt: { gte: startOfMonth } },
-            { paidAt: null, createdAt: { gte: startOfMonth } },
-          ],
+          reversal: null,
+          receivedAt: { gte: startOfMonth },
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
         },
-        _sum: { amountPaid: true },
+        _sum: { amount: true },
       }),
       prisma.attendance.groupBy({
         by: ['status'],
@@ -705,15 +723,30 @@ export async function getOverviewChart(req: Request, res: Response) {
         },
         _count: { _all: true },
       }),
-      prisma.feePayment.aggregate({
+      prisma.feeCharge.findMany({
         where: {
-          ...(effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {}),
-          status: { in: [PaymentStatus.DUE, PaymentStatus.PARTIAL] },
+          status: 'ACTIVE',
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
         },
-        _count: { _all: true },
-        _sum: { amountDue: true, amountPaid: true },
+        include: {
+          adjustments: true,
+          allocations: {
+            include: { payment: { select: { reversal: true } } },
+          },
+        },
       }),
     ]);
+
+    let duesCount = 0;
+    let totalDuesAmount = 0;
+    const todayStrAdmin = FeeLedgerService.getTodayInTimezone();
+    for (const ch of branchCharges) {
+      const bal = FeeLedgerService.deriveChargeStatus(ch, todayStrAdmin);
+      if (bal.balance.gt(0)) {
+        duesCount++;
+        totalDuesAmount += moneyToNumber(bal.balance);
+      }
+    }
 
     let todayTotalAtt = 0;
     let todayPresentAtt = 0;
@@ -726,11 +759,8 @@ export async function getOverviewChart(req: Request, res: Response) {
         ? Number(((todayPresentAtt / todayTotalAtt) * 100).toFixed(1))
         : 0;
 
-    const monthRevenue = Number((monthRevenueAgg._sum.amountPaid || 0).toFixed(2));
-    const duesCount = duesAgg._count._all;
-    const totalDueAmount = Number(
-      ((duesAgg._sum.amountDue || 0) - (duesAgg._sum.amountPaid || 0)).toFixed(2)
-    );
+    const monthRevenue = moneyToNumber(monthRevenueAgg._sum.amount);
+    const totalDueAmount = Number(totalDuesAmount.toFixed(2));
 
     return res.status(200).json({
       success: true,

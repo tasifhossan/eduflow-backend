@@ -1,4 +1,4 @@
-import { PrismaClient, Role, BatchType, FeeType, TestType, QuestionType, DayOfWeek, AttendanceStatus, PaymentStatus } from '@prisma/client';
+import { PrismaClient, Role, BatchType, FeeType, TestType, QuestionType, DayOfWeek, AttendanceStatus, PaymentStatus, FeeChargeKind, PaymentMethod, FeeChargeSource, PaymentSource, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import crypto from 'crypto';
 
@@ -641,24 +641,92 @@ async function main() {
         status: 'ACTIVE' as const,
         customFeeAmount: b.feeAmount,
       });
-
-      feePaymentRecords.push({
-        studentId: student.id,
-        batchId: b.id,
-        period: '2026-10',
-        amountDue: b.feeAmount,
-        amountPaid: i % 3 === 0 ? b.feeAmount : i % 3 === 1 ? b.feeAmount / 2 : 0,
-        status: i % 3 === 0 ? PaymentStatus.PAID : i % 3 === 1 ? PaymentStatus.PARTIAL : PaymentStatus.DUE,
-        dueDate: new Date('2026-10-15'),
-        paidAt: i % 3 !== 2 ? new Date('2026-10-10') : null,
-        recordedById: teachers[0].id,
-        notes: i % 3 === 0 ? 'Full monthly payment via bKash' : i % 3 === 1 ? 'Partial advance paid' : 'Awaiting installment',
-      });
     }
   }
 
   await prisma.enrollment.createMany({ data: enrollmentRecords, skipDuplicates: true });
-  await prisma.feePayment.createMany({ data: feePaymentRecords, skipDuplicates: true });
+
+  const createdEnrollments = await prisma.enrollment.findMany({
+    include: { batch: true },
+  });
+
+  for (let i = 0; i < createdEnrollments.length; i++) {
+    const enr = createdEnrollments[i];
+    const b = enr.batch;
+    const period = '2026-10';
+
+    const existingCharge = await prisma.feeCharge.findFirst({
+      where: { enrollmentId: enr.id, kind: FeeChargeKind.TUITION, period, voidedAt: null },
+    });
+
+    if (!existingCharge) {
+      const charge = await prisma.feeCharge.create({
+        data: {
+          studentId: enr.studentId,
+          batchId: b.id,
+          branchId: b.branchId,
+          enrollmentId: enr.id,
+          description: `${b.name} - Tuition (${period})`,
+          kind: FeeChargeKind.TUITION,
+          period,
+          amount: b.feeAmount,
+          dueDate: new Date('2026-10-15'),
+          source: FeeChargeSource.GENERATED,
+          createdById: teachers[0].id,
+        },
+      });
+
+      if (i % 3 === 0) {
+        const payAmount = b.feeAmount;
+        const receiptNo = `DHAN-26-${String(1000 + i).padStart(6, '0')}`;
+        await prisma.payment.create({
+          data: {
+            studentId: enr.studentId,
+            branchId: b.branchId,
+            receivedById: teachers[0].id,
+            receiptNumber: receiptNo,
+            amount: payAmount,
+            method: PaymentMethod.BKASH,
+            reference: `TRX${100000 + i}`,
+            receivedAt: new Date('2026-10-10'),
+            note: 'Full monthly payment via bKash',
+            source: PaymentSource.MANUAL,
+            allocations: {
+              create: {
+                branchId: b.branchId,
+                chargeId: charge.id,
+                amount: payAmount,
+              },
+            },
+          },
+        });
+      } else if (i % 3 === 1) {
+        const halfAmount = Number(b.feeAmount) / 2;
+        const payAmount = new Prisma.Decimal(halfAmount.toFixed(2));
+        const receiptNo = `DHAN-26-${String(2000 + i).padStart(6, '0')}`;
+        await prisma.payment.create({
+          data: {
+            studentId: enr.studentId,
+            branchId: b.branchId,
+            receivedById: teachers[0].id,
+            receiptNumber: receiptNo,
+            amount: payAmount,
+            method: PaymentMethod.CASH,
+            receivedAt: new Date('2026-10-12'),
+            note: 'Partial advance paid',
+            source: PaymentSource.MANUAL,
+            allocations: {
+              create: {
+                branchId: b.branchId,
+                chargeId: charge.id,
+                amount: payAmount,
+              },
+            },
+          },
+        });
+      }
+    }
+  }
 
   // Routine Slots
   const days: DayOfWeek[] = [DayOfWeek.SUNDAY, DayOfWeek.TUESDAY, DayOfWeek.THURSDAY, DayOfWeek.MONDAY, DayOfWeek.WEDNESDAY, DayOfWeek.SATURDAY];

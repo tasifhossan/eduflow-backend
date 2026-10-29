@@ -753,10 +753,10 @@ export async function demoLogin(req: Request, res: Response) {
     }
 
     const { role } = req.body;
-    if (!role || !['STUDENT', 'TEACHER', 'ADMIN', 'GUARDIAN'].includes(role)) {
+    if (!role || !['STUDENT', 'TEACHER', 'ADMIN', 'GUARDIAN', 'ACCOUNTANT'].includes(role)) {
       return res.status(400).json({
         success: false,
-        message: 'Validation failed: Allowed roles are STUDENT, TEACHER, ADMIN, GUARDIAN',
+        message: 'Validation failed: Allowed roles are STUDENT, TEACHER, ADMIN, GUARDIAN, ACCOUNTANT',
       });
     }
 

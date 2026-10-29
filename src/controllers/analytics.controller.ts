@@ -13,7 +13,7 @@ export async function getBatchAnalytics(req: Request, res: Response) {
 
     const batchId = req.params.batchId as string;
 
-    const batchWhere: any = { id: batchId };
+    const batchWhere: any = { id: batchId, archivedAt: null };
     if (req.effectiveBranchId) {
       batchWhere.branchId = req.effectiveBranchId;
     }
@@ -29,7 +29,7 @@ export async function getBatchAnalytics(req: Request, res: Response) {
 
     // Fetch all tests in this batch with their results and chapter info
     const tests = await prisma.test.findMany({
-      where: { batchId },
+      where: { batchId, archivedAt: null },
       include: {
         chapter: { select: { id: true, name: true } },
         results: { select: { totalMarksObtained: true } },
@@ -114,7 +114,7 @@ export async function getStudentTrend(req: Request, res: Response) {
       return res.status(403).json({ success: false, message: 'Forbidden: You can only view your own trend' });
     }
 
-    const batchWhere: any = { id: batchId };
+    const batchWhere: any = { id: batchId, archivedAt: null };
     if (req.effectiveBranchId) {
       batchWhere.branchId = req.effectiveBranchId;
     }
@@ -141,7 +141,7 @@ export async function getStudentTrend(req: Request, res: Response) {
     const results = await prisma.result.findMany({
       where: {
         studentId,
-        test: { batchId },
+        test: { batchId, archivedAt: null },
       },
       include: {
         test: {

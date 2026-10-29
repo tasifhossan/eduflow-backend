@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Role, EnrollmentStatus, LectureStatus, AssignmentSubmissionStatus } from '@prisma/client';
 import prisma from '../utils/prisma';
+import { moneyToNumber } from '../utils/money';
 import { getCenterSettings } from '../services/settings.service';
 import { getAcademicDateRanges } from '../utils/timezone';
 
@@ -86,7 +87,9 @@ export async function getDashboardSummary(req: Request, res: Response) {
         // Upcoming tests in enrolled batches over the next 7 days
         prisma.test.findMany({
           where: {
+            archivedAt: null,
             batch: {
+              archivedAt: null,
               enrollments: {
                 some: { studentId: userId, status: 'ACTIVE' },
               },
@@ -166,7 +169,10 @@ export async function getDashboardSummary(req: Request, res: Response) {
 
       // Count batches
       prisma.batch.count({
-        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
+        where: {
+          archivedAt: null,
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+        },
       }),
 
       // Count teachers
@@ -179,7 +185,10 @@ export async function getDashboardSummary(req: Request, res: Response) {
 
       // All batches with today's attendance data (reuse today-summary logic)
       prisma.batch.findMany({
-        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
+        where: {
+          archivedAt: null,
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+        },
         select: {
           id: true,
           name: true,
@@ -196,7 +205,11 @@ export async function getDashboardSummary(req: Request, res: Response) {
       // Upcoming tests in the next 7 days
       prisma.test.findMany({
         where: {
-          ...(effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {}),
+          archivedAt: null,
+          batch: {
+            archivedAt: null,
+            ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          },
           testDate: {
             gte: todayNormalized,
             lte: sevenDaysFromNow,
@@ -303,12 +316,9 @@ export async function getSuperAdminDashboard(req: Request, res: Response) {
               batches: true,
             },
           },
-          batches: {
-            select: {
-              feePayments: {
-                select: { amountPaid: true },
-              },
-            },
+          payments: {
+            where: { reversal: null },
+            select: { amount: true },
           },
         },
         orderBy: { name: 'asc' },
@@ -324,9 +334,10 @@ export async function getSuperAdminDashboard(req: Request, res: Response) {
         where: { role: Role.TEACHER },
       }),
 
-      // Total revenue across all payments
-      prisma.feePayment.aggregate({
-        _sum: { amountPaid: true },
+      // Total revenue across all non-reversed ledger payments
+      prisma.payment.aggregate({
+        where: { reversal: null },
+        _sum: { amount: true },
       }),
 
       // Attendance records for overall attendance rate calculation
@@ -337,7 +348,7 @@ export async function getSuperAdminDashboard(req: Request, res: Response) {
     ]);
 
     const totalBranches = branches.length;
-    const totalRevenue = paymentsAggregate._sum.amountPaid || 0;
+    const totalRevenue = moneyToNumber(paymentsAggregate._sum.amount);
 
     // Overall attendance rate computation
     let totalAttendanceRecords = 0;
@@ -358,10 +369,7 @@ export async function getSuperAdminDashboard(req: Request, res: Response) {
     const branchBreakdown = branches.map((b) => {
       const studentCount = b._count.users;
       const batchCount = b._count.batches;
-      const branchRevenue = b.batches.reduce((sum, batch) => {
-        const batchPayments = batch.feePayments.reduce((pSum, p) => pSum + (p.amountPaid || 0), 0);
-        return sum + batchPayments;
-      }, 0);
+      const branchRevenue = b.payments.reduce((sum, p) => sum + moneyToNumber(p.amount), 0);
 
       return {
         branchId: b.id,

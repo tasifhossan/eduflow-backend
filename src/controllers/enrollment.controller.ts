@@ -3,6 +3,7 @@ import { Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { createStudentSchema, enrollStudentSchema } from '../validators/enrollment.validator';
 import prisma from '../utils/prisma';
+import { moneyToNumber } from '../utils/money';
 
 export async function createStudent(req: Request, res: Response) {
   try {
@@ -125,6 +126,13 @@ export async function enrollStudent(req: Request, res: Response) {
       });
     }
 
+    if (batch.archivedAt !== null) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot enroll in an archived batch',
+      });
+    }
+
     // Check if enrollment already exists
     const existingEnrollment = await prisma.enrollment.findUnique({
       where: {
@@ -223,9 +231,9 @@ export async function getStudentsByBatch(req: Request, res: Response) {
       data: enrollments.map((e) => ({
         ...e.student,
         enrollmentId: e.id,
-        customFeeAmount: e.customFeeAmount,
+        customFeeAmount: e.customFeeAmount !== null ? moneyToNumber(e.customFeeAmount) : null,
         discountType: e.discountType,
-        discountValue: e.discountValue,
+        discountValue: e.discountValue !== null ? moneyToNumber(e.discountValue) : null,
         discountReason: e.discountReason,
       })),
     });
@@ -274,6 +282,9 @@ export async function getBatchesByStudent(req: Request, res: Response) {
       where: {
         studentId,
         status: 'ACTIVE',
+        batch: {
+          archivedAt: null,
+        },
       },
       include: {
         batch: {

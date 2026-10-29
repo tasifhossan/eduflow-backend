@@ -3,6 +3,7 @@ import { Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { createGuardianSchema, linkGuardianSchema } from '../validators/guardian.validator';
 import prisma from '../utils/prisma';
+import { moneyToNumber } from '../utils/money';
 
 export async function createGuardianAccount(req: Request, res: Response) {
   try {
@@ -471,25 +472,68 @@ export async function getLinkedStudentPayments(req: Request, res: Response) {
       });
     }
 
-    const payments = await prisma.feePayment.findMany({
+    const payments = await prisma.payment.findMany({
       where: { studentId },
       include: {
-        batch: {
+        allocations: {
+          include: {
+            charge: {
+              include: {
+                batch: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        reversal: {
           select: {
             id: true,
-            name: true,
+            reason: true,
+            reversedAt: true,
           },
         },
       },
       orderBy: {
-        createdAt: 'desc',
+        receivedAt: 'desc',
       },
+    });
+
+    const data = payments.map((p) => {
+      const firstBatch = p.allocations[0]?.charge.batch;
+      return {
+        id: p.id,
+        receiptNumber: p.receiptNumber,
+        amount: moneyToNumber(p.amount),
+        method: p.method,
+        reference: p.reference,
+        paidAt: p.receivedAt,
+        receivedAt: p.receivedAt,
+        notes: p.note,
+        note: p.note,
+        isReversed: !!p.reversal,
+        reversal: p.reversal,
+        batch: firstBatch || null,
+        allocations: p.allocations.map((a) => ({
+          id: a.id,
+          amount: moneyToNumber(a.amount),
+          chargeId: a.charge.id,
+          chargeTitle: a.charge.description,
+          description: a.charge.description,
+          period: a.charge.period,
+          batch: a.charge.batch,
+        })),
+        createdAt: p.createdAt,
+      };
     });
 
     return res.status(200).json({
       success: true,
       message: 'Linked student payments retrieved successfully',
-      data: payments,
+      data,
     });
   } catch (error) {
     console.error('Get linked student payments error:', error);

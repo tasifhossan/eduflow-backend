@@ -8,6 +8,7 @@ import {
   getBatchById,
   updateBatch,
   deleteBatch,
+  restoreBatch,
   getBatchForStudent,
 } from '../controllers/batch.controller';
 import { getBatchAnalytics, getStudentTrend } from '../controllers/analytics.controller';
@@ -21,6 +22,7 @@ router.get('/', authenticate, authorize(Role.ADMIN, Role.TEACHER), branchScope, 
 router.get('/:id', authenticate, authorize(Role.ADMIN, Role.TEACHER), branchScope, getBatchById);
 router.patch('/:id', authenticate, authorize(Role.ADMIN), branchScope, updateBatch);
 router.delete('/:id', authenticate, authorize(Role.ADMIN), branchScope, deleteBatch);
+router.post('/:id/restore', authenticate, authorize(Role.ADMIN), branchScope, restoreBatch);
 
 // Analytics endpoints
 router.get('/:batchId/analytics', authenticate, authorize(Role.ADMIN, Role.TEACHER), branchScope, getBatchAnalytics);

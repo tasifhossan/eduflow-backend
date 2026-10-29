@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 import prisma from '../utils/prisma';
 import { parsePagination, buildMeta } from '../utils/pagination';
+import { moneyToNumber } from '../utils/money';
 
 // Helper to fetch linked student IDs for a guardian
 async function getGuardianStudentIds(guardianId: string): Promise<string[]> {
@@ -67,7 +68,7 @@ export const studentTableQuerySchema = z.object({
 export const paymentTableQuerySchema = z.object({
   page: z.coerce.number().int().min(1).optional().default(1),
   limit: z.coerce.number().int().min(1).max(100).optional().default(12),
-  status: z.nativeEnum(PaymentStatus).optional(),
+  status: z.string().optional(),
   batch: z.string().optional(),
   batchId: z.string().optional(),
   branchId: z.string().optional(),
@@ -75,9 +76,9 @@ export const paymentTableQuerySchema = z.object({
   endDate: z.string().optional(),
   q: z.string().trim().optional(),
   sortBy: z
-    .enum(['createdAt', 'amountDue', 'amountPaid', 'status', 'dueDate', 'paidAt', 'period'])
+    .enum(['createdAt', 'amount', 'amountPaid', 'amountDue', 'paidAt', 'receiptNumber'])
     .optional()
-    .default('createdAt'),
+    .default('paidAt'),
   sortOrder: z.enum(['asc', 'desc']).optional().default('desc'),
 });
 
@@ -319,7 +320,7 @@ export async function getTablePayments(req: Request, res: Response) {
       parseResult.data;
     const { skip, take } = parsePagination({ page, limit }, { defaultLimit: 12, maxLimit: 100 });
 
-    const where: Prisma.FeePaymentWhereInput = {};
+    const where: Prisma.PaymentWhereInput = {};
 
     // Scoping rule
     if (req.user.role === Role.STUDENT) {
@@ -335,53 +336,115 @@ export async function getTablePayments(req: Request, res: Response) {
       where.studentId = { in: studentIds };
     } else if (req.user.role === Role.SUPER_ADMIN) {
       const targetBranch = branchId || req.effectiveBranchId;
-      if (targetBranch) where.batch = { branchId: targetBranch };
+      if (targetBranch) where.branchId = targetBranch;
     } else {
-      // TEACHER, ADMIN
-      where.batch = { branchId: req.user.branchId };
+      // TEACHER, ADMIN, ACCOUNTANT
+      where.branchId = req.user.branchId;
     }
 
-    if (status) where.status = status;
+    if (status === 'REVERSED') {
+      where.reversal = { isNot: null };
+    } else if (status === 'PAID') {
+      where.reversal = null;
+    }
 
     const targetBatch = batch || batchId;
-    if (targetBatch) where.batchId = targetBatch;
-
-    const dateFilter = parseDateRange(startDate, endDate);
-    if (dateFilter) where.createdAt = dateFilter;
-
-    if (q) {
-      where.student = {
-        OR: [
-          { name: { contains: q, mode: 'insensitive' } },
-          { email: { contains: q, mode: 'insensitive' } },
-        ],
-      };
+    if (targetBatch) {
+      where.allocations = { some: { charge: { batchId: targetBatch } } };
     }
 
-    const [total, items] = await Promise.all([
-      prisma.feePayment.count({ where }),
-      prisma.feePayment.findMany({
+    const dateFilter = parseDateRange(startDate, endDate);
+    if (dateFilter) where.receivedAt = dateFilter;
+
+    if (q) {
+      where.OR = [
+        { student: { name: { contains: q, mode: 'insensitive' } } },
+        { student: { email: { contains: q, mode: 'insensitive' } } },
+        { receiptNumber: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const mappedSortBy =
+      sortBy === 'amountPaid' || sortBy === 'amountDue'
+        ? 'amount'
+        : sortBy === 'paidAt'
+        ? 'receivedAt'
+        : sortBy;
+
+    const [total, rawItems] = await Promise.all([
+      prisma.payment.count({ where }),
+      prisma.payment.findMany({
         where,
         skip,
         take,
-        orderBy: { [sortBy]: sortOrder },
+        orderBy: { [mappedSortBy]: sortOrder },
         select: {
           id: true,
+          receiptNumber: true,
           studentId: true,
           student: { select: { id: true, name: true, email: true } },
-          batchId: true,
-          batch: { select: { id: true, name: true, branchId: true } },
-          period: true,
-          amountDue: true,
-          amountPaid: true,
-          status: true,
-          dueDate: true,
-          paidAt: true,
-          notes: true,
+          amount: true,
+          method: true,
+          reference: true,
+          receivedAt: true,
+          note: true,
           createdAt: true,
+          reversal: { select: { id: true, reason: true, reversedAt: true } },
+          allocations: {
+            select: {
+              id: true,
+              amount: true,
+              charge: {
+                select: {
+                  id: true,
+                  description: true,
+                  period: true,
+                  batchId: true,
+                  batch: { select: { id: true, name: true, branchId: true } },
+                },
+              },
+            },
+          },
         },
       }),
     ]);
+
+    const items = rawItems.map((p) => {
+      const firstBatch = p.allocations[0]?.charge.batch;
+      const numAmount = moneyToNumber(p.amount);
+      return {
+        id: p.id,
+        receiptNumber: p.receiptNumber,
+        studentId: p.studentId,
+        student: p.student,
+        batchId: firstBatch?.id || null,
+        batch: firstBatch || null,
+        period: p.allocations[0]?.charge.period || null,
+        amount: numAmount,
+        amountPaid: numAmount,
+        amountDue: 0,
+        status: p.reversal ? 'REVERSED' : 'PAID',
+        isReversed: !!p.reversal,
+        reversal: p.reversal,
+        method: p.method,
+        reference: p.reference,
+        dueDate: null,
+        paidAt: p.receivedAt,
+        receivedAt: p.receivedAt,
+        notes: p.note,
+        note: p.note,
+        allocations: p.allocations.map((a) => ({
+          id: a.id,
+          amount: moneyToNumber(a.amount),
+          chargeId: a.charge.id,
+          chargeTitle: a.charge.description,
+          description: a.charge.description,
+          period: a.charge.period,
+          batch: a.charge.batch,
+        })),
+        createdAt: p.createdAt,
+      };
+    });
 
     return res.status(200).json({
       success: true,
@@ -674,10 +737,16 @@ export async function getTableEnrollments(req: Request, res: Response) {
       }),
     ]);
 
+    const mappedItems = items.map((item) => ({
+      ...item,
+      customFeeAmount: item.customFeeAmount != null ? moneyToNumber(item.customFeeAmount) : null,
+      discountValue: item.discountValue != null ? moneyToNumber(item.discountValue) : null,
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
-        items,
+        items: mappedItems,
         pagination: buildMeta(total, page, take),
       },
     });

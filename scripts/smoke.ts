@@ -4,10 +4,12 @@ import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { Role, DayOfWeek, EnrollmentStatus } from '@prisma/client';
+import { Role, DayOfWeek, EnrollmentStatus, Prisma, PaymentMethod, FeeChargeKind, FeeAdjustmentType } from '@prisma/client';
 import prisma from '../src/utils/prisma';
 import env from '../src/config/env';
 import { ATTACHMENT_CONFIG } from '../src/config/academics.config';
+import { FeeLedgerService } from '../src/services/fee-ledger.service';
+import { reconcileFees } from './reconcile-fees';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION & GLOBAL STATE
@@ -510,16 +512,31 @@ async function runSmokeTests() {
     });
     createdTestIds.push(openTest.id);
 
-    // Check 10: Student GET /api/tests/:id before submission: no isCorrect on any option
-    const c10 = await req(`/api/tests/${openTest.id}`, {
+    // Check 10: Student GET /api/tests/:id before submission: metadata only before start, no isCorrect on any option after start
+    const c10Before = await req(`/api/tests/${openTest.id}`, {
       headers: { Cookie: studentCookie },
     });
-    const c10Options = c10.body?.data?.questions?.flatMap((q: any) => q.options) || [];
+    const c10BeforeNoQuestions =
+      c10Before.status === 200 &&
+      (!c10Before.body?.data?.questions || c10Before.body?.data?.questions.length === 0);
+
+    // Start attempt so questions become accessible
+    const c10Start = await req(`/api/tests/${openTest.id}/start`, {
+      method: 'POST',
+      headers: { Cookie: studentCookie },
+    });
+
+    const c10After = await req(`/api/tests/${openTest.id}`, {
+      headers: { Cookie: studentCookie },
+    });
+    const c10Options = c10After.body?.data?.questions?.flatMap((q: any) => q.options) || [];
     const c10HidesCorrect =
-      c10.status === 200 &&
+      c10BeforeNoQuestions &&
+      c10Start.status === 200 &&
+      c10After.status === 200 &&
       c10Options.length > 0 &&
       c10Options.every((o: any) => o.isCorrect === undefined);
-    recordCheck('10', 'Options hide isCorrect during open window', c10HidesCorrect, `Options checked: ${c10Options.length}, isCorrect exposed: ${!c10HidesCorrect}`);
+    recordCheck('10', 'Options hide isCorrect during open window', c10HidesCorrect, `Before start no questions: ${c10BeforeNoQuestions}, start: ${c10Start.status}, options: ${c10Options.length}`);
 
     // Check 11: Student not enrolled in a batch -> 403 on tests and routine
     const smokeBatch2 = await prisma.batch.create({
@@ -637,19 +654,19 @@ async function runSmokeTests() {
     ]);
 
     const count201 = concurrentSubmissions.filter((r) => r.status === 201).length;
-    const count400 = concurrentSubmissions.filter((r) => r.status === 400).length;
+    const countRejected = concurrentSubmissions.filter((r) => r.status === 409 || r.status === 400).length;
     const dbResultsCount = await prisma.result.count({
       where: { testId: openTest.id, studentId: demoStudent.id },
     });
     const dbAnswersCount = await prisma.studentAnswer.count({
       where: { studentId: demoStudent.id, question: { testId: openTest.id } },
     });
-    const c13Passed = count201 === 1 && count400 === 4 && dbResultsCount === 1 && dbAnswersCount === 2;
+    const c13Passed = count201 === 1 && countRejected === 4 && dbResultsCount === 1 && dbAnswersCount === 2;
     recordCheck(
       '13',
       'Race-condition proof concurrent exam submission',
       c13Passed,
-      `201s: ${count201}, 400s: ${count400}, Results: ${dbResultsCount}, Answers: ${dbAnswersCount}`
+      `201s: ${count201}, Rejected (409/400): ${countRejected}, Results: ${dbResultsCount}, Answers: ${dbAnswersCount}`
     );
 
     // Check 14: After submission but window still open: my-result and getTestById still hide isCorrect
@@ -3387,6 +3404,1113 @@ async function runSmokeTests() {
       c10Passed,
       c10Details
     );
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 11. DECIMAL MONEY & APPEND-ONLY FEE LEDGER (FEE-LEDGER)
+    // ─────────────────────────────────────────────────────────────────────────
+    console.log('\n--- Running Check 11: Fee Ledger, Receipts, Dues, Reversals, Decimal Money & Accountant Role ---');
+    let c11Passed = true;
+    const c11Errors: string[] = [];
+
+    // 1. information_schema check: verify no Float or double precision money columns in active tables
+    const moneyCols: any[] = await prisma.$queryRaw`
+      SELECT table_name, column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name IN ('FeeCharge', 'FeeAdjustment', 'Payment', 'PaymentAllocation', 'Batch', 'Enrollment')
+        AND column_name IN ('feeAmount', 'customFeeAmount', 'discountValue', 'amount')
+        AND data_type NOT IN ('numeric', 'decimal');
+    `;
+    if (moneyCols.length > 0) {
+      c11Passed = false;
+      c11Errors.push(`Found non-decimal money columns: ${JSON.stringify(moneyCols)}`);
+    }
+
+    // 2. Exact Decimal arithmetic
+    const splits = FeeLedgerService.splitInstallments(new Prisma.Decimal('100.00'), 3);
+    if (
+      splits.length !== 3 ||
+      splits[0].toString() !== '33.33' ||
+      splits[1].toString() !== '33.33' ||
+      splits[2].toString() !== '33.34' ||
+      !splits[0].add(splits[1]).add(splits[2]).equals(new Prisma.Decimal('100.00'))
+    ) {
+      c11Passed = false;
+      c11Errors.push(`splitInstallments failed exact penny test: ${splits.map((s) => s.toString()).join(', ')}`);
+    }
+
+    const discountUnrounded = new Prisma.Decimal('100.00').mul(new Prisma.Decimal('15.555')).div(100);
+    const discountRounded = FeeLedgerService.round(discountUnrounded);
+    if (discountRounded.toString() !== '15.56') {
+      c11Passed = false;
+      c11Errors.push(`Decimal percent discount rounding expected 15.56, got ${discountRounded.toString()}`);
+    }
+
+    // 3. Legacy write endpoints return 410 Gone
+    const legacyPayRes = await req('/api/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ studentId: 'none', batchId: 'none', period: '2026-10' }),
+    });
+    if (legacyPayRes.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/payments expected 410, got ${legacyPayRes.status}`);
+    }
+
+    const legacyPatchRes = await req('/api/payments/test-id', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ amountPaid: 100 }),
+    });
+    if (legacyPatchRes.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`PATCH /api/payments/:id expected 410, got ${legacyPatchRes.status}`);
+    }
+
+    const legacyPlanRes = await req('/api/payments/installment-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ studentId: 'none', batchId: 'none', installments: [] }),
+    });
+    if (legacyPlanRes.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/payments/installment-plan expected 410, got ${legacyPlanRes.status}`);
+    }
+
+    // 4. Create smoke branch & fixtures
+    const smokeFeeBranch = await prisma.branch.create({
+      data: { name: 'SMOKE-FEE-BRANCH-DHAKA', address: 'Dhanmondi, Dhaka' },
+    });
+    createdBranchIds.push(smokeFeeBranch.id);
+
+    const smokeOtherBranch = await prisma.branch.create({
+      data: { name: 'SMOKE-FEE-BRANCH-OTHER', address: 'Chittagong' },
+    });
+    createdBranchIds.push(smokeOtherBranch.id);
+
+    // Create staff & student users
+    const pwdHash = await bcrypt.hash('SmokeSecret123!', 10);
+
+    const sAdmin = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Admin',
+        email: `smoke.fee.admin.${Date.now()}@smoke.local`,
+        role: Role.ADMIN,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sAdmin.id);
+
+    const sAccountant = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Accountant',
+        email: `smoke.fee.acc.${Date.now()}@smoke.local`,
+        role: Role.ACCOUNTANT,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sAccountant.id);
+
+    const sTeacher = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Teacher',
+        email: `smoke.fee.teacher.${Date.now()}@smoke.local`,
+        role: Role.TEACHER,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sTeacher.id);
+
+    const sStudent = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Student',
+        email: `smoke.fee.student.${Date.now()}@smoke.local`,
+        role: Role.STUDENT,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sStudent.id);
+
+    const sGuardian = await prisma.user.create({
+      data: {
+        name: 'SMOKE Fee Guardian',
+        email: `smoke.fee.guardian.${Date.now()}@smoke.local`,
+        role: Role.GUARDIAN,
+        branchId: smokeFeeBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sGuardian.id);
+
+    const sOtherAdmin = await prisma.user.create({
+      data: {
+        name: 'SMOKE Other Admin',
+        email: `smoke.fee.otheradmin.${Date.now()}@smoke.local`,
+        role: Role.ADMIN,
+        branchId: smokeOtherBranch.id,
+        password: pwdHash,
+      },
+    });
+    createdUserIds.push(sOtherAdmin.id);
+
+    // Link guardian to student
+    const gLink = await prisma.guardianLink.create({
+      data: { guardianId: sGuardian.id, studentId: sStudent.id },
+    });
+    createdGuardianLinkIds.push(gLink.id);
+
+    // Create batch & enrollment
+    const sSubj = (await prisma.subject.findFirst()) || (await prisma.subject.create({ data: { name: 'SMOKE Math' } }));
+    const sBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE Fee Math Batch',
+        type: 'ACADEMIC',
+        subjectId: sSubj.id,
+        branchId: smokeFeeBranch.id,
+        feeAmount: new Prisma.Decimal('1000.00'),
+        feeBilling: 'MONTHLY',
+      },
+    });
+    createdBatchIds.push(sBatch.id);
+
+    await prisma.enrollment.create({
+      data: {
+        studentId: sStudent.id,
+        batchId: sBatch.id,
+        status: 'ACTIVE',
+      },
+    });
+
+    // Generate tokens
+    const sAdminCookie = `token=${jwt.sign({ userId: sAdmin.id, email: sAdmin.email, role: Role.ADMIN, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sAccCookie = `token=${jwt.sign({ userId: sAccountant.id, email: sAccountant.email, role: Role.ACCOUNTANT, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sTeachCookie = `token=${jwt.sign({ userId: sTeacher.id, email: sTeacher.email, role: Role.TEACHER, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sStudentCookie = `token=${jwt.sign({ userId: sStudent.id, email: sStudent.email, role: Role.STUDENT, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sGuardianCookie = `token=${jwt.sign({ userId: sGuardian.id, email: sGuardian.email, role: Role.GUARDIAN, branchId: smokeFeeBranch.id }, env.JWT_SECRET)}`;
+    const sOtherAdminCookie = `token=${jwt.sign({ userId: sOtherAdmin.id, email: sOtherAdmin.email, role: Role.ADMIN, branchId: smokeOtherBranch.id }, env.JWT_SECRET)}`;
+
+    // 5. Role Matrix Denials
+    // TEACHER denied on fee endpoints
+    const teachDeniedRes = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sTeachCookie },
+      body: JSON.stringify({ studentId: sStudent.id, amount: 100, method: 'CASH' }),
+    });
+    if (teachDeniedRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`TEACHER on /api/fees/payments expected 403, got ${teachDeniedRes.status}`);
+    }
+
+    // Cross-branch admin denied
+    const crossBranchRes = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sOtherAdminCookie },
+    });
+    if (crossBranchRes.status !== 404 && crossBranchRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`Cross-branch admin on student account expected 403/404, got ${crossBranchRes.status}`);
+    }
+
+    // 6. Manual Charge creation & string money verification
+    const chargeRes = await req('/api/fees/charges', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        batchId: sBatch.id,
+        amount: 1000,
+        dueDate: '2026-11-15',
+        description: 'SMOKE First Tuition Charge',
+        kind: 'TUITION',
+        period: '2026-11',
+      }),
+    });
+    if (chargeRes.status !== 201 || !chargeRes.body?.data?.charge?.id) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/fees/charges failed: ${chargeRes.status} ${JSON.stringify(chargeRes.body)}`);
+    }
+    const charge1 = chargeRes.body?.data?.charge;
+    if (charge1?.amount !== '1000.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge amount in response expected string "1000.00", got ${typeof charge1?.amount} ${charge1?.amount}`);
+    }
+
+    // 7. Partial Payment then Full Payment
+    const pay1Res = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 400,
+        method: 'CASH',
+        note: 'Partial payment 400',
+      }),
+    });
+    if (pay1Res.status !== 201 || !pay1Res.body?.data?.payment) {
+      c11Passed = false;
+      c11Errors.push(`POST /api/fees/payments (partial) failed: ${pay1Res.status} ${JSON.stringify(pay1Res.body)}`);
+    }
+    const pay1 = pay1Res.body?.data?.payment;
+    if (pay1?.amount !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`Payment amount expected "400.00", got ${pay1?.amount}`);
+    }
+
+    // Check account shows PARTIAL status
+    const acctAfterPay1 = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAccCookie },
+    });
+    const c1State = acctAfterPay1.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
+    if (c1State?.status !== 'PARTIAL' || c1State?.balance !== '600.00' || c1State?.paid !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge status after partial pay expected PARTIAL with balance 600.00, got ${c1State?.status} bal=${c1State?.balance}`);
+    }
+
+    // Void rules: cannot void charge with paid > 0
+    const voidChargeFail = await req(`/api/fees/charges/${charge1?.id}/void`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({ reason: 'Accidentally created' }),
+    });
+    if (voidChargeFail.status !== 400) {
+      c11Passed = false;
+      c11Errors.push(`Voiding charge with paid > 0 expected 400, got ${voidChargeFail.status}`);
+    }
+
+    // ACCOUNTANT cannot void charge
+    const accVoidRes = await req(`/api/fees/charges/${charge1?.id}/void`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ reason: 'Attempted accountant void' }),
+    });
+    if (accVoidRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`ACCOUNTANT void charge expected 403, got ${accVoidRes.status}`);
+    }
+
+    // Full payment for the remainder
+    const pay2Res = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 600,
+        method: 'BKASH',
+        reference: 'TRX-FULL-PAY',
+        note: 'Full payoff 600',
+      }),
+    });
+    if (pay2Res.status !== 201) {
+      c11Passed = false;
+      c11Errors.push(`Payment remainder failed: ${pay2Res.status}`);
+    }
+    const pay2 = pay2Res.body?.data?.payment;
+
+    // Check account shows PAID status
+    const acctAfterPay2 = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    const c1PaidState = acctAfterPay2.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
+    if (c1PaidState?.status !== 'PAID' || c1PaidState?.balance !== '0.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge status after full pay expected PAID with balance 0.00, got ${c1PaidState?.status} bal=${c1PaidState?.balance}`);
+    }
+
+    // 8. Reversal
+    // ACCOUNTANT cannot reverse
+    const accRevRes = await req(`/api/fees/payments/${pay2?.id}/reverse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ reason: 'Accountant trying to reverse' }),
+    });
+    if (accRevRes.status !== 403) {
+      c11Passed = false;
+      c11Errors.push(`ACCOUNTANT reverse payment expected 403, got ${accRevRes.status}`);
+    }
+
+    // ADMIN reverses pay2
+    const adminRevRes = await req(`/api/fees/payments/${pay2?.id}/reverse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({ reason: 'Reversing 600 payment for test' }),
+    });
+    if (adminRevRes.status !== 200 || !adminRevRes.body?.data?.reversal) {
+      c11Passed = false;
+      c11Errors.push(`ADMIN reverse payment failed: ${adminRevRes.status} ${JSON.stringify(adminRevRes.body)}`);
+    }
+
+    // Check account restored to PARTIAL with balance 600.00
+    const acctAfterRev = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    const c1RevState = acctAfterRev.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
+    if (c1RevState?.status !== 'PARTIAL' || c1RevState?.balance !== '600.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge balance after reversal expected 600.00, got ${c1RevState?.balance} status=${c1RevState?.status}`);
+    }
+
+    // 9. Overpayment becomes Student Credit & auto-applies
+    const overpayRes = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 1000,
+        method: 'CASH',
+        note: 'Overpaying to generate 400 credit',
+      }),
+    });
+    if (overpayRes.status !== 201) {
+      c11Passed = false;
+      c11Errors.push(`Overpayment failed: ${overpayRes.status}`);
+    }
+    const acctAfterOverpay = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    if (acctAfterOverpay.body?.data?.creditBalance !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`Credit balance expected 400.00, got ${acctAfterOverpay.body?.data?.creditBalance}`);
+    }
+
+    // Create a new charge of 500.00 and apply credit
+    const charge2Res = await req('/api/fees/charges', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        batchId: sBatch.id,
+        amount: 500,
+        dueDate: '2026-12-15',
+        description: 'SMOKE Charge to Test Credit Application',
+      }),
+    });
+    const charge2Id = charge2Res.body?.data?.charge?.id;
+
+    // Apply available credit via service
+    const creditApplied = await FeeLedgerService.applyAvailableCreditToCharge(charge2Id);
+    if (creditApplied.toString() !== '400.00' && creditApplied.toFixed?.(2) !== '400.00') {
+      c11Passed = false;
+      c11Errors.push(`applyAvailableCreditToCharge expected 400.00 applied, got ${creditApplied.toString()}`);
+    }
+
+    const acctAfterCreditApply = await req(`/api/fees/students/${sStudent.id}/account`, {
+      headers: { Cookie: sAdminCookie },
+    });
+    if (acctAfterCreditApply.body?.data?.creditBalance !== '0.00') {
+      c11Passed = false;
+      c11Errors.push(`Credit balance after apply expected 0.00, got ${acctAfterCreditApply.body?.data?.creditBalance}`);
+    }
+    const c2State = acctAfterCreditApply.body?.data?.charges?.find((c: any) => c.id === charge2Id);
+    if (c2State?.balance !== '100.00') {
+      c11Passed = false;
+      c11Errors.push(`Charge 2 balance after credit apply expected 100.00, got ${c2State?.balance}`);
+    }
+
+    // 10. Idempotency test (same key returns original payment, 5 concurrent identical return 1)
+    const idemKey = `IDEM-TEST-${Date.now()}`;
+    const idemReqPayload = {
+      studentId: sStudent.id,
+      amount: 100,
+      method: 'CASH',
+      note: 'Idempotency test payload',
+    };
+
+    const idem1 = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idemKey, Cookie: sAdminCookie },
+      body: JSON.stringify(idemReqPayload),
+    });
+    const idem2 = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idemKey, Cookie: sAdminCookie },
+      body: JSON.stringify(idemReqPayload),
+    });
+
+    if (idem1.status !== 201 || idem2.status !== 200 || idem1.body?.data?.payment?.id !== idem2.body?.data?.payment?.id) {
+      c11Passed = false;
+      c11Errors.push(`Sequential idempotency failed: s1=${idem1.status} s2=${idem2.status} id1=${idem1.body?.data?.payment?.id} id2=${idem2.body?.data?.payment?.id}`);
+    }
+
+    // 5 concurrent requests with identical key
+    const concIdemKey = `CONC-IDEM-${Date.now()}`;
+    const concIdemPromises = Array.from({ length: 5 }, () =>
+      req('/api/fees/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': concIdemKey, Cookie: sAdminCookie },
+        body: JSON.stringify({ studentId: sStudent.id, amount: 50, method: 'CASH', note: 'Concurrent test' }),
+      })
+    );
+    const concIdemResults = await Promise.all(concIdemPromises);
+    const concSuccesses = concIdemResults.filter((r) => r.status === 200 || r.status === 201);
+    if (concSuccesses.length !== 5) {
+      c11Passed = false;
+      c11Errors.push(`Concurrent idempotency expected all 5 requests to resolve 200/201, got statuses: ${concIdemResults.map((r) => r.status).join(',')}`);
+    }
+    const uniqueConcIds = new Set(concSuccesses.map((r) => r.body?.data?.payment?.id));
+    if (uniqueConcIds.size !== 1) {
+      c11Passed = false;
+      c11Errors.push(`Concurrent idempotency expected exactly 1 distinct payment ID, got ${uniqueConcIds.size}`);
+    }
+
+    // 11. Concurrency test: 10 concurrent different payments yield gap-free receipts
+    const concDiffPromises = Array.from({ length: 10 }, (_, i) =>
+      req('/api/fees/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `CONC-DIFF-${Date.now()}-${i}`, Cookie: sAdminCookie },
+        body: JSON.stringify({ studentId: sStudent.id, amount: 10 + i, method: 'CASH', note: `Diff payment ${i}` }),
+      })
+    );
+    const concDiffResults = await Promise.all(concDiffPromises);
+    const diffReceipts = concDiffResults.map((r) => r.body?.data?.payment?.receiptNumber).filter(Boolean);
+    if (diffReceipts.length !== 10) {
+      c11Passed = false;
+      c11Errors.push(`10 concurrent payments expected 10 receipts, got ${diffReceipts.length}`);
+    }
+    const uniqueReceipts = new Set(diffReceipts);
+    if (uniqueReceipts.size !== 10) {
+      c11Passed = false;
+      c11Errors.push(`Expected 10 unique receipts, got duplicate: ${diffReceipts.join(', ')}`);
+    }
+
+    // 12. Dues Generation (dryRun & idempotency)
+    const genDryRun = await req('/api/fees/charges/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ month: '2027-01', dryRun: true }),
+    });
+    if (genDryRun.status !== 200 || !genDryRun.body?.data?.dryRun) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues dryRun expected 200 with dryRun: true, got ${genDryRun.status}`);
+    }
+    const dryRunDbCount = await prisma.feeCharge.count({ where: { period: '2027-01' } });
+    if (dryRunDbCount !== 0) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues dryRun wrote ${dryRunDbCount} charges to DB!`);
+    }
+
+    // Actual generate
+    const genActual1 = await req('/api/fees/charges/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ month: '2027-01', dryRun: false }),
+    });
+    if (genActual1.status !== 200 || genActual1.body?.data?.createdCount < 1) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues actual expected createdCount >= 1, got ${genActual1.body?.data?.createdCount}`);
+    }
+
+    // Run again for same month: must be 0 created
+    const genActual2 = await req('/api/fees/charges/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
+      body: JSON.stringify({ month: '2027-01', dryRun: false }),
+    });
+    if (genActual2.status !== 200 || genActual2.body?.data?.createdCount !== 0) {
+      c11Passed = false;
+      c11Errors.push(`Generate dues rerun expected createdCount: 0 (idempotent), got ${genActual2.body?.data?.createdCount}`);
+    }
+
+    // 13. CSV formula neutralization
+    const csvFormulaPay = await req('/api/fees/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+      body: JSON.stringify({
+        studentId: sStudent.id,
+        amount: 25,
+        method: 'CASH',
+        note: '=SUM(A1:A10)',
+        reference: '+8801700000000',
+      }),
+    });
+    if (csvFormulaPay.status !== 201) {
+      c11Passed = false;
+      c11Errors.push(`Failed to create CSV formula payment: ${csvFormulaPay.status}`);
+    }
+
+    const csvRes = await req('/api/fees/payments?format=csv', {
+      headers: { Cookie: sAdminCookie },
+    });
+    if (csvRes.status !== 200 || !csvRes.headers.get('content-type')?.includes('text/csv')) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/fees/payments?format=csv failed: ${csvRes.status}`);
+    }
+    if (!csvRes.rawText.includes("'+8801700000000") && !csvRes.rawText.includes("'=SUM(A1:A10)")) {
+      c11Passed = false;
+      c11Errors.push(`CSV export did not neutralize formula prefixes! Found raw text: ${csvRes.rawText.slice(0, 300)}`);
+    }
+
+    // 14. Student & Guardian View Endpoints
+    const myAcctRes = await req('/api/fees/my-account', {
+      headers: { Cookie: sStudentCookie },
+    });
+    if (myAcctRes.status !== 200 || myAcctRes.body?.data?.student?.id !== sStudent.id) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/fees/my-account failed: ${myAcctRes.status}`);
+    }
+
+    const guardAcctRes = await req(`/api/fees/guardian/students/${sStudent.id}/account`, {
+      headers: { Cookie: sGuardianCookie },
+    });
+    if (guardAcctRes.status !== 200 || guardAcctRes.body?.data?.student?.id !== sStudent.id) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/fees/guardian/students/:id/account failed: ${guardAcctRes.status}`);
+    }
+
+    // 15. Reconciliation script execution
+    const reconResult = await reconcileFees(false);
+    if (!reconResult.isMatch || reconResult.mismatchCount > 0) {
+      c11Passed = false;
+      c11Errors.push(`reconcileFees failed: isMatch=${reconResult.isMatch} mismatches=${reconResult.mismatchCount}`);
+    }
+
+    // 16. Audit log hygiene
+    const feeAuditLogs = await prisma.auditLog.findMany({
+      where: {
+        action: { in: ['FEE_PAYMENT_RECORDED', 'FEE_PAYMENT_REVERSED', 'FEE_CHARGE_CREATED'] },
+      },
+      take: 5,
+    });
+    for (const log of feeAuditLogs) {
+      const metaStr = JSON.stringify(log.metadata || {});
+      if (metaStr.includes('TRX-') || metaStr.includes('password') || metaStr.includes('secret')) {
+        c11Passed = false;
+        c11Errors.push(`Audit log ${log.id} leaked sensitive references/notes in metadata: ${metaStr}`);
+      }
+    }
+
+    const c11Details = c11Passed
+      ? 'Decimal money exact arithmetic; AUTO/MANUAL allocations; partial/full payments; overpayment student credit; idempotency deduplication; 10 concurrent gap-free receipts; payment reversals; void guards; dryRun & idempotent dues generation; role matrix with ACCOUNTANT; CSV formula sanitization; legacy 410s; reconcileFees cent-for-cent pass'
+      : c11Errors.join('; ');
+
+    recordCheck(
+      '11',
+      'Decimal money, fee ledger, receipts, dues generation, reversals, accountant role',
+      c11Passed,
+      c11Details
+    );
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK 30: EXAM INTEGRITY — ATTEMPTS, AUTOSAVE, DEADLINES, EXTRA TIME, SAFE RANKS, ARCHIVE
+    // ─────────────────────────────────────────────────────────────────────────
+    console.log('\nRunning Check 30: Server-side attempts, deadlines, safe ranks, and archive...');
+    let c30Passed = true;
+    const c30Errors: string[] = [];
+
+    // Setup: Create a dedicated batch and enroll demoStudent and 2 new students
+    const smokeExamBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-ExamIntegrity-Batch',
+        slug: `smoke-exam-batch-${Date.now()}`,
+        type: 'ADMISSION',
+        branchId: demoAdmin.branchId,
+        subjectId: smokeSubject!.id,
+      },
+    });
+    createdBatchIds.push(smokeExamBatch.id);
+
+    // Create 2 additional test students
+    const studentPwHash = await bcrypt.hash('SmokeStudent123!', 10);
+    const smokeStudentB = await prisma.user.create({
+      data: {
+        name: 'SMOKE-Student-B',
+        email: `smoke.student.b.${Date.now()}@demo.eduflow.local`,
+        password: studentPwHash,
+        role: Role.STUDENT,
+        branchId: demoAdmin.branchId,
+      },
+    });
+    createdUserIds.push(smokeStudentB.id);
+
+    const smokeStudentC = await prisma.user.create({
+      data: {
+        name: 'SMOKE-Student-C',
+        email: `smoke.student.c.${Date.now()}@demo.eduflow.local`,
+        password: studentPwHash,
+        role: Role.STUDENT,
+        branchId: demoAdmin.branchId,
+      },
+    });
+    createdUserIds.push(smokeStudentC.id);
+
+    // Enrol students
+    await prisma.enrollment.createMany({
+      data: [
+        { studentId: demoStudent.id, batchId: smokeExamBatch.id, status: 'ACTIVE' },
+        { studentId: smokeStudentB.id, batchId: smokeExamBatch.id, status: 'ACTIVE' },
+        { studentId: smokeStudentC.id, batchId: smokeExamBatch.id, status: 'ACTIVE' },
+      ],
+    });
+
+    const studentBCookie = `token=${jwt.sign({ userId: smokeStudentB.id, role: Role.STUDENT, branchId: demoAdmin.branchId }, env.JWT_SECRET)}`;
+    const studentCCookie = `token=${jwt.sign({ userId: smokeStudentC.id, role: Role.STUDENT, branchId: demoAdmin.branchId }, env.JWT_SECRET)}`;
+
+    // 1. Create online test with windowEndsAt and shuffle flags
+    const testNow = new Date();
+    const testWindowEnd = new Date(testNow.getTime() + 4 * 60 * 60 * 1000); // +4 hours
+    const onlineTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-Online-Exam-FullLifecycle',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 20,
+        negativeMarkingValue: 0.5,
+        durationMinutes: 30,
+        testDate: new Date(testNow.getTime() - 5 * 60 * 1000), // started 5 min ago
+        windowEndsAt: testWindowEnd,
+        shuffleQuestions: true,
+        shuffleOptions: true,
+        createdById: demoAdmin.id,
+      },
+    });
+    createdTestIds.push(onlineTest.id);
+
+    // Add 2 MCQ questions
+    const qA = await prisma.question.create({
+      data: {
+        testId: onlineTest.id,
+        type: 'MCQ',
+        text: 'SMOKE-Question-Alpha: What is 2 + 2?',
+        marks: 10,
+        order: 1,
+        options: {
+          create: [
+            { text: '4 (Correct)', isCorrect: true },
+            { text: '3 (Wrong)', isCorrect: false },
+            { text: '5 (Wrong)', isCorrect: false },
+          ],
+        },
+      },
+      include: { options: true },
+    });
+    const qB = await prisma.question.create({
+      data: {
+        testId: onlineTest.id,
+        type: 'MCQ',
+        text: 'SMOKE-Question-Beta: Capital of Bangladesh?',
+        marks: 10,
+        order: 2,
+        options: {
+          create: [
+            { text: 'Dhaka (Correct)', isCorrect: true },
+            { text: 'Chittagong (Wrong)', isCorrect: false },
+          ],
+        },
+      },
+      include: { options: true },
+    });
+
+    const qACorrectOpt = qA.options.find((o) => o.isCorrect)!.id;
+    const qAWrongOpt = qA.options.find((o) => !o.isCorrect)!.id;
+    const qBCorrectOpt = qB.options.find((o) => o.isCorrect)!.id;
+
+    // 2. Metadata only before start
+    const metaCheck = await req(`/api/tests/${onlineTest.id}`, { headers: { Cookie: studentCookie } });
+    if (metaCheck.status !== 200 || (metaCheck.body?.data?.questions && metaCheck.body?.data?.questions.length > 0)) {
+      c30Passed = false;
+      c30Errors.push(`Expected metadata only before start, got status=${metaCheck.status}, questions=${JSON.stringify(metaCheck.body?.data?.questions)}`);
+    }
+
+    // 3. Idempotent start: first call creates attempt
+    const start1 = await req(`/api/tests/${onlineTest.id}/start`, {
+      method: 'POST',
+      headers: { Cookie: studentCookie },
+    });
+    if (start1.status !== 200 || !start1.body?.data?.attempt?.id) {
+      c30Passed = false;
+      c30Errors.push(`Start attempt failed: status=${start1.status}, body=${JSON.stringify(start1.body)}`);
+    }
+
+    const attempt1 = start1.body?.data?.attempt;
+    const questions1 = start1.body?.data?.questions;
+
+    // Verify isCorrect is never returned to student
+    const anyIsCorrect = questions1?.some((q: any) => q.options?.some((o: any) => o.isCorrect !== undefined));
+    if (anyIsCorrect) {
+      c30Passed = false;
+      c30Errors.push('Questions on start exposed isCorrect on options!');
+    }
+
+    // Verify deadline calculation: min(startedAt + duration, windowEnd)
+    const expectedDeadlineMinutes = 30;
+    const actualDiffMinutes = (new Date(attempt1?.deadlineAt).getTime() - new Date(attempt1?.startedAt).getTime()) / 60000;
+    if (Math.abs(actualDiffMinutes - expectedDeadlineMinutes) > 1) {
+      c30Passed = false;
+      c30Errors.push(`Expected deadline diff ~${expectedDeadlineMinutes} min, got ${actualDiffMinutes}`);
+    }
+
+    // Second call to start returns identical attempt (idempotency) and identical order (deterministic seed)
+    const start2 = await req(`/api/tests/${onlineTest.id}/start`, {
+      method: 'POST',
+      headers: { Cookie: studentCookie },
+    });
+    if (start2.status !== 200 || start2.body?.data?.attempt?.id !== attempt1?.id) {
+      c30Passed = false;
+      c30Errors.push(`Start not idempotent: status=${start2.status}, secondId=${start2.body?.data?.attempt?.id}`);
+    }
+    const questions2 = start2.body?.data?.questions;
+    if (JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questions2?.map((q: any) => q.id))) {
+      c30Passed = false;
+      c30Errors.push('Deterministic seed shuffling failed across idempotent start calls');
+    }
+
+    // 4. Autosave answers: PUT /api/tests/:id/attempt/answers
+    const autosaveRes = await req(`/api/tests/${onlineTest.id}/attempt/answers`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({
+        answers: [{ questionId: qA.id, optionId: qACorrectOpt }],
+      }),
+    });
+    if (autosaveRes.status !== 200 || autosaveRes.body?.data?.savedCount !== 1) {
+      c30Passed = false;
+      c30Errors.push(`Autosave failed: status=${autosaveRes.status}, body=${JSON.stringify(autosaveRes.body)}`);
+    }
+
+    // GET attempt shows saved answers
+    const getAttemptRes = await req(`/api/tests/${onlineTest.id}/attempt`, {
+      headers: { Cookie: studentCookie },
+    });
+    const savedAns = getAttemptRes.body?.data?.savedAnswers;
+    if (getAttemptRes.status !== 200 || !savedAns || savedAns.length !== 1 || savedAns[0].optionId !== qACorrectOpt) {
+      c30Passed = false;
+      c30Errors.push(`GET attempt did not show autosaved answer: status=${getAttemptRes.status}, saved=${JSON.stringify(savedAns)}`);
+    }
+
+    // 5. Exam locked: attempts exist -> modify test/questions rejected with 409 EXAM_LOCKED
+    const addQBlocked = await req(`/api/tests/${onlineTest.id}/questions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        type: 'MCQ',
+        text: 'SMOKE-Forbidden Question',
+        marks: 5,
+        order: 3,
+        options: [{ text: 'Opt1', isCorrect: true }],
+      }),
+    });
+    const updateTestBlocked = await req(`/api/tests/${onlineTest.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ durationMinutes: 60 }),
+    });
+    const deleteQBlocked = await req(`/api/questions/${qA.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    if (addQBlocked.status !== 409 || updateTestBlocked.status !== 409 || deleteQBlocked.status !== 409) {
+      c30Passed = false;
+      c30Errors.push(`EXAM_LOCKED check failed: addQ=${addQBlocked.status}, updateTest=${updateTestBlocked.status}, delQ=${deleteQBlocked.status}`);
+    }
+
+    // Verify audit log for EXAM_LOCKED_ATTEMPT
+    const lockedAudit = await prisma.auditLog.findFirst({
+      where: {
+        action: 'EXAM_LOCKED_ATTEMPT',
+        entityId: onlineTest.id,
+      },
+    });
+    if (!lockedAudit) {
+      c30Passed = false;
+      c30Errors.push('EXAM_LOCKED_ATTEMPT audit log entry not found in database');
+    }
+
+    // 6. Extra time with audit trail: POST /api/tests/:id/attempts/:attemptId/extend
+    const extendRes = await req(`/api/tests/${onlineTest.id}/attempts/${attempt1.id}/extend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        minutes: 15,
+        reason: 'SMOKE network reconnection grant',
+      }),
+    });
+    if (extendRes.status !== 200 || extendRes.body?.data?.extendedMinutes !== 15) {
+      c30Passed = false;
+      c30Errors.push(`Extend attempt failed: status=${extendRes.status}, body=${JSON.stringify(extendRes.body)}`);
+    }
+
+    const extendAudit = await prisma.auditLog.findFirst({
+      where: {
+        action: 'EXTEND_TEST_ATTEMPT',
+        entityId: attempt1.id,
+      },
+    });
+    if (!extendAudit) {
+      c30Passed = false;
+      c30Errors.push('EXTEND_TEST_ATTEMPT audit log entry not found');
+    }
+
+    // 7. Submit test merges final answers + autosaved answers
+    // demoStudent submits question B; question A was already autosaved
+    const submitRes = await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({
+        answers: [{ questionId: qB.id, selectedOptionId: qBCorrectOpt }],
+      }),
+    });
+    if (submitRes.status !== 201 || submitRes.body?.data?.totalMarksObtained !== 20) {
+      c30Passed = false;
+      c30Errors.push(`Submit test failed: status=${submitRes.status}, score=${submitRes.body?.data?.totalMarksObtained}`);
+    }
+
+    // Double submit rejected with 409
+    const doubleSubmitRes = await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ answers: [] }),
+    });
+    if (doubleSubmitRes.status !== 409) {
+      c30Passed = false;
+      c30Errors.push(`Double submit expected 409, got ${doubleSubmitRes.status}`);
+    }
+
+    // 8. Submit by studentB (gets score 20 -> tied with demoStudent)
+    await req(`/api/tests/${onlineTest.id}/start`, { method: 'POST', headers: { Cookie: studentBCookie } });
+    await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentBCookie },
+      body: JSON.stringify({
+        answers: [
+          { questionId: qA.id, selectedOptionId: qACorrectOpt },
+          { questionId: qB.id, selectedOptionId: qBCorrectOpt },
+        ],
+      }),
+    });
+
+    // Submit by studentC (wrong answer on A -> score 0 - 0.5 = -0.5)
+    await req(`/api/tests/${onlineTest.id}/start`, { method: 'POST', headers: { Cookie: studentCCookie } });
+    await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCCookie },
+      body: JSON.stringify({
+        answers: [
+          { questionId: qA.id, selectedOptionId: qAWrongOpt },
+        ],
+      }),
+    });
+
+    // 9. Check Competition Ranking: ties share rank (1, 1, 3)
+    const resultsStaff = await req(`/api/tests/${onlineTest.id}/results`, {
+      headers: { Cookie: adminCookie },
+    });
+    if (resultsStaff.status !== 200) {
+      c30Passed = false;
+      c30Errors.push(`Get test results failed: status=${resultsStaff.status}`);
+    }
+    const allResults = resultsStaff.body?.data || [];
+    const rankMap = new Map(allResults.map((r: any) => [r.studentId, { score: r.totalMarksObtained, rank: r.rank }]));
+    const studentARank = rankMap.get(demoStudent.id)?.rank;
+    const studentBRank = rankMap.get(smokeStudentB.id)?.rank;
+    const studentCRank = rankMap.get(smokeStudentC.id)?.rank;
+
+    if (studentARank !== 1 || studentBRank !== 1 || studentCRank !== 3) {
+      c30Passed = false;
+      c30Errors.push(`Competition ranking failed: expected (1, 1, 3), got A=${studentARank}, B=${studentBRank}, C=${studentCRank}`);
+    }
+
+    // 10. Zero writes on GET results: re-read results and verify updatedAt timestamps did not change
+    const resultsBefore = await prisma.result.findMany({ where: { testId: onlineTest.id }, select: { id: true, updatedAt: true } });
+    await req(`/api/tests/${onlineTest.id}/results`, { headers: { Cookie: adminCookie } });
+    const resultsAfter = await prisma.result.findMany({ where: { testId: onlineTest.id }, select: { id: true, updatedAt: true } });
+    const anyUpdated = resultsBefore.some((r, i) => r.updatedAt.getTime() !== resultsAfter[i].updatedAt.getTime());
+    if (anyUpdated) {
+      c30Passed = false;
+      c30Errors.push('GET /api/tests/:id/results performed write operations on Result table!');
+    }
+
+    // 11. Lazy finalization of expired attempt
+    const expiredPastTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-Expired-Lazy-Test',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 10,
+        negativeMarkingValue: 0,
+        durationMinutes: 15,
+        testDate: new Date(Date.now() - 90 * 60 * 1000), // 90 min ago
+        windowEndsAt: new Date(Date.now() - 30 * 60 * 1000), // closed 30 min ago
+        createdById: demoAdmin.id,
+      },
+    });
+    createdTestIds.push(expiredPastTest.id);
+
+    const qExp = await prisma.question.create({
+      data: {
+        testId: expiredPastTest.id,
+        type: 'MCQ',
+        text: 'SMOKE-Question-Exp: 1+1?',
+        marks: 10,
+        order: 1,
+        options: {
+          create: [{ text: '2', isCorrect: true }, { text: '0', isCorrect: false }],
+        },
+      },
+      include: { options: true },
+    });
+    const qExpCorrect = qExp.options.find((o) => o.isCorrect)!.id;
+
+    // Create attempt expired 40 min ago with an autosaved answer
+    const expAtt = await prisma.testAttempt.create({
+      data: {
+        testId: expiredPastTest.id,
+        studentId: smokeStudentB.id,
+        status: 'IN_PROGRESS',
+        startedAt: new Date(Date.now() - 80 * 60 * 1000),
+        deadlineAt: new Date(Date.now() - 40 * 60 * 1000), // expired past grace
+        seed: 'smoke-expired-seed',
+      },
+    });
+    await prisma.attemptAnswer.create({
+      data: {
+        attemptId: expAtt.id,
+        questionId: qExp.id,
+        optionId: qExpCorrect,
+      },
+    });
+
+    // Calling GET /attempt triggers lazy finalization
+    const lazyGet = await req(`/api/tests/${expiredPastTest.id}/attempt`, {
+      headers: { Cookie: studentBCookie },
+    });
+    if (lazyGet.status !== 200 || lazyGet.body?.data?.attempt?.status !== 'EXPIRED' || !lazyGet.body?.data?.result) {
+      c30Passed = false;
+      c30Errors.push(`Lazy finalization failed: status=${lazyGet.status}, attStatus=${lazyGet.body?.data?.attempt?.status}`);
+    }
+
+    // 12. Staff bulk finalize: POST /api/tests/:id/finalize
+    await prisma.testAttempt.create({
+      data: {
+        testId: expiredPastTest.id,
+        studentId: smokeStudentC.id,
+        status: 'IN_PROGRESS',
+        startedAt: new Date(Date.now() - 80 * 60 * 1000),
+        deadlineAt: new Date(Date.now() - 40 * 60 * 1000),
+        seed: 'smoke-expired-seed-2',
+      },
+    });
+    const finalizeRes = await req(`/api/tests/${expiredPastTest.id}/finalize`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    if (finalizeRes.status !== 200 || finalizeRes.body?.data?.finalizedCount < 1) {
+      c30Passed = false;
+      c30Errors.push(`Staff finalize failed: status=${finalizeRes.status}, count=${finalizeRes.body?.data?.finalizedCount}`);
+    }
+
+    // 13. Soft archive vs Hard delete for Test
+    // onlineTest has attempts and results -> DELETE soft archives
+    const delOnlineTest = await req(`/api/tests/${onlineTest.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbTestArchived = await prisma.test.findUnique({ where: { id: onlineTest.id } });
+    if (delOnlineTest.status !== 200 || !delOnlineTest.body?.data?.archived || !dbTestArchived?.archivedAt) {
+      c30Passed = false;
+      c30Errors.push(`Soft archive test failed: status=${delOnlineTest.status}, body=${JSON.stringify(delOnlineTest.body)}`);
+    }
+
+    // Restore test
+    const restoreTestRes = await req(`/api/tests/${onlineTest.id}/restore`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    const dbTestRestored = await prisma.test.findUnique({ where: { id: onlineTest.id } });
+    if (restoreTestRes.status !== 200 || dbTestRestored?.archivedAt !== null) {
+      c30Passed = false;
+      c30Errors.push(`Restore test failed: status=${restoreTestRes.status}, archivedAt=${dbTestRestored?.archivedAt}`);
+    }
+
+    // Hard delete truly empty test
+    const emptyTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-Empty-Test',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 10,
+        testDate: new Date(),
+        createdById: demoAdmin.id,
+      },
+    });
+    const delEmptyTest = await req(`/api/tests/${emptyTest.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbEmptyTest = await prisma.test.findUnique({ where: { id: emptyTest.id } });
+    if (delEmptyTest.status !== 200 || !delEmptyTest.body?.data?.deleted || dbEmptyTest !== null) {
+      c30Passed = false;
+      c30Errors.push(`Hard delete empty test failed: status=${delEmptyTest.status}, exists=${!!dbEmptyTest}`);
+    }
+
+    // 14. Soft archive vs Hard delete for Batch
+    // smokeExamBatch has enrollments and tests -> DELETE soft archives
+    const delBatch = await req(`/api/batches/${smokeExamBatch.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbBatchArchived = await prisma.batch.findUnique({ where: { id: smokeExamBatch.id } });
+    if (delBatch.status !== 200 || !delBatch.body?.data?.archived || !dbBatchArchived?.archivedAt) {
+      c30Passed = false;
+      c30Errors.push(`Soft archive batch failed: status=${delBatch.status}, body=${JSON.stringify(delBatch.body)}`);
+    }
+
+    // Enrollment in archived batch rejected with 400
+    const enrollArchived = await req('/api/enrollments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        studentId: demoStudent.id,
+        batchId: smokeExamBatch.id,
+      }),
+    });
+    if (enrollArchived.status !== 400) {
+      c30Passed = false;
+      c30Errors.push(`Enroll in archived batch expected 400, got ${enrollArchived.status}`);
+    }
+
+    // Restore batch
+    const restoreBatchRes = await req(`/api/batches/${smokeExamBatch.id}/restore`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    const dbBatchRestored = await prisma.batch.findUnique({ where: { id: smokeExamBatch.id } });
+    if (restoreBatchRes.status !== 200 || dbBatchRestored?.archivedAt !== null) {
+      c30Passed = false;
+      c30Errors.push(`Restore batch failed: status=${restoreBatchRes.status}, archivedAt=${dbBatchRestored?.archivedAt}`);
+    }
+
+    // Hard delete truly empty batch
+    const emptyBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-Empty-Batch',
+        slug: `smoke-empty-batch-${Date.now()}`,
+        type: 'ADMISSION',
+        branchId: demoAdmin.branchId,
+        subjectId: smokeSubject!.id,
+      },
+    });
+    const delEmptyBatch = await req(`/api/batches/${emptyBatch.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbEmptyBatch = await prisma.batch.findUnique({ where: { id: emptyBatch.id } });
+    if (delEmptyBatch.status !== 200 || !delEmptyBatch.body?.data?.deleted || dbEmptyBatch !== null) {
+      c30Passed = false;
+      c30Errors.push(`Hard delete empty batch failed: status=${delEmptyBatch.status}, exists=${!!dbEmptyBatch}`);
+    }
+
+    const c30Details = c30Passed
+      ? 'Idempotent starts; deterministic seed shuffle; autosave resume; extra time audit; competition ties (1, 1, 3); zero read writes; 409 EXAM_LOCKED protection; lazy & bulk finalize; soft archive & restore for tests and batches'
+      : c30Errors.join('; ');
+
+    recordCheck(
+      '30',
+      'Exam attempts, autosave, deadlines, safe competition ranks, soft archive',
+      c30Passed,
+      c30Details
+    );
   }
 } finally {
     // ─────────────────────────────────────────────────────────────────────────
@@ -3398,7 +4522,23 @@ async function runSmokeTests() {
         await prisma.guardianLink.deleteMany({ where: { id: { in: createdGuardianLinkIds } } });
       }
 
-      // Delete test dependent answers, options, questions, and results before test deletion
+      // Delete test dependent attempts, answers, options, questions, and results before test deletion
+      await prisma.attemptAnswer.deleteMany({
+        where: {
+          OR: [
+            { attempt: { testId: { in: createdTestIds } } },
+            { attempt: { test: { title: { startsWith: 'SMOKE-' } } } },
+          ],
+        },
+      });
+      await prisma.testAttempt.deleteMany({
+        where: {
+          OR: [
+            { testId: { in: createdTestIds } },
+            { test: { title: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
       await prisma.result.deleteMany({
         where: { OR: [{ testId: { in: createdTestIds } }, { test: { title: { startsWith: 'SMOKE-' } } }] },
       });
@@ -3453,6 +4593,51 @@ async function runSmokeTests() {
       }
       await prisma.lecture.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
 
+      await prisma.paymentReversal.deleteMany({
+        where: {
+          OR: [
+            { payment: { student: { name: { startsWith: 'SMOKE-' } } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.paymentAllocation.deleteMany({
+        where: {
+          OR: [
+            { payment: { student: { name: { startsWith: 'SMOKE-' } } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.feeAdjustment.deleteMany({
+        where: {
+          OR: [
+            { charge: { student: { name: { startsWith: 'SMOKE-' } } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.payment.deleteMany({
+        where: {
+          OR: [
+            { student: { name: { startsWith: 'SMOKE-' } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
+      await prisma.feeCharge.deleteMany({
+        where: {
+          OR: [
+            { student: { name: { startsWith: 'SMOKE-' } } },
+            { branch: { name: { startsWith: 'SMOKE-' } } },
+            { batchId: { in: createdBatchIds } },
+          ],
+        },
+      });
+      await prisma.receiptSequence.deleteMany({
+        where: { branch: { name: { startsWith: 'SMOKE-' } } },
+      });
+
       if (createdBatchIds.length > 0) {
         await prisma.enrollment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.routineSlot.deleteMany({ where: { batchId: { in: createdBatchIds } } });
@@ -3461,6 +4646,7 @@ async function runSmokeTests() {
         await prisma.feePayment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
         await prisma.batch.deleteMany({ where: { id: { in: createdBatchIds } } });
       }
+
       await prisma.enrollment.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
       await prisma.routineSlot.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
       await prisma.review.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });

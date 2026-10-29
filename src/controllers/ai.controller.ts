@@ -289,24 +289,48 @@ export async function getAiInsights(req: Request, res: Response) {
     }
 
     // ─── 2. Overdue / DUE Fee Totals and Count ──────────────────────────────
-    const feeFilter = effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {};
-    const feeAgg = await prisma.feePayment.aggregate({
+    const feeFilter = effectiveBranchId ? { branchId: effectiveBranchId } : {};
+    const charges = await prisma.feeCharge.findMany({
       where: {
         ...feeFilter,
-        status: { in: [PaymentStatus.DUE, PaymentStatus.PARTIAL] },
+        voidedAt: null,
       },
-      _count: { _all: true },
-      _sum: { amountDue: true, amountPaid: true },
+      include: {
+        allocations: {
+          where: {
+            payment: {
+              reversal: null,
+            },
+          },
+          select: { amount: true },
+        },
+        adjustments: {
+          where: { voidedAt: null },
+          select: { amount: true },
+        },
+      },
     });
 
-    const totalDueAmount = Number(
-      ((feeAgg._sum.amountDue || 0) - (feeAgg._sum.amountPaid || 0)).toFixed(2)
-    );
+    let overdueCount = 0;
+    let totalDueAmount = 0;
+    const nowTime = new Date().getTime();
+
+    for (const c of charges) {
+      const paid = c.allocations.reduce((sum, a) => sum + Number(a.amount), 0);
+      const adj = c.adjustments.reduce((sum, a) => sum + Number(a.amount), 0);
+      const balance = Number(c.amount) - paid - adj;
+      if (balance > 0.005) {
+        totalDueAmount += balance;
+        if (new Date(c.dueDate).getTime() < nowTime) {
+          overdueCount++;
+        }
+      }
+    }
 
     const feeAnomaly = {
       type: 'FEE_DUES',
-      overdueCount: feeAgg._count._all,
-      totalDueAmount,
+      overdueCount,
+      totalDueAmount: Number(totalDueAmount.toFixed(2)),
     };
 
     // ─── 3. Students With Score Decline Over Last 3 Tests ───────────────────

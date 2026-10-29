@@ -126,6 +126,13 @@ export async function enrollStudent(req: Request, res: Response) {
       });
     }
 
+    if (batch.archivedAt !== null) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot enroll in an archived batch',
+      });
+    }
+
     // Check if enrollment already exists
     const existingEnrollment = await prisma.enrollment.findUnique({
       where: {
@@ -275,6 +282,9 @@ export async function getBatchesByStudent(req: Request, res: Response) {
       where: {
         studentId,
         status: 'ACTIVE',
+        batch: {
+          archivedAt: null,
+        },
       },
       include: {
         batch: {

@@ -87,7 +87,9 @@ export async function getDashboardSummary(req: Request, res: Response) {
         // Upcoming tests in enrolled batches over the next 7 days
         prisma.test.findMany({
           where: {
+            archivedAt: null,
             batch: {
+              archivedAt: null,
               enrollments: {
                 some: { studentId: userId, status: 'ACTIVE' },
               },
@@ -167,7 +169,10 @@ export async function getDashboardSummary(req: Request, res: Response) {
 
       // Count batches
       prisma.batch.count({
-        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
+        where: {
+          archivedAt: null,
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+        },
       }),
 
       // Count teachers
@@ -180,7 +185,10 @@ export async function getDashboardSummary(req: Request, res: Response) {
 
       // All batches with today's attendance data (reuse today-summary logic)
       prisma.batch.findMany({
-        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
+        where: {
+          archivedAt: null,
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+        },
         select: {
           id: true,
           name: true,
@@ -197,7 +205,11 @@ export async function getDashboardSummary(req: Request, res: Response) {
       // Upcoming tests in the next 7 days
       prisma.test.findMany({
         where: {
-          ...(effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {}),
+          archivedAt: null,
+          batch: {
+            archivedAt: null,
+            ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          },
           testDate: {
             gte: todayNormalized,
             lte: sevenDaysFromNow,

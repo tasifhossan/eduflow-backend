@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { createBatchSchema, updateBatchSchema } from '../validators/batch.validator';
 import prisma from '../utils/prisma';
+import { createAuditLog } from '../utils/audit';
 
 export async function createBatch(req: Request, res: Response) {
   try {
@@ -88,7 +89,12 @@ export async function getBatches(req: Request, res: Response) {
       });
     }
 
-    const whereClause = req.effectiveBranchId ? { branchId: req.effectiveBranchId } : {};
+    const whereClause: any = {
+      archivedAt: null,
+    };
+    if (req.effectiveBranchId) {
+      whereClause.branchId = req.effectiveBranchId;
+    }
 
     const batches = await prisma.batch.findMany({
       where: whereClause,
@@ -127,7 +133,7 @@ export async function getBatchById(req: Request, res: Response) {
     }
 
     const id = req.params.id as string;
-    const whereClause: any = { id };
+    const whereClause: any = { id, archivedAt: null };
     if (req.effectiveBranchId) {
       whereClause.branchId = req.effectiveBranchId;
     }
@@ -191,10 +197,10 @@ export async function updateBatch(req: Request, res: Response) {
       where: { id },
     });
 
-    if (!existingBatch) {
+    if (!existingBatch || existingBatch.archivedAt !== null) {
       return res.status(404).json({
         success: false,
-        message: 'Batch not found',
+        message: 'Batch not found or archived',
       });
     }
 
@@ -284,6 +290,7 @@ export async function deleteBatch(req: Request, res: Response) {
     }
 
     const id = req.params.id as string;
+    const branchId = req.effectiveBranchId || req.user.branchId;
 
     // Check if batch exists and belongs to user's branch
     const existingBatch = await prisma.batch.findUnique({
@@ -304,17 +311,134 @@ export async function deleteBatch(req: Request, res: Response) {
       });
     }
 
-    // Hard delete
+    // Check for activity / related records
+    const [enrollmentCount, testCount, attendanceCount, lectureCount, assignmentCount] =
+      await Promise.all([
+        prisma.enrollment.count({ where: { batchId: id } }),
+        prisma.test.count({ where: { batchId: id } }),
+        prisma.attendance.count({ where: { batchId: id } }),
+        prisma.lecture.count({ where: { batchId: id } }),
+        prisma.assignment.count({ where: { batchId: id } }),
+      ]);
+
+    const hasActivity =
+      enrollmentCount > 0 ||
+      testCount > 0 ||
+      attendanceCount > 0 ||
+      lectureCount > 0 ||
+      assignmentCount > 0;
+
+    if (hasActivity) {
+      // Soft archive
+      await prisma.batch.update({
+        where: { id },
+        data: { archivedAt: new Date() },
+      });
+
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'ARCHIVE_BATCH',
+        entityType: 'Batch',
+        entityId: id,
+        branchId,
+        metadata: {
+          enrollmentCount,
+          testCount,
+          attendanceCount,
+          lectureCount,
+          assignmentCount,
+        },
+        ip: req.ip,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Batch has existing activity and was archived instead of deleted',
+        data: { archived: true },
+      });
+    }
+
+    // Truly empty -> hard delete
     await prisma.batch.delete({
       where: { id },
+    });
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'DELETE_BATCH',
+      entityType: 'Batch',
+      entityId: id,
+      branchId,
+      metadata: { hardDeleted: true },
+      ip: req.ip,
     });
 
     return res.status(200).json({
       success: true,
       message: 'Batch deleted successfully',
+      data: { deleted: true },
     });
   } catch (error) {
     console.error('Delete batch error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
+export async function restoreBatch(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const id = req.params.id as string;
+    const branchId = req.effectiveBranchId || req.user.branchId;
+
+    const existingBatch = await prisma.batch.findUnique({
+      where: { id },
+    });
+
+    if (!existingBatch) {
+      return res.status(404).json({
+        success: false,
+        message: 'Batch not found',
+      });
+    }
+
+    if (req.effectiveBranchId && existingBatch.branchId !== req.effectiveBranchId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Access denied to this batch',
+      });
+    }
+
+    await prisma.batch.update({
+      where: { id },
+      data: { archivedAt: null },
+    });
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'RESTORE_BATCH',
+      entityType: 'Batch',
+      entityId: id,
+      branchId,
+      metadata: { restored: true },
+      ip: req.ip,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Batch restored successfully',
+      data: { restored: true },
+    });
+  } catch (error) {
+    console.error('Restore batch error:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -353,7 +477,7 @@ export async function getBatchForStudent(req: Request, res: Response) {
 
     // Retrieve student-safe batch details (no feeAmount, no discount data, no student roster)
     const batch = await prisma.batch.findUnique({
-      where: { id },
+      where: { id, archivedAt: null },
       select: {
         id: true,
         name: true,
@@ -373,7 +497,7 @@ export async function getBatchForStudent(req: Request, res: Response) {
     if (!batch) {
       return res.status(404).json({
         success: false,
-        message: 'Batch not found',
+        message: 'Batch not found or archived',
       });
     }
 
@@ -390,4 +514,3 @@ export async function getBatchForStudent(req: Request, res: Response) {
     });
   }
 }
-

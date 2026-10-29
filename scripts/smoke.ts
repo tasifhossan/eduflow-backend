@@ -512,16 +512,31 @@ async function runSmokeTests() {
     });
     createdTestIds.push(openTest.id);
 
-    // Check 10: Student GET /api/tests/:id before submission: no isCorrect on any option
-    const c10 = await req(`/api/tests/${openTest.id}`, {
+    // Check 10: Student GET /api/tests/:id before submission: metadata only before start, no isCorrect on any option after start
+    const c10Before = await req(`/api/tests/${openTest.id}`, {
       headers: { Cookie: studentCookie },
     });
-    const c10Options = c10.body?.data?.questions?.flatMap((q: any) => q.options) || [];
+    const c10BeforeNoQuestions =
+      c10Before.status === 200 &&
+      (!c10Before.body?.data?.questions || c10Before.body?.data?.questions.length === 0);
+
+    // Start attempt so questions become accessible
+    const c10Start = await req(`/api/tests/${openTest.id}/start`, {
+      method: 'POST',
+      headers: { Cookie: studentCookie },
+    });
+
+    const c10After = await req(`/api/tests/${openTest.id}`, {
+      headers: { Cookie: studentCookie },
+    });
+    const c10Options = c10After.body?.data?.questions?.flatMap((q: any) => q.options) || [];
     const c10HidesCorrect =
-      c10.status === 200 &&
+      c10BeforeNoQuestions &&
+      c10Start.status === 200 &&
+      c10After.status === 200 &&
       c10Options.length > 0 &&
       c10Options.every((o: any) => o.isCorrect === undefined);
-    recordCheck('10', 'Options hide isCorrect during open window', c10HidesCorrect, `Options checked: ${c10Options.length}, isCorrect exposed: ${!c10HidesCorrect}`);
+    recordCheck('10', 'Options hide isCorrect during open window', c10HidesCorrect, `Before start no questions: ${c10BeforeNoQuestions}, start: ${c10Start.status}, options: ${c10Options.length}`);
 
     // Check 11: Student not enrolled in a batch -> 403 on tests and routine
     const smokeBatch2 = await prisma.batch.create({
@@ -639,19 +654,19 @@ async function runSmokeTests() {
     ]);
 
     const count201 = concurrentSubmissions.filter((r) => r.status === 201).length;
-    const count400 = concurrentSubmissions.filter((r) => r.status === 400).length;
+    const countRejected = concurrentSubmissions.filter((r) => r.status === 409 || r.status === 400).length;
     const dbResultsCount = await prisma.result.count({
       where: { testId: openTest.id, studentId: demoStudent.id },
     });
     const dbAnswersCount = await prisma.studentAnswer.count({
       where: { studentId: demoStudent.id, question: { testId: openTest.id } },
     });
-    const c13Passed = count201 === 1 && count400 === 4 && dbResultsCount === 1 && dbAnswersCount === 2;
+    const c13Passed = count201 === 1 && countRejected === 4 && dbResultsCount === 1 && dbAnswersCount === 2;
     recordCheck(
       '13',
       'Race-condition proof concurrent exam submission',
       c13Passed,
-      `201s: ${count201}, 400s: ${count400}, Results: ${dbResultsCount}, Answers: ${dbAnswersCount}`
+      `201s: ${count201}, Rejected (409/400): ${countRejected}, Results: ${dbResultsCount}, Answers: ${dbAnswersCount}`
     );
 
     // Check 14: After submission but window still open: my-result and getTestById still hide isCorrect
@@ -3976,6 +3991,526 @@ async function runSmokeTests() {
       c11Passed,
       c11Details
     );
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK 30: EXAM INTEGRITY — ATTEMPTS, AUTOSAVE, DEADLINES, EXTRA TIME, SAFE RANKS, ARCHIVE
+    // ─────────────────────────────────────────────────────────────────────────
+    console.log('\nRunning Check 30: Server-side attempts, deadlines, safe ranks, and archive...');
+    let c30Passed = true;
+    const c30Errors: string[] = [];
+
+    // Setup: Create a dedicated batch and enroll demoStudent and 2 new students
+    const smokeExamBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-ExamIntegrity-Batch',
+        slug: `smoke-exam-batch-${Date.now()}`,
+        type: 'ADMISSION',
+        branchId: demoAdmin.branchId,
+        subjectId: smokeSubject!.id,
+      },
+    });
+    createdBatchIds.push(smokeExamBatch.id);
+
+    // Create 2 additional test students
+    const studentPwHash = await bcrypt.hash('SmokeStudent123!', 10);
+    const smokeStudentB = await prisma.user.create({
+      data: {
+        name: 'SMOKE-Student-B',
+        email: `smoke.student.b.${Date.now()}@demo.eduflow.local`,
+        password: studentPwHash,
+        role: Role.STUDENT,
+        branchId: demoAdmin.branchId,
+      },
+    });
+    createdUserIds.push(smokeStudentB.id);
+
+    const smokeStudentC = await prisma.user.create({
+      data: {
+        name: 'SMOKE-Student-C',
+        email: `smoke.student.c.${Date.now()}@demo.eduflow.local`,
+        password: studentPwHash,
+        role: Role.STUDENT,
+        branchId: demoAdmin.branchId,
+      },
+    });
+    createdUserIds.push(smokeStudentC.id);
+
+    // Enrol students
+    await prisma.enrollment.createMany({
+      data: [
+        { studentId: demoStudent.id, batchId: smokeExamBatch.id, status: 'ACTIVE' },
+        { studentId: smokeStudentB.id, batchId: smokeExamBatch.id, status: 'ACTIVE' },
+        { studentId: smokeStudentC.id, batchId: smokeExamBatch.id, status: 'ACTIVE' },
+      ],
+    });
+
+    const studentBCookie = `token=${jwt.sign({ userId: smokeStudentB.id, role: Role.STUDENT, branchId: demoAdmin.branchId }, env.JWT_SECRET)}`;
+    const studentCCookie = `token=${jwt.sign({ userId: smokeStudentC.id, role: Role.STUDENT, branchId: demoAdmin.branchId }, env.JWT_SECRET)}`;
+
+    // 1. Create online test with windowEndsAt and shuffle flags
+    const testNow = new Date();
+    const testWindowEnd = new Date(testNow.getTime() + 4 * 60 * 60 * 1000); // +4 hours
+    const onlineTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-Online-Exam-FullLifecycle',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 20,
+        negativeMarkingValue: 0.5,
+        durationMinutes: 30,
+        testDate: new Date(testNow.getTime() - 5 * 60 * 1000), // started 5 min ago
+        windowEndsAt: testWindowEnd,
+        shuffleQuestions: true,
+        shuffleOptions: true,
+        createdById: demoAdmin.id,
+      },
+    });
+    createdTestIds.push(onlineTest.id);
+
+    // Add 2 MCQ questions
+    const qA = await prisma.question.create({
+      data: {
+        testId: onlineTest.id,
+        type: 'MCQ',
+        text: 'SMOKE-Question-Alpha: What is 2 + 2?',
+        marks: 10,
+        order: 1,
+        options: {
+          create: [
+            { text: '4 (Correct)', isCorrect: true },
+            { text: '3 (Wrong)', isCorrect: false },
+            { text: '5 (Wrong)', isCorrect: false },
+          ],
+        },
+      },
+      include: { options: true },
+    });
+    const qB = await prisma.question.create({
+      data: {
+        testId: onlineTest.id,
+        type: 'MCQ',
+        text: 'SMOKE-Question-Beta: Capital of Bangladesh?',
+        marks: 10,
+        order: 2,
+        options: {
+          create: [
+            { text: 'Dhaka (Correct)', isCorrect: true },
+            { text: 'Chittagong (Wrong)', isCorrect: false },
+          ],
+        },
+      },
+      include: { options: true },
+    });
+
+    const qACorrectOpt = qA.options.find((o) => o.isCorrect)!.id;
+    const qAWrongOpt = qA.options.find((o) => !o.isCorrect)!.id;
+    const qBCorrectOpt = qB.options.find((o) => o.isCorrect)!.id;
+
+    // 2. Metadata only before start
+    const metaCheck = await req(`/api/tests/${onlineTest.id}`, { headers: { Cookie: studentCookie } });
+    if (metaCheck.status !== 200 || (metaCheck.body?.data?.questions && metaCheck.body?.data?.questions.length > 0)) {
+      c30Passed = false;
+      c30Errors.push(`Expected metadata only before start, got status=${metaCheck.status}, questions=${JSON.stringify(metaCheck.body?.data?.questions)}`);
+    }
+
+    // 3. Idempotent start: first call creates attempt
+    const start1 = await req(`/api/tests/${onlineTest.id}/start`, {
+      method: 'POST',
+      headers: { Cookie: studentCookie },
+    });
+    if (start1.status !== 200 || !start1.body?.data?.attempt?.id) {
+      c30Passed = false;
+      c30Errors.push(`Start attempt failed: status=${start1.status}, body=${JSON.stringify(start1.body)}`);
+    }
+
+    const attempt1 = start1.body?.data?.attempt;
+    const questions1 = start1.body?.data?.questions;
+
+    // Verify isCorrect is never returned to student
+    const anyIsCorrect = questions1?.some((q: any) => q.options?.some((o: any) => o.isCorrect !== undefined));
+    if (anyIsCorrect) {
+      c30Passed = false;
+      c30Errors.push('Questions on start exposed isCorrect on options!');
+    }
+
+    // Verify deadline calculation: min(startedAt + duration, windowEnd)
+    const expectedDeadlineMinutes = 30;
+    const actualDiffMinutes = (new Date(attempt1?.deadlineAt).getTime() - new Date(attempt1?.startedAt).getTime()) / 60000;
+    if (Math.abs(actualDiffMinutes - expectedDeadlineMinutes) > 1) {
+      c30Passed = false;
+      c30Errors.push(`Expected deadline diff ~${expectedDeadlineMinutes} min, got ${actualDiffMinutes}`);
+    }
+
+    // Second call to start returns identical attempt (idempotency) and identical order (deterministic seed)
+    const start2 = await req(`/api/tests/${onlineTest.id}/start`, {
+      method: 'POST',
+      headers: { Cookie: studentCookie },
+    });
+    if (start2.status !== 200 || start2.body?.data?.attempt?.id !== attempt1?.id) {
+      c30Passed = false;
+      c30Errors.push(`Start not idempotent: status=${start2.status}, secondId=${start2.body?.data?.attempt?.id}`);
+    }
+    const questions2 = start2.body?.data?.questions;
+    if (JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questions2?.map((q: any) => q.id))) {
+      c30Passed = false;
+      c30Errors.push('Deterministic seed shuffling failed across idempotent start calls');
+    }
+
+    // 4. Autosave answers: PUT /api/tests/:id/attempt/answers
+    const autosaveRes = await req(`/api/tests/${onlineTest.id}/attempt/answers`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({
+        answers: [{ questionId: qA.id, optionId: qACorrectOpt }],
+      }),
+    });
+    if (autosaveRes.status !== 200 || autosaveRes.body?.data?.savedCount !== 1) {
+      c30Passed = false;
+      c30Errors.push(`Autosave failed: status=${autosaveRes.status}, body=${JSON.stringify(autosaveRes.body)}`);
+    }
+
+    // GET attempt shows saved answers
+    const getAttemptRes = await req(`/api/tests/${onlineTest.id}/attempt`, {
+      headers: { Cookie: studentCookie },
+    });
+    const savedAns = getAttemptRes.body?.data?.savedAnswers;
+    if (getAttemptRes.status !== 200 || !savedAns || savedAns.length !== 1 || savedAns[0].optionId !== qACorrectOpt) {
+      c30Passed = false;
+      c30Errors.push(`GET attempt did not show autosaved answer: status=${getAttemptRes.status}, saved=${JSON.stringify(savedAns)}`);
+    }
+
+    // 5. Exam locked: attempts exist -> modify test/questions rejected with 409 EXAM_LOCKED
+    const addQBlocked = await req(`/api/tests/${onlineTest.id}/questions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        type: 'MCQ',
+        text: 'SMOKE-Forbidden Question',
+        marks: 5,
+        order: 3,
+        options: [{ text: 'Opt1', isCorrect: true }],
+      }),
+    });
+    const updateTestBlocked = await req(`/api/tests/${onlineTest.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ durationMinutes: 60 }),
+    });
+    const deleteQBlocked = await req(`/api/questions/${qA.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    if (addQBlocked.status !== 409 || updateTestBlocked.status !== 409 || deleteQBlocked.status !== 409) {
+      c30Passed = false;
+      c30Errors.push(`EXAM_LOCKED check failed: addQ=${addQBlocked.status}, updateTest=${updateTestBlocked.status}, delQ=${deleteQBlocked.status}`);
+    }
+
+    // Verify audit log for EXAM_LOCKED_ATTEMPT
+    const lockedAudit = await prisma.auditLog.findFirst({
+      where: {
+        action: 'EXAM_LOCKED_ATTEMPT',
+        entityId: onlineTest.id,
+      },
+    });
+    if (!lockedAudit) {
+      c30Passed = false;
+      c30Errors.push('EXAM_LOCKED_ATTEMPT audit log entry not found in database');
+    }
+
+    // 6. Extra time with audit trail: POST /api/tests/:id/attempts/:attemptId/extend
+    const extendRes = await req(`/api/tests/${onlineTest.id}/attempts/${attempt1.id}/extend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        minutes: 15,
+        reason: 'SMOKE network reconnection grant',
+      }),
+    });
+    if (extendRes.status !== 200 || extendRes.body?.data?.extendedMinutes !== 15) {
+      c30Passed = false;
+      c30Errors.push(`Extend attempt failed: status=${extendRes.status}, body=${JSON.stringify(extendRes.body)}`);
+    }
+
+    const extendAudit = await prisma.auditLog.findFirst({
+      where: {
+        action: 'EXTEND_TEST_ATTEMPT',
+        entityId: attempt1.id,
+      },
+    });
+    if (!extendAudit) {
+      c30Passed = false;
+      c30Errors.push('EXTEND_TEST_ATTEMPT audit log entry not found');
+    }
+
+    // 7. Submit test merges final answers + autosaved answers
+    // demoStudent submits question B; question A was already autosaved
+    const submitRes = await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({
+        answers: [{ questionId: qB.id, selectedOptionId: qBCorrectOpt }],
+      }),
+    });
+    if (submitRes.status !== 201 || submitRes.body?.data?.totalMarksObtained !== 20) {
+      c30Passed = false;
+      c30Errors.push(`Submit test failed: status=${submitRes.status}, score=${submitRes.body?.data?.totalMarksObtained}`);
+    }
+
+    // Double submit rejected with 409
+    const doubleSubmitRes = await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+      body: JSON.stringify({ answers: [] }),
+    });
+    if (doubleSubmitRes.status !== 409) {
+      c30Passed = false;
+      c30Errors.push(`Double submit expected 409, got ${doubleSubmitRes.status}`);
+    }
+
+    // 8. Submit by studentB (gets score 20 -> tied with demoStudent)
+    await req(`/api/tests/${onlineTest.id}/start`, { method: 'POST', headers: { Cookie: studentBCookie } });
+    await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentBCookie },
+      body: JSON.stringify({
+        answers: [
+          { questionId: qA.id, selectedOptionId: qACorrectOpt },
+          { questionId: qB.id, selectedOptionId: qBCorrectOpt },
+        ],
+      }),
+    });
+
+    // Submit by studentC (wrong answer on A -> score 0 - 0.5 = -0.5)
+    await req(`/api/tests/${onlineTest.id}/start`, { method: 'POST', headers: { Cookie: studentCCookie } });
+    await req(`/api/tests/${onlineTest.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: studentCCookie },
+      body: JSON.stringify({
+        answers: [
+          { questionId: qA.id, selectedOptionId: qAWrongOpt },
+        ],
+      }),
+    });
+
+    // 9. Check Competition Ranking: ties share rank (1, 1, 3)
+    const resultsStaff = await req(`/api/tests/${onlineTest.id}/results`, {
+      headers: { Cookie: adminCookie },
+    });
+    if (resultsStaff.status !== 200) {
+      c30Passed = false;
+      c30Errors.push(`Get test results failed: status=${resultsStaff.status}`);
+    }
+    const allResults = resultsStaff.body?.data || [];
+    const rankMap = new Map(allResults.map((r: any) => [r.studentId, { score: r.totalMarksObtained, rank: r.rank }]));
+    const studentARank = rankMap.get(demoStudent.id)?.rank;
+    const studentBRank = rankMap.get(smokeStudentB.id)?.rank;
+    const studentCRank = rankMap.get(smokeStudentC.id)?.rank;
+
+    if (studentARank !== 1 || studentBRank !== 1 || studentCRank !== 3) {
+      c30Passed = false;
+      c30Errors.push(`Competition ranking failed: expected (1, 1, 3), got A=${studentARank}, B=${studentBRank}, C=${studentCRank}`);
+    }
+
+    // 10. Zero writes on GET results: re-read results and verify updatedAt timestamps did not change
+    const resultsBefore = await prisma.result.findMany({ where: { testId: onlineTest.id }, select: { id: true, updatedAt: true } });
+    await req(`/api/tests/${onlineTest.id}/results`, { headers: { Cookie: adminCookie } });
+    const resultsAfter = await prisma.result.findMany({ where: { testId: onlineTest.id }, select: { id: true, updatedAt: true } });
+    const anyUpdated = resultsBefore.some((r, i) => r.updatedAt.getTime() !== resultsAfter[i].updatedAt.getTime());
+    if (anyUpdated) {
+      c30Passed = false;
+      c30Errors.push('GET /api/tests/:id/results performed write operations on Result table!');
+    }
+
+    // 11. Lazy finalization of expired attempt
+    const expiredPastTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-Expired-Lazy-Test',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 10,
+        negativeMarkingValue: 0,
+        durationMinutes: 15,
+        testDate: new Date(Date.now() - 90 * 60 * 1000), // 90 min ago
+        windowEndsAt: new Date(Date.now() - 30 * 60 * 1000), // closed 30 min ago
+        createdById: demoAdmin.id,
+      },
+    });
+    createdTestIds.push(expiredPastTest.id);
+
+    const qExp = await prisma.question.create({
+      data: {
+        testId: expiredPastTest.id,
+        type: 'MCQ',
+        text: 'SMOKE-Question-Exp: 1+1?',
+        marks: 10,
+        order: 1,
+        options: {
+          create: [{ text: '2', isCorrect: true }, { text: '0', isCorrect: false }],
+        },
+      },
+      include: { options: true },
+    });
+    const qExpCorrect = qExp.options.find((o) => o.isCorrect)!.id;
+
+    // Create attempt expired 40 min ago with an autosaved answer
+    const expAtt = await prisma.testAttempt.create({
+      data: {
+        testId: expiredPastTest.id,
+        studentId: smokeStudentB.id,
+        status: 'IN_PROGRESS',
+        startedAt: new Date(Date.now() - 80 * 60 * 1000),
+        deadlineAt: new Date(Date.now() - 40 * 60 * 1000), // expired past grace
+        seed: 'smoke-expired-seed',
+      },
+    });
+    await prisma.attemptAnswer.create({
+      data: {
+        attemptId: expAtt.id,
+        questionId: qExp.id,
+        optionId: qExpCorrect,
+      },
+    });
+
+    // Calling GET /attempt triggers lazy finalization
+    const lazyGet = await req(`/api/tests/${expiredPastTest.id}/attempt`, {
+      headers: { Cookie: studentBCookie },
+    });
+    if (lazyGet.status !== 200 || lazyGet.body?.data?.attempt?.status !== 'EXPIRED' || !lazyGet.body?.data?.result) {
+      c30Passed = false;
+      c30Errors.push(`Lazy finalization failed: status=${lazyGet.status}, attStatus=${lazyGet.body?.data?.attempt?.status}`);
+    }
+
+    // 12. Staff bulk finalize: POST /api/tests/:id/finalize
+    await prisma.testAttempt.create({
+      data: {
+        testId: expiredPastTest.id,
+        studentId: smokeStudentC.id,
+        status: 'IN_PROGRESS',
+        startedAt: new Date(Date.now() - 80 * 60 * 1000),
+        deadlineAt: new Date(Date.now() - 40 * 60 * 1000),
+        seed: 'smoke-expired-seed-2',
+      },
+    });
+    const finalizeRes = await req(`/api/tests/${expiredPastTest.id}/finalize`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    if (finalizeRes.status !== 200 || finalizeRes.body?.data?.finalizedCount < 1) {
+      c30Passed = false;
+      c30Errors.push(`Staff finalize failed: status=${finalizeRes.status}, count=${finalizeRes.body?.data?.finalizedCount}`);
+    }
+
+    // 13. Soft archive vs Hard delete for Test
+    // onlineTest has attempts and results -> DELETE soft archives
+    const delOnlineTest = await req(`/api/tests/${onlineTest.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbTestArchived = await prisma.test.findUnique({ where: { id: onlineTest.id } });
+    if (delOnlineTest.status !== 200 || !delOnlineTest.body?.data?.archived || !dbTestArchived?.archivedAt) {
+      c30Passed = false;
+      c30Errors.push(`Soft archive test failed: status=${delOnlineTest.status}, body=${JSON.stringify(delOnlineTest.body)}`);
+    }
+
+    // Restore test
+    const restoreTestRes = await req(`/api/tests/${onlineTest.id}/restore`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    const dbTestRestored = await prisma.test.findUnique({ where: { id: onlineTest.id } });
+    if (restoreTestRes.status !== 200 || dbTestRestored?.archivedAt !== null) {
+      c30Passed = false;
+      c30Errors.push(`Restore test failed: status=${restoreTestRes.status}, archivedAt=${dbTestRestored?.archivedAt}`);
+    }
+
+    // Hard delete truly empty test
+    const emptyTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-Empty-Test',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 10,
+        testDate: new Date(),
+        createdById: demoAdmin.id,
+      },
+    });
+    const delEmptyTest = await req(`/api/tests/${emptyTest.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbEmptyTest = await prisma.test.findUnique({ where: { id: emptyTest.id } });
+    if (delEmptyTest.status !== 200 || !delEmptyTest.body?.data?.deleted || dbEmptyTest !== null) {
+      c30Passed = false;
+      c30Errors.push(`Hard delete empty test failed: status=${delEmptyTest.status}, exists=${!!dbEmptyTest}`);
+    }
+
+    // 14. Soft archive vs Hard delete for Batch
+    // smokeExamBatch has enrollments and tests -> DELETE soft archives
+    const delBatch = await req(`/api/batches/${smokeExamBatch.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbBatchArchived = await prisma.batch.findUnique({ where: { id: smokeExamBatch.id } });
+    if (delBatch.status !== 200 || !delBatch.body?.data?.archived || !dbBatchArchived?.archivedAt) {
+      c30Passed = false;
+      c30Errors.push(`Soft archive batch failed: status=${delBatch.status}, body=${JSON.stringify(delBatch.body)}`);
+    }
+
+    // Enrollment in archived batch rejected with 400
+    const enrollArchived = await req('/api/enrollments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({
+        studentId: demoStudent.id,
+        batchId: smokeExamBatch.id,
+      }),
+    });
+    if (enrollArchived.status !== 400) {
+      c30Passed = false;
+      c30Errors.push(`Enroll in archived batch expected 400, got ${enrollArchived.status}`);
+    }
+
+    // Restore batch
+    const restoreBatchRes = await req(`/api/batches/${smokeExamBatch.id}/restore`, {
+      method: 'POST',
+      headers: { Cookie: adminCookie },
+    });
+    const dbBatchRestored = await prisma.batch.findUnique({ where: { id: smokeExamBatch.id } });
+    if (restoreBatchRes.status !== 200 || dbBatchRestored?.archivedAt !== null) {
+      c30Passed = false;
+      c30Errors.push(`Restore batch failed: status=${restoreBatchRes.status}, archivedAt=${dbBatchRestored?.archivedAt}`);
+    }
+
+    // Hard delete truly empty batch
+    const emptyBatch = await prisma.batch.create({
+      data: {
+        name: 'SMOKE-Empty-Batch',
+        slug: `smoke-empty-batch-${Date.now()}`,
+        type: 'ADMISSION',
+        branchId: demoAdmin.branchId,
+        subjectId: smokeSubject!.id,
+      },
+    });
+    const delEmptyBatch = await req(`/api/batches/${emptyBatch.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: adminCookie },
+    });
+    const dbEmptyBatch = await prisma.batch.findUnique({ where: { id: emptyBatch.id } });
+    if (delEmptyBatch.status !== 200 || !delEmptyBatch.body?.data?.deleted || dbEmptyBatch !== null) {
+      c30Passed = false;
+      c30Errors.push(`Hard delete empty batch failed: status=${delEmptyBatch.status}, exists=${!!dbEmptyBatch}`);
+    }
+
+    const c30Details = c30Passed
+      ? 'Idempotent starts; deterministic seed shuffle; autosave resume; extra time audit; competition ties (1, 1, 3); zero read writes; 409 EXAM_LOCKED protection; lazy & bulk finalize; soft archive & restore for tests and batches'
+      : c30Errors.join('; ');
+
+    recordCheck(
+      '30',
+      'Exam attempts, autosave, deadlines, safe competition ranks, soft archive',
+      c30Passed,
+      c30Details
+    );
   }
 } finally {
     // ─────────────────────────────────────────────────────────────────────────
@@ -3987,7 +4522,23 @@ async function runSmokeTests() {
         await prisma.guardianLink.deleteMany({ where: { id: { in: createdGuardianLinkIds } } });
       }
 
-      // Delete test dependent answers, options, questions, and results before test deletion
+      // Delete test dependent attempts, answers, options, questions, and results before test deletion
+      await prisma.attemptAnswer.deleteMany({
+        where: {
+          OR: [
+            { attempt: { testId: { in: createdTestIds } } },
+            { attempt: { test: { title: { startsWith: 'SMOKE-' } } } },
+          ],
+        },
+      });
+      await prisma.testAttempt.deleteMany({
+        where: {
+          OR: [
+            { testId: { in: createdTestIds } },
+            { test: { title: { startsWith: 'SMOKE-' } } },
+          ],
+        },
+      });
       await prisma.result.deleteMany({
         where: { OR: [{ testId: { in: createdTestIds } }, { test: { title: { startsWith: 'SMOKE-' } } }] },
       });

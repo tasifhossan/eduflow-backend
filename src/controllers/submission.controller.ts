@@ -1,10 +1,12 @@
 import { Request, Response } from 'express';
-import { Role, QuestionType } from '@prisma/client';
+import { Role, QuestionType, AttemptStatus } from '@prisma/client';
 import prisma from '../utils/prisma';
 import { submitAnswersSchema, gradeWrittenAnswerSchema } from '../validators/submission.validator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
 import { escapeHtml } from '../utils/escapeHtml';
+import { EXAM_CONFIG } from '../config/academics.config';
+import { recomputeRanks } from '../utils/ranks';
 
 export async function submitTest(req: Request, res: Response) {
   try {
@@ -44,52 +46,96 @@ export async function submitTest(req: Request, res: Response) {
       },
     });
 
-    if (!test || test.batch.branchId !== branchId) {
+    if (!test || test.archivedAt !== null || test.batch.branchId !== branchId) {
       return res.status(404).json({
         success: false,
-        message: 'Test not found or access denied',
+        message: 'Test not found, archived, or access denied',
       });
     }
 
-    // EXAM-02: Validate exam timing window
-    const now = new Date();
-    const testDate = new Date(test.testDate);
-
-    if (now < testDate) {
-      return res.status(400).json({
-        success: false,
-        message: 'Test has not started yet',
-      });
-    }
-
-    if (test.durationMinutes !== null && test.durationMinutes !== undefined) {
-      const deadline = new Date(testDate.getTime() + (test.durationMinutes * 60 + 60) * 1000); // 60s grace
-      if (now > deadline) {
-        return res.status(400).json({
-          success: false,
-          message: 'Test submission deadline has passed',
-        });
-      }
-    }
-
-    // 2. Verify the student is enrolled in the batch
+    // 2. Verify active enrollment
     const enrollment = await prisma.enrollment.findFirst({
       where: {
         studentId,
         batchId: test.batchId,
+        status: 'ACTIVE',
       },
     });
 
     if (!enrollment) {
       return res.status(403).json({
         success: false,
-        message: 'Forbidden: You are not enrolled in this batch',
+        message: 'Forbidden: You are not actively enrolled in this batch',
       });
     }
 
-    // Run scoring & creation inside a transaction with duplicate check inside
+    // 3. Find attempt
+    const attempt = await prisma.testAttempt.findUnique({
+      where: {
+        testId_studentId: {
+          testId,
+          studentId,
+        },
+      },
+    });
+
+    if (!attempt) {
+      return res.status(400).json({
+        success: false,
+        code: 'ATTEMPT_NOT_STARTED',
+        message: 'No active attempt found. You must start the test before submitting.',
+      });
+    }
+
+    if (attempt.status === AttemptStatus.SUBMITTED) {
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_SUBMITTED',
+        message: 'Test has already been submitted by this student',
+      });
+    }
+
+    // 4. Validate submission deadline (deadlineAt + 30s grace)
+    const now = new Date();
+    const submissionCutoff = new Date(
+      new Date(attempt.deadlineAt).getTime() + EXAM_CONFIG.SUBMISSION_GRACE_SECONDS * 1000
+    );
+
+    if (now > submissionCutoff) {
+      return res.status(400).json({
+        success: false,
+        code: 'ATTEMPT_CLOSED',
+        message: 'Test submission deadline has passed',
+      });
+    }
+
+    // 5. Fetch any autosaved answers to merge
+    const autosavedAnswers = await prisma.attemptAnswer.findMany({
+      where: { attemptId: attempt.id },
+    });
+
+    const mergedAnswerMap = new Map<
+      string,
+      { selectedOptionId: string | null; writtenAnswerText: string | null }
+    >();
+
+    for (const a of autosavedAnswers) {
+      mergedAnswerMap.set(a.questionId, {
+        selectedOptionId: a.optionId,
+        writtenAnswerText: a.textAnswer,
+      });
+    }
+
+    for (const a of answers) {
+      mergedAnswerMap.set(a.questionId, {
+        selectedOptionId: a.selectedOptionId || null,
+        writtenAnswerText: a.writtenAnswerText || null,
+      });
+    }
+
+    // Run scoring & creation inside a transaction
     const finalResult = await prisma.$transaction(async (tx) => {
-      // EXAM-03: Move already-submitted check inside the transaction
+      // Concurrency / double-submit guard
       const existingResult = await tx.result.findUnique({
         where: {
           studentId_testId: {
@@ -107,7 +153,7 @@ export async function submitTest(req: Request, res: Response) {
       const createdAnswers = [];
 
       for (const question of test.questions) {
-        const studentAns = answers.find((a) => a.questionId === question.id);
+        const studentAns = mergedAnswerMap.get(question.id);
 
         let selectedOptionId: string | null = null;
         let writtenAnswerText: string | null = null;
@@ -118,23 +164,18 @@ export async function submitTest(req: Request, res: Response) {
           const correctOption = question.options.find((o) => o.isCorrect);
 
           if (!selectedOptionId) {
-            // Unanswered MCQ
             marksAwarded = 0;
           } else if (correctOption && selectedOptionId === correctOption.id) {
-            // Correct answer
             marksAwarded = question.marks;
           } else {
-            // Wrong answer, apply negative marking
             marksAwarded = -test.negativeMarkingValue;
           }
           totalScore += marksAwarded;
         } else {
-          // WRITTEN answer, graded manually by teacher later
           writtenAnswerText = studentAns?.writtenAnswerText || null;
           marksAwarded = null; // Stays null until graded
         }
 
-        // Create student answer record
         const savedAnswer = await tx.studentAnswer.create({
           data: {
             studentId,
@@ -152,15 +193,33 @@ export async function submitTest(req: Request, res: Response) {
         data: {
           studentId,
           testId,
+          attemptId: attempt.id,
           totalMarksObtained: totalScore,
-          submittedAt: new Date(),
+          submittedAt: now,
         },
       });
+
+      // Update attempt status
+      await tx.testAttempt.update({
+        where: { id: attempt.id },
+        data: {
+          status: AttemptStatus.SUBMITTED,
+          submittedAt: now,
+        },
+      });
+
+      // Recompute ranks atomically under advisory lock
+      await recomputeRanks(testId, tx);
 
       return {
         result: resultRecord,
         answers: createdAnswers,
       };
+    });
+
+    // Re-fetch result with persisted rank
+    const rankedResult = await prisma.result.findUnique({
+      where: { id: finalResult.result.id },
     });
 
     return res.status(201).json({
@@ -169,13 +228,15 @@ export async function submitTest(req: Request, res: Response) {
       data: {
         resultId: finalResult.result.id,
         totalMarksObtained: finalResult.result.totalMarksObtained,
+        rank: rankedResult?.rank ?? null,
         submittedAt: finalResult.result.submittedAt,
       },
     });
   } catch (error: any) {
     if (error?.message === 'ALREADY_SUBMITTED' || error?.code === 'P2002') {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
+        code: 'ALREADY_SUBMITTED',
         message: 'Test has already been submitted by this student',
       });
     }
@@ -199,7 +260,6 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
     const studentAnswerId = req.params.id as string;
     const branchId = req.user.branchId;
 
-    // Validate body
     const parseResult = gradeWrittenAnswerSchema.safeParse({ ...req.body, studentAnswerId });
     if (!parseResult.success) {
       return res.status(400).json({
@@ -211,7 +271,7 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
 
     const { marksAwarded } = parseResult.data;
 
-    // 1. Retrieve the student answer with parent test details
+    // 1. Retrieve student answer with test details
     const studentAnswer = await prisma.studentAnswer.findUnique({
       where: { id: studentAnswerId },
       include: {
@@ -244,13 +304,11 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
 
     // Run grading and result score updates in a transaction
     const updatedResult = await prisma.$transaction(async (tx) => {
-      // 1. Update the StudentAnswer with marksAwarded
       await tx.studentAnswer.update({
         where: { id: studentAnswerId },
         data: { marksAwarded },
       });
 
-      // 2. Fetch all student answers for this test to recalculate total
       const allAnswers = await tx.studentAnswer.findMany({
         where: {
           studentId,
@@ -258,13 +316,14 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
         },
       });
 
-      const totalMarksObtained = allAnswers.reduce(
-        (sum, ans) => sum + (ans.marksAwarded || 0),
-        0
-      );
+      let newTotal = 0;
+      for (const a of allAnswers) {
+        if (a.marksAwarded !== null && a.marksAwarded !== undefined) {
+          newTotal += a.marksAwarded;
+        }
+      }
 
-      // 3. Update the parent Result record
-      return tx.result.update({
+      const resRec = await tx.result.update({
         where: {
           studentId_testId: {
             studentId,
@@ -272,85 +331,74 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
           },
         },
         data: {
-          totalMarksObtained,
+          totalMarksObtained: newTotal,
         },
       });
+
+      await recomputeRanks(testId, tx);
+
+      return resRec;
     });
 
-    // Fire-and-forget: notify student (and linked guardians) when the test is fully graded
-    // A test is "fully graded" when every written answer now has marksAwarded set.
-    const pendingWritten = await prisma.studentAnswer.count({
-      where: {
-        studentId,
-        question: { testId, type: QuestionType.WRITTEN },
-        marksAwarded: null,
+    // Re-fetch result with updated rank
+    const finalizedResult = await prisma.result.findUnique({
+      where: { id: updatedResult.id },
+    });
+
+    // Notification handling (fire-and-forget)
+    const testWithBatch = await prisma.test.findUnique({
+      where: { id: testId },
+      select: {
+        title: true,
+        totalMarks: true,
+        batch: { select: { name: true } },
       },
     });
 
-    if (pendingWritten === 0) {
-      const testWithBatch = await prisma.test.findUnique({
-        where: { id: testId },
-        select: {
-          title: true,
-          totalMarks: true,
-          batch: { select: { name: true } },
-        },
-      });
+    getNotificationRecipients(studentId)
+      .then((recipients) => {
+        if (recipients.student?.email) {
+          sendEmail(
+            [recipients.student.email],
+            `Test Result Graded: ${testWithBatch?.title ?? 'Test'}`,
+            `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+              <h2 style="color:#6366f1">Your Test Has Been Graded</h2>
+              <p>Hi ${escapeHtml(recipients.student.name || 'Student')},</p>
+              <p>Your written submission for <strong>${escapeHtml(testWithBatch?.title ?? 'Test')}</strong> has been graded.</p>
+              <p>Your updated total score is: <strong>${escapeHtml(String(finalizedResult?.totalMarksObtained ?? updatedResult.totalMarksObtained))}</strong>${testWithBatch?.totalMarks != null ? ` / ${escapeHtml(String(testWithBatch.totalMarks))}` : ''}.</p>
+              <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to review feedback.</p>
+            </div>
+            `
+          );
+        }
 
-      getNotificationRecipients(studentId)
-        .then((recipients) => {
-          // 1. Send to Student if available
-          if (recipients.student?.email) {
-            sendEmail(
-              [recipients.student.email],
-              `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
-              `
-              <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-                <h2 style="color:#6366f1">Test Result Available</h2>
-                <p>Dear ${escapeHtml(recipients.student.name)},</p>
-                <p>Your test result for <strong>${escapeHtml(testWithBatch?.title ?? 'Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
-                <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(updatedResult.totalMarksObtained))}</td></tr>
-                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
-                </table>
-                <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
-              </div>
-              `
-            );
-          }
-
-          // 2. Send to Guardian(s) if available
-          for (const guardian of recipients.guardians) {
-            if (!guardian.email) continue;
+        for (const guardian of recipients.guardians) {
+          if (guardian.email) {
             sendEmail(
               [guardian.email],
-              `Test Result Available – ${recipients.student?.name || 'Student'} (${testWithBatch?.batch.name ?? ''})`,
+              `Student Test Result Graded: ${testWithBatch?.title ?? 'Test'}`,
               `
               <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
                 <h2 style="color:#6366f1">Test Result Available</h2>
                 <p>Dear ${escapeHtml(guardian.name || 'Parent/Guardian')},</p>
-                <p>Test result for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> for <strong>${escapeHtml(testWithBatch?.title ?? 'Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
+                <p>Test result for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> has been published:</p>
                 <table style="width:100%;border-collapse:collapse;margin-top:16px">
                   <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
-                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(updatedResult.totalMarksObtained))}</td></tr>
-                  ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
+                  <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(finalizedResult?.totalMarksObtained ?? updatedResult.totalMarksObtained))}</td></tr>
                 </table>
-                <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
               </div>
               `
             );
           }
-        })
-        .catch((err) => console.error('[submission] Notification error:', err));
-    }
+        }
+      })
+      .catch((err) => console.error('[submission] Notification error:', err));
 
     return res.status(200).json({
       success: true,
       message: 'Written answer graded successfully',
-      data: updatedResult,
+      data: finalizedResult ?? updatedResult,
     });
   } catch (error) {
     console.error('Grade written answer error:', error);
@@ -361,6 +409,10 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
   }
 }
 
+/**
+ * GET /api/tests/:testId/results (ADMIN, TEACHER)
+ * Strictly read-only: returns existing ranked results without performing any DB writes.
+ */
 export async function getTestResults(req: Request, res: Response) {
   try {
     if (!req.user) {
@@ -373,7 +425,6 @@ export async function getTestResults(req: Request, res: Response) {
     const testId = req.params.testId as string;
     const branchId = req.user.branchId;
 
-    // Verify test branch ownership
     const test = await prisma.test.findUnique({
       where: { id: testId },
       include: { batch: { select: { branchId: true } } },
@@ -386,7 +437,7 @@ export async function getTestResults(req: Request, res: Response) {
       });
     }
 
-    // Retrieve results sorted by totalMarksObtained desc, including student and their answers for this test
+    // Retrieve results ordered by rank ascending (nulls last) then marks descending. ZERO writes.
     const results = await prisma.result.findMany({
       where: { testId },
       include: {
@@ -413,42 +464,16 @@ export async function getTestResults(req: Request, res: Response) {
           },
         },
       },
-      orderBy: {
-        totalMarksObtained: 'desc',
-      },
+      orderBy: [
+        { rank: 'asc' },
+        { totalMarksObtained: 'desc' },
+      ],
     });
-
-    // Compute ranks and create transaction updates
-    let rank = 1;
-    const updates = [];
-    const rankedResults = [];
-
-    for (let i = 0; i < results.length; i++) {
-      if (i > 0 && results[i].totalMarksObtained < results[i - 1].totalMarksObtained) {
-        rank = i + 1;
-      }
-
-      rankedResults.push({
-        ...results[i],
-        rank,
-      });
-
-      updates.push(
-        prisma.result.update({
-          where: { id: results[i].id },
-          data: { rank },
-        })
-      );
-    }
-
-    if (updates.length > 0) {
-      await prisma.$transaction(updates);
-    }
 
     return res.status(200).json({
       success: true,
-      message: 'Test results retrieved and ranked successfully',
-      data: rankedResults,
+      message: 'Test results retrieved successfully',
+      data: results,
     });
   } catch (error) {
     console.error('Get test results error:', error);
@@ -470,7 +495,7 @@ export async function saveBatchManualResults(req: Request, res: Response) {
 
     const testId = req.params.testId as string;
     const branchId = req.user.branchId;
-    const { results } = req.body; // Array of { studentId: string, marksObtained: number }
+    const { results } = req.body;
 
     if (!Array.isArray(results)) {
       return res.status(400).json({
@@ -491,56 +516,36 @@ export async function saveBatchManualResults(req: Request, res: Response) {
       });
     }
 
-    // Upsert each student result record
-    for (const item of results) {
-      if (typeof item.studentId === 'string' && typeof item.marksObtained === 'number') {
-        await prisma.result.upsert({
-          where: {
-            studentId_testId: {
+    // Upsert each result and recompute ranks in a single transaction
+    await prisma.$transaction(async (tx) => {
+      const now = new Date();
+      for (const item of results) {
+        if (typeof item.studentId === 'string' && typeof item.marksObtained === 'number') {
+          await tx.result.upsert({
+            where: {
+              studentId_testId: {
+                studentId: item.studentId,
+                testId,
+              },
+            },
+            update: {
+              totalMarksObtained: item.marksObtained,
+              submittedAt: now,
+            },
+            create: {
               studentId: item.studentId,
               testId,
+              totalMarksObtained: item.marksObtained,
+              submittedAt: now,
             },
-          },
-          update: {
-            totalMarksObtained: item.marksObtained,
-            submittedAt: new Date(),
-          },
-          create: {
-            studentId: item.studentId,
-            testId,
-            totalMarksObtained: item.marksObtained,
-            submittedAt: new Date(),
-          },
-        });
+          });
+        }
       }
-    }
 
-    // Recalculate ranks across all results for this test
-    const allResults = await prisma.result.findMany({
-      where: { testId },
-      orderBy: { totalMarksObtained: 'desc' },
+      await recomputeRanks(testId, tx);
     });
 
-    let rank = 1;
-    const rankUpdates = [];
-
-    for (let i = 0; i < allResults.length; i++) {
-      if (i > 0 && allResults[i].totalMarksObtained < allResults[i - 1].totalMarksObtained) {
-        rank = i + 1;
-      }
-      rankUpdates.push(
-        prisma.result.update({
-          where: { id: allResults[i].id },
-          data: { rank },
-        })
-      );
-    }
-
-    if (rankUpdates.length > 0) {
-      await prisma.$transaction(rankUpdates);
-    }
-
-    // Fire-and-forget: notify students (and linked guardians) for manual / offline test results
+    // Fire notifications asynchronously
     const testWithBatch = await prisma.test.findUnique({
       where: { id: testId },
       select: {
@@ -556,48 +561,11 @@ export async function saveBatchManualResults(req: Request, res: Response) {
         const marksObtained = item.marksObtained;
         getNotificationRecipients(studentId)
           .then((recipients) => {
-            // 1. Send to Student if available
             if (recipients.student?.email) {
               sendEmail(
                 [recipients.student.email],
-                `Test Result Available – ${testWithBatch?.title ?? 'Test'} (${testWithBatch?.batch.name ?? ''})`,
-                `
-                <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-                  <h2 style="color:#6366f1">Test Result Available</h2>
-                  <p>Dear ${escapeHtml(recipients.student.name)},</p>
-                  <p>Your test result for <strong>${escapeHtml(testWithBatch?.title ?? 'Offline Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
-                  <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(marksObtained))}</td></tr>
-                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
-                  </table>
-                  <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
-                </div>
-                `
-              );
-            }
-
-            // 2. Send to Guardian(s) if available
-            for (const guardian of recipients.guardians) {
-              if (!guardian.email) continue;
-              sendEmail(
-                [guardian.email],
-                `Test Result Available – ${recipients.student?.name || 'Student'} (${testWithBatch?.batch.name ?? ''})`,
-                `
-                <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-                  <h2 style="color:#6366f1">Test Result Available</h2>
-                  <p>Dear ${escapeHtml(guardian.name || 'Parent/Guardian')},</p>
-                  <p>Test result for your child <strong>${escapeHtml(recipients.student?.name || 'Student')}</strong> for <strong>${escapeHtml(testWithBatch?.title ?? 'Offline Test')}</strong> in <strong>${escapeHtml(testWithBatch?.batch.name ?? 'Batch')}</strong> has been published:</p>
-                  <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Test</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.title ?? 'N/A')}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Batch</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(testWithBatch?.batch.name ?? 'N/A')}</td></tr>
-                    <tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Total Marks Obtained</td><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700;color:#6366f1">${escapeHtml(String(marksObtained))}</td></tr>
-                    ${testWithBatch?.totalMarks != null ? `<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:600">Out Of</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(String(testWithBatch.totalMarks))}</td></tr>` : ''}
-                  </table>
-                  <p style="margin-top:16px;color:#6b7280;font-size:13px">Log in to EduFlow to see full details. This is an automated message.</p>
-                </div>
-                `
+                `Test Result Available: ${testWithBatch?.title ?? 'Test'}`,
+                `<p>Your score for <strong>${escapeHtml(testWithBatch?.title ?? 'Test')}</strong> is: <strong>${escapeHtml(String(marksObtained))}</strong>.</p>`
               );
             }
           })
@@ -630,7 +598,6 @@ export async function getStudentResult(req: Request, res: Response) {
     const testId = req.params.testId as string;
     const studentId = req.user.userId;
 
-    // Verify Result exists
     const result = await prisma.result.findUnique({
       where: {
         studentId_testId: {
@@ -647,6 +614,7 @@ export async function getStudentResult(req: Request, res: Response) {
             totalMarks: true,
             testDate: true,
             durationMinutes: true,
+            windowEndsAt: true,
           },
         },
       },
@@ -659,7 +627,6 @@ export async function getStudentResult(req: Request, res: Response) {
       });
     }
 
-    // Retrieve the student's detailed answers
     const answers = await prisma.studentAnswer.findMany({
       where: {
         studentId,
@@ -691,12 +658,14 @@ export async function getStudentResult(req: Request, res: Response) {
       },
     });
 
-    // EXAM-01: for STUDENT callers, strip isCorrect from options until now > testDate + durationMinutes. If durationMinutes is null, treat the end as testDate. Staff roles are unaffected.
+    // Strip isCorrect for students until test window has closed
     let sanitizedAnswers = answers;
     if (req.user.role === Role.STUDENT) {
       const now = new Date();
       const testDate = new Date(result.test.testDate);
-      const testEndTime = result.test.durationMinutes
+      const testEndTime = result.test.windowEndsAt
+        ? new Date(result.test.windowEndsAt)
+        : result.test.durationMinutes
         ? new Date(testDate.getTime() + result.test.durationMinutes * 60 * 1000)
         : testDate;
 

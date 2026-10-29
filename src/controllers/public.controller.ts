@@ -78,6 +78,7 @@ export async function getPublicBatches(req: Request, res: Response) {
     const where: Prisma.BatchWhereInput = {
       isPublished: true,
       slug: { not: null },
+      archivedAt: null,
     };
 
     if (subjectId) {
@@ -281,7 +282,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
       },
     });
 
-    if (!batch || !batch.isPublished) {
+    if (!batch || !batch.isPublished || batch.archivedAt !== null) {
       return res.status(404).json({
         success: false,
         message: 'Batch not found',
@@ -317,6 +318,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
           id: { not: batch.id },
           isPublished: true,
           slug: { not: null },
+          archivedAt: null,
         },
         take: 4,
         orderBy: { createdAt: 'desc' },
@@ -444,7 +446,7 @@ export async function getPublicFilters(req: Request, res: Response) {
         orderBy: { name: 'asc' },
       }),
       prisma.batch.aggregate({
-        where: { isPublished: true, slug: { not: null } },
+        where: { isPublished: true, slug: { not: null }, archivedAt: null },
         _min: { feeAmount: true },
         _max: { feeAmount: true },
       }),
@@ -486,7 +488,7 @@ export async function getPublicStats(req: Request, res: Response) {
     }
 
     const [publishedBatches, branches, publicTeachers, activeStudents, ratingAgg] = await Promise.all([
-      prisma.batch.count({ where: { isPublished: true, slug: { not: null } } }),
+      prisma.batch.count({ where: { isPublished: true, slug: { not: null }, archivedAt: null } }),
       prisma.branch.count({
         where: {
           batches: {
@@ -812,6 +814,7 @@ export async function getPublicSitemap(_req: Request, res: Response) {
         where: {
           isPublished: true,
           slug: { not: null },
+          archivedAt: null,
         },
         select: {
           slug: true,

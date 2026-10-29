@@ -3,6 +3,7 @@ import { QuestionType } from '@prisma/client';
 import { createQuestionSchema } from '../validators/test.validator';
 import { z } from 'zod';
 import prisma from '../utils/prisma';
+import { createAuditLog } from '../utils/audit';
 
 // Helper to verify test ownership
 async function verifyTestOwnership(testId: string, branchId: string): Promise<boolean> {
@@ -11,6 +12,15 @@ async function verifyTestOwnership(testId: string, branchId: string): Promise<bo
     include: { batch: { select: { branchId: true } } },
   });
   return !!test && test.batch.branchId === branchId;
+}
+
+// Helper to check if exam is locked due to attempts or results
+async function isExamLocked(testId: string): Promise<boolean> {
+  const [attemptCount, resultCount] = await Promise.all([
+    prisma.testAttempt.count({ where: { testId } }),
+    prisma.result.count({ where: { testId } }),
+  ]);
+  return attemptCount > 0 || resultCount > 0;
 }
 
 export async function addQuestion(req: Request, res: Response) {
@@ -31,6 +41,24 @@ export async function addQuestion(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    // Check if test is locked
+    if (await isExamLocked(testId)) {
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'EXAM_LOCKED_ATTEMPT',
+        entityType: 'Test',
+        entityId: testId,
+        branchId,
+        metadata: { attemptedAction: 'ADD_QUESTION' },
+        ip: req.ip,
+      });
+      return res.status(409).json({
+        success: false,
+        code: 'EXAM_LOCKED',
+        message: 'Exam is locked because student attempts or results already exist. Questions cannot be created, edited, or deleted. Archive this test and create a new one instead.',
       });
     }
 
@@ -97,6 +125,24 @@ export async function addQuestionsBulk(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    // Check if test is locked
+    if (await isExamLocked(testId)) {
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'EXAM_LOCKED_ATTEMPT',
+        entityType: 'Test',
+        entityId: testId,
+        branchId,
+        metadata: { attemptedAction: 'ADD_QUESTIONS_BULK' },
+        ip: req.ip,
+      });
+      return res.status(409).json({
+        success: false,
+        code: 'EXAM_LOCKED',
+        message: 'Exam is locked because student attempts or results already exist. Questions cannot be created, edited, or deleted. Archive this test and create a new one instead.',
       });
     }
 
@@ -180,6 +226,24 @@ export async function updateQuestion(req: Request, res: Response) {
       });
     }
 
+    // Check if test is locked
+    if (await isExamLocked(existingQuestion.testId)) {
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'EXAM_LOCKED_ATTEMPT',
+        entityType: 'Test',
+        entityId: existingQuestion.testId,
+        branchId,
+        metadata: { attemptedAction: 'UPDATE_QUESTION', questionId: id },
+        ip: req.ip,
+      });
+      return res.status(409).json({
+        success: false,
+        code: 'EXAM_LOCKED',
+        message: 'Exam is locked because student attempts or results already exist. Questions cannot be created, edited, or deleted. Archive this test and create a new one instead.',
+      });
+    }
+
     const parseResult = createQuestionSchema.safeParse(req.body);
     if (!parseResult.success) {
       return res.status(400).json({
@@ -259,6 +323,24 @@ export async function deleteQuestion(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Question not found or access denied',
+      });
+    }
+
+    // Check if test is locked
+    if (await isExamLocked(existingQuestion.testId)) {
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'EXAM_LOCKED_ATTEMPT',
+        entityType: 'Test',
+        entityId: existingQuestion.testId,
+        branchId,
+        metadata: { attemptedAction: 'DELETE_QUESTION', questionId: id },
+        ip: req.ip,
+      });
+      return res.status(409).json({
+        success: false,
+        code: 'EXAM_LOCKED',
+        message: 'Exam is locked because student attempts or results already exist. Questions cannot be created, edited, or deleted. Archive this test and create a new one instead.',
       });
     }
 

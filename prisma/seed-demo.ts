@@ -1,4 +1,4 @@
-import { PrismaClient, Role, BatchType, FeeType, DayOfWeek, AttendanceStatus, PaymentStatus, TestType, QuestionType, LectureStatus, OnlineProvider, AssignmentMode, AssignmentSubmissionStatus, AttachmentKind, Prisma, FeeChargeKind, PaymentMethod, FeeAdjustmentType, FeeChargeSource, PaymentSource } from '@prisma/client';
+import { PrismaClient, Role, BatchType, FeeType, DayOfWeek, AttendanceStatus, PaymentStatus, TestType, QuestionType, LectureStatus, OnlineProvider, AssignmentMode, AssignmentSubmissionStatus, AttachmentKind, Prisma, FeeChargeKind, PaymentMethod, FeeAdjustmentType, FeeChargeSource, PaymentSource, AttemptStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import crypto from 'crypto';
 
@@ -53,6 +53,8 @@ async function main() {
       const testIds = tests.map((t) => t.id);
       if (testIds.length > 0) {
         await prisma.result.deleteMany({ where: { testId: { in: testIds } } });
+        await prisma.attemptAnswer.deleteMany({ where: { attempt: { testId: { in: testIds } } } });
+        await prisma.testAttempt.deleteMany({ where: { testId: { in: testIds } } });
         await prisma.studentAnswer.deleteMany({ where: { question: { testId: { in: testIds } } } });
         await prisma.option.deleteMany({ where: { question: { testId: { in: testIds } } } });
         await prisma.question.deleteMany({ where: { testId: { in: testIds } } });
@@ -548,8 +550,9 @@ async function main() {
   }
 
   // 9. 3 Tests on Demo Batches
-  // Test 1: Currently open (started 15 min ago, 60 min duration)
+  // Test 1: Currently open (started 15 min ago, 60 min duration, +24h window)
   const openTestDate = new Date(Date.now() - 15 * 60 * 1000);
+  const test1WindowEnd = new Date(Date.now() + 24 * 60 * 60 * 1000);
   const test1 = await prisma.test.upsert({
     where: { id: 'demo-test-open-math' },
     update: {
@@ -560,6 +563,9 @@ async function main() {
       negativeMarkingValue: 0.25,
       durationMinutes: 60,
       testDate: openTestDate,
+      windowEndsAt: test1WindowEnd,
+      shuffleQuestions: true,
+      shuffleOptions: true,
       createdById: demoTeacher.id,
     },
     create: {
@@ -571,14 +577,19 @@ async function main() {
       negativeMarkingValue: 0.25,
       durationMinutes: 60,
       testDate: openTestDate,
+      windowEndsAt: test1WindowEnd,
+      shuffleQuestions: true,
+      shuffleOptions: true,
       createdById: demoTeacher.id,
     },
   });
 
   // Questions for Test 1
   const existingQ1 = await prisma.question.findFirst({ where: { testId: test1.id } });
+  let q1Id = existingQ1?.id;
+  let q1OptId: string | undefined;
   if (!existingQ1) {
-    await prisma.question.create({
+    const createdQ1 = await prisma.question.create({
       data: {
         testId: test1.id,
         type: QuestionType.MCQ,
@@ -594,7 +605,10 @@ async function main() {
           ],
         },
       },
+      include: { options: true },
     });
+    q1Id = createdQ1.id;
+    q1OptId = createdQ1.options[0]?.id;
     await prisma.question.create({
       data: {
         testId: test1.id,
@@ -612,6 +626,198 @@ async function main() {
         },
       },
     });
+  } else {
+    const opt = await prisma.option.findFirst({ where: { questionId: q1Id } });
+    q1OptId = opt?.id;
+  }
+
+  // Seed sample attempts on test 1 across enrolled students
+  const test1Students = await prisma.enrollment.findMany({
+    where: { batchId: batches[0].id },
+    select: { studentId: true },
+    take: 5,
+  });
+
+  if (test1Students.length >= 4) {
+    // Attempt 1: IN_PROGRESS by student 0 (demoStudent) with 1 autosaved answer
+    const att1 = await prisma.testAttempt.upsert({
+      where: {
+        testId_studentId: {
+          testId: test1.id,
+          studentId: test1Students[0].studentId,
+        },
+      },
+      update: {
+        status: AttemptStatus.IN_PROGRESS,
+        startedAt: new Date(Date.now() - 10 * 60 * 1000),
+        deadlineAt: new Date(Date.now() + 50 * 60 * 1000),
+        seed: 'demo-seed-in-progress',
+      },
+      create: {
+        testId: test1.id,
+        studentId: test1Students[0].studentId,
+        status: AttemptStatus.IN_PROGRESS,
+        startedAt: new Date(Date.now() - 10 * 60 * 1000),
+        deadlineAt: new Date(Date.now() + 50 * 60 * 1000),
+        seed: 'demo-seed-in-progress',
+      },
+    });
+
+    if (q1Id && q1OptId) {
+      await prisma.attemptAnswer.upsert({
+        where: {
+          attemptId_questionId: {
+            attemptId: att1.id,
+            questionId: q1Id,
+          },
+        },
+        update: { optionId: q1OptId },
+        create: {
+          attemptId: att1.id,
+          questionId: q1Id,
+          optionId: q1OptId,
+        },
+      });
+    }
+
+    // Attempt 2: SUBMITTED by student 1
+    const att2 = await prisma.testAttempt.upsert({
+      where: {
+        testId_studentId: {
+          testId: test1.id,
+          studentId: test1Students[1].studentId,
+        },
+      },
+      update: {
+        status: AttemptStatus.SUBMITTED,
+        startedAt: new Date(Date.now() - 40 * 60 * 1000),
+        submittedAt: new Date(Date.now() - 15 * 60 * 1000),
+        deadlineAt: new Date(Date.now() + 20 * 60 * 1000),
+        seed: 'demo-seed-sub-1',
+      },
+      create: {
+        testId: test1.id,
+        studentId: test1Students[1].studentId,
+        status: AttemptStatus.SUBMITTED,
+        startedAt: new Date(Date.now() - 40 * 60 * 1000),
+        submittedAt: new Date(Date.now() - 15 * 60 * 1000),
+        deadlineAt: new Date(Date.now() + 20 * 60 * 1000),
+        seed: 'demo-seed-sub-1',
+      },
+    });
+
+    await prisma.result.upsert({
+      where: {
+        studentId_testId: {
+          studentId: test1Students[1].studentId,
+          testId: test1.id,
+        },
+      },
+      update: {
+        attemptId: att2.id,
+        totalMarksObtained: 20,
+        rank: 1,
+        submittedAt: new Date(Date.now() - 15 * 60 * 1000),
+      },
+      create: {
+        attemptId: att2.id,
+        studentId: test1Students[1].studentId,
+        testId: test1.id,
+        totalMarksObtained: 20,
+        rank: 1,
+        submittedAt: new Date(Date.now() - 15 * 60 * 1000),
+      },
+    });
+
+    // Attempt 3: SUBMITTED by student 2
+    const att3 = await prisma.testAttempt.upsert({
+      where: {
+        testId_studentId: {
+          testId: test1.id,
+          studentId: test1Students[2].studentId,
+        },
+      },
+      update: {
+        status: AttemptStatus.SUBMITTED,
+        startedAt: new Date(Date.now() - 50 * 60 * 1000),
+        submittedAt: new Date(Date.now() - 25 * 60 * 1000),
+        deadlineAt: new Date(Date.now() + 10 * 60 * 1000),
+        seed: 'demo-seed-sub-2',
+      },
+      create: {
+        testId: test1.id,
+        studentId: test1Students[2].studentId,
+        status: AttemptStatus.SUBMITTED,
+        startedAt: new Date(Date.now() - 50 * 60 * 1000),
+        submittedAt: new Date(Date.now() - 25 * 60 * 1000),
+        deadlineAt: new Date(Date.now() + 10 * 60 * 1000),
+        seed: 'demo-seed-sub-2',
+      },
+    });
+
+    await prisma.result.upsert({
+      where: {
+        studentId_testId: {
+          studentId: test1Students[2].studentId,
+          testId: test1.id,
+        },
+      },
+      update: {
+        attemptId: att3.id,
+        totalMarksObtained: 9.75,
+        rank: 2,
+        submittedAt: new Date(Date.now() - 25 * 60 * 1000),
+      },
+      create: {
+        attemptId: att3.id,
+        studentId: test1Students[2].studentId,
+        testId: test1.id,
+        totalMarksObtained: 9.75,
+        rank: 2,
+        submittedAt: new Date(Date.now() - 25 * 60 * 1000),
+      },
+    });
+
+    // Attempt 4: EXPIRED without result (ready for finalization)
+    const att4 = await prisma.testAttempt.upsert({
+      where: {
+        testId_studentId: {
+          testId: test1.id,
+          studentId: test1Students[3].studentId,
+        },
+      },
+      update: {
+        status: AttemptStatus.IN_PROGRESS,
+        startedAt: new Date(Date.now() - 90 * 60 * 1000),
+        deadlineAt: new Date(Date.now() - 30 * 60 * 1000), // expired 30 min ago
+        seed: 'demo-seed-expired',
+      },
+      create: {
+        testId: test1.id,
+        studentId: test1Students[3].studentId,
+        status: AttemptStatus.IN_PROGRESS,
+        startedAt: new Date(Date.now() - 90 * 60 * 1000),
+        deadlineAt: new Date(Date.now() - 30 * 60 * 1000),
+        seed: 'demo-seed-expired',
+      },
+    });
+
+    if (q1Id && q1OptId) {
+      await prisma.attemptAnswer.upsert({
+        where: {
+          attemptId_questionId: {
+            attemptId: att4.id,
+            questionId: q1Id,
+          },
+        },
+        update: { optionId: q1OptId },
+        create: {
+          attemptId: att4.id,
+          questionId: q1Id,
+          optionId: q1OptId,
+        },
+      });
+    }
   }
 
   // Test 2: Past test (7 days ago) with results for students

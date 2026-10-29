@@ -51,7 +51,7 @@ app.use(cookieParser());
 // Rate limiters
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: process.env.NODE_ENV === 'test' || process.env.DEMO_MODE === 'true' ? 10000 : 1000,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req: Request, res: Response) => {

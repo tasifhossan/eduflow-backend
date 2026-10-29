@@ -57,14 +57,23 @@ export async function updateBatchFee(req: Request, res: Response) {
       });
     }
 
-    const { feeType, feeAmount } = parseResult.data;
+    const { feeType, feeBilling, feeAmount } = parseResult.data;
+
+    const dataToUpdate: Record<string, unknown> = {};
+    if (feeAmount !== undefined) dataToUpdate.feeAmount = feeAmount;
+    if (feeBilling !== undefined) {
+      dataToUpdate.feeBilling = feeBilling;
+      if (feeBilling === 'MONTHLY' || feeBilling === 'ONE_TIME') {
+        dataToUpdate.feeType = feeBilling;
+      }
+    } else if (feeType !== undefined) {
+      dataToUpdate.feeType = feeType;
+      dataToUpdate.feeBilling = feeType;
+    }
 
     const updatedBatch = await prisma.batch.update({
       where: { id },
-      data: {
-        ...(feeType !== undefined && { feeType }),
-        ...(feeAmount !== undefined && { feeAmount }),
-      },
+      data: dataToUpdate,
     });
 
     return res.status(200).json({

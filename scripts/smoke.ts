@@ -227,7 +227,7 @@ async function runSmokeTests() {
     const cliPath = path.resolve('node_modules/tsx/dist/cli.mjs');
     mainServerChild = spawn(process.execPath, [cliPath, 'src/index.ts'], {
       cwd: process.cwd(),
-      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true' },
+      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true', NODE_ENV: 'test' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     mainServerChild.stdout?.on('data', (d: Buffer) => {
@@ -4156,6 +4156,19 @@ async function runSmokeTests() {
       c30Errors.push('Deterministic seed shuffling failed across idempotent start calls');
     }
 
+    // Verify GET test returns identically shuffled question and option sequence
+    const getTestForStudent = await req(`/api/tests/${onlineTest.id}`, {
+      headers: { Cookie: studentCookie },
+    });
+    const questionsFromGet = getTestForStudent.body?.data?.questions;
+    if (
+      !questionsFromGet ||
+      JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questionsFromGet?.map((q: any) => q.id))
+    ) {
+      c30Passed = false;
+      c30Errors.push('Harmonized shuffle mismatch between POST start and GET test');
+    }
+
     // 4. Autosave answers: PUT /api/tests/:id/attempt/answers
     const autosaveRes = await req(`/api/tests/${onlineTest.id}/attempt/answers`, {
       method: 'PUT',
@@ -4203,6 +4216,38 @@ async function runSmokeTests() {
     if (addQBlocked.status !== 409 || updateTestBlocked.status !== 409 || deleteQBlocked.status !== 409) {
       c30Passed = false;
       c30Errors.push(`EXAM_LOCKED check failed: addQ=${addQBlocked.status}, updateTest=${updateTestBlocked.status}, delQ=${deleteQBlocked.status}`);
+    }
+
+    // Verify timing change blocked when results exist without attempts
+    const resultOnlyTest = await prisma.test.create({
+      data: {
+        title: 'SMOKE-ResultOnly-Test',
+        type: 'MCQ',
+        batchId: smokeExamBatch.id,
+        totalMarks: 10,
+        negativeMarkingValue: 0,
+        durationMinutes: 20,
+        testDate: new Date(),
+        createdById: demoAdmin.id,
+      },
+    });
+    createdTestIds.push(resultOnlyTest.id);
+    await prisma.result.create({
+      data: {
+        testId: resultOnlyTest.id,
+        studentId: demoStudent.id,
+        totalMarksObtained: 10,
+        submittedAt: new Date(),
+      },
+    });
+    const updateResultOnlyBlocked = await req(`/api/tests/${resultOnlyTest.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ durationMinutes: 45 }),
+    });
+    if (updateResultOnlyBlocked.status !== 409 || updateResultOnlyBlocked.body?.code !== 'EXAM_LOCKED') {
+      c30Passed = false;
+      c30Errors.push(`Expected 409 EXAM_LOCKED when modifying timing with existing results, got ${updateResultOnlyBlocked.status}`);
     }
 
     // Verify audit log for EXAM_LOCKED_ATTEMPT

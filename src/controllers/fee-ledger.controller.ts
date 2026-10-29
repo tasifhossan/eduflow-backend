@@ -985,11 +985,26 @@ export async function getPayments(req: Request, res: Response) {
       reference: p.reference || null,
       note: p.note || null,
       receivedByName: p.receivedBy.name,
+      receivedBy: {
+        id: p.receivedBy.id,
+        name: p.receivedBy.name,
+      },
       studentId: p.studentId,
       studentName: p.student.name,
       studentCode: p.student.studentCode,
+      student: {
+        id: p.student.id,
+        name: p.student.name,
+        studentCode: p.student.studentCode,
+      },
       isReversed: !!p.reversal,
       reversalReason: p.reversal?.reason || null,
+      reversal: p.reversal
+        ? {
+            reason: p.reversal.reason,
+            reversedAt: p.reversal.reversedAt.toISOString(),
+          }
+        : null,
       allocations: p.allocations.map((a) => ({
         chargeId: a.chargeId,
         chargeDescription: a.charge.description,

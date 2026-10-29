@@ -10,6 +10,7 @@ import env from '../src/config/env';
 import { ATTACHMENT_CONFIG } from '../src/config/academics.config';
 import { FeeLedgerService } from '../src/services/fee-ledger.service';
 import { reconcileFees } from './reconcile-fees';
+import { getApiRateLimitMax, isRelaxedRateLimitEnabled } from '../src/config/rateLimit.config';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION & GLOBAL STATE
@@ -21,6 +22,8 @@ interface CheckResult {
   name: string;
   passed: boolean;
   details: string;
+  assertions: number;
+  durationMs: number;
 }
 
 const checkResults: CheckResult[] = [];
@@ -29,6 +32,7 @@ const leakedSecretLocations: string[] = [];
 const trackedTemporaryPasswords = new Set<string>();
 const noStoreViolations: string[] = [];
 let serverCapturedStdout = '';
+let lastCheckTime = Date.now();
 
 // Allowed endpoints for temporaryPassword:
 // 1. POST /api/auth/register
@@ -134,10 +138,19 @@ function extractCookie(headers: Headers): string {
   return match ? `token=${match[1]}` : '';
 }
 
-function recordCheck(num: string, name: string, passed: boolean, details: string) {
-  checkResults.push({ num, name, passed, details });
+function recordCheck(
+  num: string,
+  name: string,
+  passed: boolean,
+  details: string,
+  assertionsCount: number = 1
+) {
+  const now = Date.now();
+  const durationMs = now - lastCheckTime;
+  lastCheckTime = now;
+  checkResults.push({ num, name, passed, details, assertions: assertionsCount, durationMs });
   const statusStr = passed ? 'PASS' : 'FAIL';
-  console.log(`[${statusStr}] Check ${num}: ${name} - ${details}`);
+  console.log(`[${statusStr}] Check ${num} (${assertionsCount} assertion${assertionsCount > 1 ? 's' : ''}, ${(durationMs / 1000).toFixed(2)}s): ${name} - ${details}`);
 }
 
 // Helper to spawn a temporary auxiliary server instance
@@ -194,6 +207,8 @@ async function withAuxServer(
 // SMOKE TEST RUNNER
 // ─────────────────────────────────────────────────────────────────────────────
 async function runSmokeTests() {
+  const suiteStartTime = Date.now();
+  lastCheckTime = Date.now();
   console.log(`\n========================================================`);
   console.log(`   EduFlow Smoke Tests Starting against ${BASE_URL}`);
   console.log(`========================================================\n`);
@@ -227,7 +242,7 @@ async function runSmokeTests() {
     const cliPath = path.resolve('node_modules/tsx/dist/cli.mjs');
     mainServerChild = spawn(process.execPath, [cliPath, 'src/index.ts'], {
       cwd: process.cwd(),
-      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true', NODE_ENV: 'test' },
+      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true', NODE_ENV: 'test', ALLOW_RELAXED_RATE_LIMIT: 'true' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     mainServerChild.stdout?.on('data', (d: Buffer) => {
@@ -1656,7 +1671,7 @@ async function runSmokeTests() {
         `ExitCode: ${c43ExitCode}, Refusal message detected: ${c43Passed}`
       );
 
-      // Check 44: check-deploy fails when DEMO_MODE=true
+      // Check 44: check-deploy fails when DEMO_MODE=true or ALLOW_RELAXED_RATE_LIMIT=true & prod max=300
       let c44DeployOutput = '';
       let c44ExitCode = 0;
       try {
@@ -1670,14 +1685,51 @@ async function runSmokeTests() {
         c44ExitCode = e.status || 1;
         c44DeployOutput = (e.stdout || '') + (e.stderr || '');
       }
+
+      let c44RelaxedDeployOutput = '';
+      let c44RelaxedExitCode = 0;
+      try {
+        c44RelaxedDeployOutput = execSync('npx tsx scripts/check-deploy.ts', {
+          encoding: 'utf8',
+          env: { ...process.env, DEMO_MODE: 'false', ALLOW_RELAXED_RATE_LIMIT: 'true' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        c44RelaxedExitCode = 0;
+      } catch (e: any) {
+        c44RelaxedExitCode = e.status || 1;
+        c44RelaxedDeployOutput = (e.stdout || '') + (e.stderr || '');
+      }
+
+      // Assert production rate limiter config
+      const prevNodeEnv = process.env.NODE_ENV;
+      const prevRelaxed = process.env.ALLOW_RELAXED_RATE_LIMIT;
+      let prodLimiterEnforces300 = false;
+      try {
+        process.env.NODE_ENV = 'production';
+        process.env.ALLOW_RELAXED_RATE_LIMIT = 'true';
+        prodLimiterEnforces300 = getApiRateLimitMax() === 300 && !isRelaxedRateLimitEnabled();
+      } finally {
+        process.env.NODE_ENV = prevNodeEnv;
+        if (prevRelaxed !== undefined) {
+          process.env.ALLOW_RELAXED_RATE_LIMIT = prevRelaxed;
+        } else {
+          delete process.env.ALLOW_RELAXED_RATE_LIMIT;
+        }
+      }
+
       const c44Passed =
         c44ExitCode !== 0 &&
-        c44DeployOutput.includes('[FAIL] DEMO_MODE is disabled');
+        c44DeployOutput.includes('[FAIL] DEMO_MODE is disabled') &&
+        c44RelaxedExitCode !== 0 &&
+        c44RelaxedDeployOutput.includes('[FAIL] ALLOW_RELAXED_RATE_LIMIT is disabled') &&
+        prodLimiterEnforces300;
+
       recordCheck(
         '44',
-        'check-deploy fails with non-zero exit when DEMO_MODE=true',
+        'check-deploy fails when DEMO_MODE=true or ALLOW_RELAXED_RATE_LIMIT=true & prod max=300',
         c44Passed,
-        `ExitCode: ${c44ExitCode}, FAIL line detected: ${c44Passed}`
+        `DemoExit=${c44ExitCode}, RelaxedExit=${c44RelaxedExitCode}, ProdMax300=${prodLimiterEnforces300}`,
+        4
       );
 
       // Check 45: Homepage settings in GET /api/public/center and PATCH /api/settings
@@ -3989,7 +4041,8 @@ async function runSmokeTests() {
       '11',
       'Decimal money, fee ledger, receipts, dues generation, reversals, accountant role',
       c11Passed,
-      c11Details
+      c11Details,
+      45
     );
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4554,7 +4607,8 @@ async function runSmokeTests() {
       '30',
       'Exam attempts, autosave, deadlines, safe competition ranks, soft archive',
       c30Passed,
-      c30Details
+      c30Details,
+      32
     );
   }
 } finally {
@@ -4785,24 +4839,30 @@ async function runSmokeTests() {
   // ───────────────────────────────────────────────────────────────────────────
   // SUMMARY TABLE
   // ───────────────────────────────────────────────────────────────────────────
-  console.log(`\n========================================================================================`);
-  console.log(`                         EDFLOW SMOKE TEST SUMMARY RESULTS                              `);
-  console.log(`========================================================================================`);
-  console.log(`| Check | Status | Check Description                                   | Details        `);
-  console.log(`|-------|--------|-----------------------------------------------------|----------------`);
+  console.log(`\n========================================================================================================`);
+  console.log(`                               EDFLOW SMOKE TEST SUMMARY RESULTS                                        `);
+  console.log(`========================================================================================================`);
+  console.log(`| Check | Status | Assertions | Time (s) | Check Description                     | Details              `);
+  console.log(`|-------|--------|------------|----------|---------------------------------------|----------------------`);
+  let totalAssertions = 0;
   for (const c of checkResults) {
+    totalAssertions += c.assertions;
     const paddedNum = c.num.padEnd(5);
     const paddedStatus = (c.passed ? 'PASS' : 'FAIL').padEnd(6);
-    const paddedName = c.name.slice(0, 51).padEnd(51);
-    console.log(`| ${paddedNum} | ${paddedStatus} | ${paddedName} | ${c.details.slice(0, 45)}`);
+    const paddedAssert = String(c.assertions).padStart(10);
+    const paddedTime = (c.durationMs / 1000).toFixed(2).padStart(8);
+    const paddedName = c.name.slice(0, 37).padEnd(37);
+    console.log(`| ${paddedNum} | ${paddedStatus} | ${paddedAssert} | ${paddedTime} | ${paddedName} | ${c.details.slice(0, 30)}`);
   }
-  console.log(`========================================================================================`);
+  console.log(`========================================================================================================`);
 
   const totalChecks = checkResults.length;
   const passedChecks = checkResults.filter((r) => r.passed).length;
   const failedChecks = totalChecks - passedChecks;
+  const totalDuration = ((Date.now() - suiteStartTime) / 1000).toFixed(2);
 
-  console.log(`TOTAL: ${totalChecks} | PASSED: ${passedChecks} | FAILED: ${failedChecks}\n`);
+  console.log(`TOTAL CHECKS: ${totalChecks} | PASSED: ${passedChecks} | FAILED: ${failedChecks}`);
+  console.log(`TOTAL ASSERTIONS: ${totalAssertions} | TOTAL RUNTIME: ${totalDuration}s\n`);
 
   if (failedChecks > 0) {
     process.exit(1);

@@ -48,10 +48,12 @@ app.use(helmet());
 app.use(express.json());
 app.use(cookieParser());
 
+import { getApiRateLimitMax } from './config/rateLimit.config';
+
 // Rate limiters
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: process.env.NODE_ENV === 'test' || process.env.DEMO_MODE === 'true' ? 10000 : 1000,
+  max: getApiRateLimitMax(),
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req: Request, res: Response) => {

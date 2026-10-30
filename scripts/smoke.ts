@@ -11,6 +11,7 @@ import { ATTACHMENT_CONFIG } from '../src/config/academics.config';
 import { FeeLedgerService } from '../src/services/fee-ledger.service';
 import { reconcileFees } from './reconcile-fees';
 import { getApiRateLimitMax, isRelaxedRateLimitEnabled } from '../src/config/rateLimit.config';
+import { shuffleArray } from '../src/utils/shuffle';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION & GLOBAL STATE
@@ -3529,6 +3530,38 @@ async function runSmokeTests() {
       c11Errors.push(`POST /api/payments/installment-plan expected 410, got ${legacyPlanRes.status}`);
     }
 
+    // 3b. Legacy read endpoints return 410 Gone
+    const legacyGetMyPayments = await req('/api/payments/my-payments', { headers: { Cookie: studentCookie } });
+    if (legacyGetMyPayments.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/payments/my-payments expected 410, got ${legacyGetMyPayments.status}`);
+    }
+
+    const legacyGetDueSummary = await req('/api/payments/due-summary', { headers: { Cookie: adminCookie } });
+    if (legacyGetDueSummary.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/payments/due-summary expected 410, got ${legacyGetDueSummary.status}`);
+    }
+
+    const legacyGetBatchPayments = await req('/api/batches/dummy-id/payments', { headers: { Cookie: adminCookie } });
+    if (legacyGetBatchPayments.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/batches/:id/payments expected 410, got ${legacyGetBatchPayments.status}`);
+    }
+
+    const legacyGetStudentPayments = await req('/api/students/dummy-id/payments', { headers: { Cookie: adminCookie } });
+    if (legacyGetStudentPayments.status !== 410) {
+      c11Passed = false;
+      c11Errors.push(`GET /api/students/:id/payments expected 410, got ${legacyGetStudentPayments.status}`);
+    }
+
+    // 3c. Exact installment split assertion: 100.00 over 3 installments returns 33.33, 33.33, 33.34
+    const split3 = FeeLedgerService.splitInstallments(new Prisma.Decimal('100.00'), 3).map((d) => d.toFixed(2));
+    if (JSON.stringify(split3) !== JSON.stringify(['33.33', '33.33', '33.34'])) {
+      c11Passed = false;
+      c11Errors.push(`splitInstallments('100.00', 3) expected ['33.33', '33.33', '33.34'], got ${JSON.stringify(split3)}`);
+    }
+
     // 4. Create smoke branch & fixtures
     const smokeFeeBranch = await prisma.branch.create({
       data: { name: 'SMOKE-FEE-BRANCH-DHAKA', address: 'Dhanmondi, Dhaka' },
@@ -4220,6 +4253,17 @@ async function runSmokeTests() {
     ) {
       c30Passed = false;
       c30Errors.push('Harmonized shuffle mismatch between POST start and GET test');
+    }
+
+    // 3b. Regression assertion: Fixed seed with fixed questions and options produces exact expected order
+    const fixedQOrder = shuffleArray(['q1', 'q2', 'q3', 'q4', 'q5'], 'fixed-test-seed-2026:questions');
+    const fixedOptOrder = shuffleArray(['optA', 'optB', 'optC', 'optD'], 'fixed-test-seed-2026:options:q1');
+    if (
+      JSON.stringify(fixedQOrder) !== JSON.stringify(['q5', 'q4', 'q1', 'q2', 'q3']) ||
+      JSON.stringify(fixedOptOrder) !== JSON.stringify(['optC', 'optB', 'optA', 'optD'])
+    ) {
+      c30Passed = false;
+      c30Errors.push(`Deterministic shuffle regression mismatch: Q=${JSON.stringify(fixedQOrder)}, Opt=${JSON.stringify(fixedOptOrder)}`);
     }
 
     // 4. Autosave answers: PUT /api/tests/:id/attempt/answers

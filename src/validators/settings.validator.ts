@@ -177,6 +177,7 @@ export const updateSettingsSchema = z
     defaultLocale: z.enum(['en', 'bn']).optional(),
     academicYearStartMonth: z.number().int().min(1).max(12).optional(),
     weekStartsOn: z.number().int().min(0).max(6).optional(),
+    feeDueDay: z.number().int().min(1).max(28).optional(),
     receiptHeader: z.string().trim().max(500).optional().nullable(),
     receiptFooter: z.string().trim().max(500).optional().nullable(),
     features: z

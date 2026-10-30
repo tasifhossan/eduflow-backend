@@ -255,7 +255,7 @@ export async function startTestAttempt(req: Request, res: Response) {
       }));
 
       if (test.shuffleOptions && q.type === QuestionType.MCQ) {
-        options = shuffleArray(options, `${attempt.seed}_opt_${q.id}`);
+        options = shuffleArray(options, `${attempt.seed}:options:${q.id}`);
       }
 
       return {
@@ -269,7 +269,7 @@ export async function startTestAttempt(req: Request, res: Response) {
     });
 
     if (test.shuffleQuestions) {
-      questions = shuffleArray(questions, `${attempt.seed}_q`);
+      questions = shuffleArray(questions, `${attempt.seed}:questions`);
     }
 
     const remainingSeconds = Math.max(

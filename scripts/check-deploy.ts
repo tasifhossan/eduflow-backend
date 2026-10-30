@@ -86,6 +86,14 @@ async function runChecks(): Promise<boolean> {
     reason: !llmStub ? undefined : 'LLM_STUB is set in production',
   });
 
+  // Check 6b: ALLOW_RELAXED_RATE_LIMIT is not set
+  const relaxedRateLimit = process.env.ALLOW_RELAXED_RATE_LIMIT === 'true';
+  results.push({
+    name: 'ALLOW_RELAXED_RATE_LIMIT is disabled',
+    pass: !relaxedRateLimit,
+    reason: !relaxedRateLimit ? undefined : 'ALLOW_RELAXED_RATE_LIMIT must never be set in production deploy',
+  });
+
   // Check 7: DATABASE_URL reachable
   let dbReachable = false;
   try {

@@ -6,10 +6,6 @@ import {
   updateBatchFee,
   setStudentFee,
   getStudentNetFee,
-  getPaymentsByBatch,
-  getPaymentsByStudent,
-  getDueSummary,
-  getMyPayments,
 } from '../controllers/fee.controller';
 import {
   searchStudents,
@@ -73,11 +69,34 @@ router.post('/payments/installment-plan', authenticate, (_req: Request, res: Res
   });
 });
 
-// Legacy Read Endpoints (keep working on old table until frontend block M2)
-router.get('/payments/my-payments', authenticate, authorize(Role.STUDENT), getMyPayments);
-router.get('/payments/due-summary', authenticate, authorize(Role.ADMIN), getDueSummary);
-router.get('/batches/:batchId/payments', authenticate, authorize(Role.ADMIN), getPaymentsByBatch);
-router.get('/students/:studentId/payments', authenticate, authorize(Role.ADMIN), getPaymentsByStudent);
+// Legacy Read Endpoints -> 410 Gone
+router.get('/payments/my-payments', authenticate, (_req: Request, res: Response) => {
+  return res.status(410).json({
+    success: false,
+    message: 'Legacy endpoint deprecated. Use /api/fees/my-account instead.',
+  });
+});
+
+router.get('/payments/due-summary', authenticate, (_req: Request, res: Response) => {
+  return res.status(410).json({
+    success: false,
+    message: 'Legacy endpoint deprecated. Use /api/fees/dues instead.',
+  });
+});
+
+router.get('/batches/:batchId/payments', authenticate, (_req: Request, res: Response) => {
+  return res.status(410).json({
+    success: false,
+    message: 'Legacy endpoint deprecated. Use /api/fees/payments instead.',
+  });
+});
+
+router.get('/students/:studentId/payments', authenticate, (_req: Request, res: Response) => {
+  return res.status(410).json({
+    success: false,
+    message: 'Legacy endpoint deprecated. Use /api/fees/students/:studentId/account instead.',
+  });
+});
 
 // Batch & enrollment fee config
 router.patch('/batches/:id/fee', authenticate, authorize(Role.ADMIN), updateBatchFee);

@@ -105,6 +105,7 @@ export const collectionReportQuerySchema = z.object({
 // Legacy / Batch / Enrollment Fee Schemas
 export const updateBatchFeeSchema = z.object({
   feeType: z.enum(['MONTHLY', 'ONE_TIME']).optional(),
+  feeBilling: z.enum(['MONTHLY', 'ONE_TIME', 'NONE']).optional(),
   feeAmount: z.coerce.number().min(0).optional(),
 });
 

@@ -352,10 +352,11 @@ export async function updateTest(req: Request, res: Response) {
     const isDurationChanging = durationMinutes !== undefined && durationMinutes !== existingTest.durationMinutes;
 
     if (isTestDateChanging || isDurationChanging) {
-      const attemptsCount = await prisma.testAttempt.count({
-        where: { testId: id },
-      });
-      if (attemptsCount > 0) {
+      const [attemptsCount, resultsCount] = await Promise.all([
+        prisma.testAttempt.count({ where: { testId: id } }),
+        prisma.result.count({ where: { testId: id } }),
+      ]);
+      if (attemptsCount > 0 || resultsCount > 0) {
         await createAuditLog({
           actorId: req.user.userId,
           action: 'EXAM_LOCKED_ATTEMPT',
@@ -368,7 +369,7 @@ export async function updateTest(req: Request, res: Response) {
         return res.status(409).json({
           success: false,
           code: 'EXAM_LOCKED',
-          message: 'Test timing (testDate or durationMinutes) cannot be changed after student attempts have been created.',
+          message: 'Test timing (testDate or durationMinutes) cannot be changed after student attempts or results already exist.',
         });
       }
     }

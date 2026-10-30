@@ -139,19 +139,41 @@ function extractCookie(headers: Headers): string {
   return match ? `token=${match[1]}` : '';
 }
 
+let currentCheckAssertions = 0;
+let currentCheckErrors: string[] = [];
+
+function assert(condition: unknown, message: string): boolean {
+  currentCheckAssertions++;
+  const passed = Boolean(condition);
+  if (!passed) {
+    currentCheckErrors.push(message);
+  }
+  return passed;
+}
+
 function recordCheck(
   num: string,
   name: string,
-  passed: boolean,
-  details: string,
-  assertionsCount: number = 1
+  passed?: boolean,
+  details?: string,
+  _legacyCount?: number
 ) {
   const now = Date.now();
   const durationMs = now - lastCheckTime;
   lastCheckTime = now;
-  checkResults.push({ num, name, passed, details, assertions: assertionsCount, durationMs });
-  const statusStr = passed ? 'PASS' : 'FAIL';
-  console.log(`[${statusStr}] Check ${num} (${assertionsCount} assertion${assertionsCount > 1 ? 's' : ''}, ${(durationMs / 1000).toFixed(2)}s): ${name} - ${details}`);
+
+  const count = currentCheckAssertions > 0 ? currentCheckAssertions : 1;
+  const isPassed = (passed === undefined ? true : passed) && currentCheckErrors.length === 0;
+  const effectiveDetails = isPassed
+    ? (details || 'OK')
+    : (currentCheckErrors.length > 0 ? currentCheckErrors.join('; ') : (details || 'Failed'));
+
+  checkResults.push({ num, name, passed: isPassed, details: effectiveDetails, assertions: count, durationMs });
+  const statusStr = isPassed ? 'PASS' : 'FAIL';
+  console.log(`[${statusStr}] Check ${num} (${count} assertion${count > 1 ? 's' : ''}, ${(durationMs / 1000).toFixed(2)}s): ${name} - ${effectiveDetails}`);
+
+  currentCheckAssertions = 0;
+  currentCheckErrors = [];
 }
 
 // Helper to spawn a temporary auxiliary server instance
@@ -1725,12 +1747,16 @@ async function runSmokeTests() {
         c44RelaxedDeployOutput.includes('[FAIL] ALLOW_RELAXED_RATE_LIMIT is disabled') &&
         prodLimiterEnforces300;
 
+      assert(c44ExitCode !== 0, 'check-deploy fails on DEMO_MODE=true');
+      assert(c44DeployOutput.includes('[FAIL] DEMO_MODE is disabled'), 'check-deploy prints [FAIL] DEMO_MODE is disabled');
+      assert(c44RelaxedExitCode !== 0, 'check-deploy fails on ALLOW_RELAXED_RATE_LIMIT=true');
+      assert(c44RelaxedDeployOutput.includes('[FAIL] ALLOW_RELAXED_RATE_LIMIT is disabled'), 'check-deploy prints [FAIL] ALLOW_RELAXED_RATE_LIMIT is disabled');
+      assert(prodLimiterEnforces300, 'prod rate limiter max is 300 and ignores relaxed flag in production');
       recordCheck(
         '44',
         'check-deploy fails when DEMO_MODE=true or ALLOW_RELAXED_RATE_LIMIT=true & prod max=300',
-        c44Passed,
-        `DemoExit=${c44ExitCode}, RelaxedExit=${c44RelaxedExitCode}, ProdMax300=${prodLimiterEnforces300}`,
-        4
+        undefined,
+        `DemoExit=${c44ExitCode}, RelaxedExit=${c44RelaxedExitCode}, ProdMax300=${prodLimiterEnforces300}`
       );
 
       // Check 45: Homepage settings in GET /api/public/center and PATCH /api/settings
@@ -2972,38 +2998,17 @@ async function runSmokeTests() {
       }
     }
 
-    const c9Passed =
-      !secretKeyDetected &&
-      !tempPassLeakedInStdout &&
-      !tempPassLeakedInAuditLog &&
-      noStoreViolations.length === 0 &&
-      trackedTemporaryPasswords.size >= 3;
-
-    let c9Details = '';
-    if (secretKeyDetected) {
-      c9Details += `Disallowed secret key leaked at: ${leakedSecretLocations.join(', ')}; `;
-    }
-    if (tempPassLeakedInStdout) {
-      c9Details += `Temporary password leaked in server stdout (${stdoutLeakDetails.length} instances); `;
-    }
-    if (tempPassLeakedInAuditLog) {
-      c9Details += `Temporary password leaked in AuditLog (${auditLeakDetails.join(', ')}); `;
-    }
-    if (noStoreViolations.length > 0) {
-      c9Details += `Missing no-store headers at: ${noStoreViolations.join('; ')}; `;
-    }
-    if (trackedTemporaryPasswords.size < 3) {
-      c9Details += `Expected >= 3 temporary passwords tracked, got ${trackedTemporaryPasswords.size}; `;
-    }
-    if (c9Passed) {
-      c9Details = `All responses free of unauthorized secrets; no-store verified on credential responses; ${trackedTemporaryPasswords.size} temp passwords tracked and absent from server stdout & AuditLog`;
-    }
+    assert(!secretKeyDetected, `Disallowed secret key leaked at: ${leakedSecretLocations.join(', ')}`);
+    assert(!tempPassLeakedInStdout, `Temporary password leaked in server stdout (${stdoutLeakDetails.length} instances)`);
+    assert(!tempPassLeakedInAuditLog, `Temporary password leaked in AuditLog (${auditLeakDetails.join(', ')})`);
+    assert(noStoreViolations.length === 0, `Missing no-store headers at: ${noStoreViolations.join('; ')}`);
+    assert(trackedTemporaryPasswords.size >= 3, `Expected >= 3 temporary passwords tracked, got ${trackedTemporaryPasswords.size}`);
 
     recordCheck(
       '9',
       'Credential leak scan, stdout/auditlog isolation & no-store headers',
-      c9Passed,
-      c9Details
+      undefined,
+      `All responses free of unauthorized secrets; no-store verified on credential responses; ${trackedTemporaryPasswords.size} temp passwords tracked and absent from server stdout & AuditLog`
     );
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -3011,8 +3016,6 @@ async function runSmokeTests() {
     // ─────────────────────────────────────────────────────────────────────────
     {
       console.log('\n--- Check 10: Public Content, Editable About/Legal, Sitemap & Related Posts ---');
-    let c10Passed = true;
-    const c10Errors: string[] = [];
 
     // 1. Authenticate or create a SUPER_ADMIN user
     let superAdminUser = await prisma.user.findFirst({
@@ -3044,50 +3047,35 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
       body: JSON.stringify({ officeHours: '<script>alert(1)</script>' }),
     });
-    if (htmlOfficeHoursRes.status !== 400) {
-      c10Passed = false;
-      c10Errors.push(`Expected officeHours HTML to be rejected with 400, got ${htmlOfficeHoursRes.status}`);
-    }
+    assert(!(htmlOfficeHoursRes.status !== 400), `Expected officeHours HTML to be rejected with 400, got ${htmlOfficeHoursRes.status}`);
 
     const htmlAboutRes = await req('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
       body: JSON.stringify({ about: { headline: '<b>Headline</b>' } }),
     });
-    if (htmlAboutRes.status !== 400) {
-      c10Passed = false;
-      c10Errors.push(`Expected about.headline HTML to be rejected with 400, got ${htmlAboutRes.status}`);
-    }
+    assert(!(htmlAboutRes.status !== 400), `Expected about.headline HTML to be rejected with 400, got ${htmlAboutRes.status}`);
 
     const htmlLegalRes = await req('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
       body: JSON.stringify({ legal: { privacyText: '<p>Paragraph</p>' } }),
     });
-    if (htmlLegalRes.status !== 400) {
-      c10Passed = false;
-      c10Errors.push(`Expected legal.privacyText HTML to be rejected with 400, got ${htmlLegalRes.status}`);
-    }
+    assert(!(htmlLegalRes.status !== 400), `Expected legal.privacyText HTML to be rejected with 400, got ${htmlLegalRes.status}`);
 
     const oversizedRes = await req('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
       body: JSON.stringify({ officeHours: 'H'.repeat(125), about: { headline: 'H'.repeat(95) } }),
     });
-    if (oversizedRes.status !== 400) {
-      c10Passed = false;
-      c10Errors.push(`Expected oversized text to be rejected with 400, got ${oversizedRes.status}`);
-    }
+    assert(!(oversizedRes.status !== 400), `Expected oversized text to be rejected with 400, got ${oversizedRes.status}`);
 
     const controlCharRes = await req('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
       body: JSON.stringify({ officeHours: 'Hours\x00' }),
     });
-    if (controlCharRes.status !== 400) {
-      c10Passed = false;
-      c10Errors.push(`Expected control characters to be rejected with 400, got ${controlCharRes.status}`);
-    }
+    assert(!(controlCharRes.status !== 400), `Expected control characters to be rejected with 400, got ${controlCharRes.status}`);
 
     // 3. Valid Settings Update & Audit Log Check
     const validSettingsUpdate = await req('/api/settings', {
@@ -3109,10 +3097,7 @@ async function runSmokeTests() {
         },
       }),
     });
-    if (validSettingsUpdate.status !== 200) {
-      c10Passed = false;
-      c10Errors.push(`Expected valid settings update to return 200, got ${validSettingsUpdate.status}`);
-    }
+    assert(!(validSettingsUpdate.status !== 200), `Expected valid settings update to return 200, got ${validSettingsUpdate.status}`);
 
     // Verify audit log recorded changed field names only (never full content)
     const latestAuditLog = await prisma.auditLog.findFirst({
@@ -3120,50 +3105,26 @@ async function runSmokeTests() {
       orderBy: { createdAt: 'desc' },
     });
     const changedFields = (latestAuditLog?.metadata as any)?.changedFields;
-    if (!Array.isArray(changedFields) || !changedFields.includes('about') || !changedFields.includes('officeHours')) {
-      c10Passed = false;
-      c10Errors.push('AuditLog metadata did not record changed field names properly');
-    }
+    assert(!(!Array.isArray(changedFields) || !changedFields.includes('about') || !changedFields.includes('officeHours')), 'AuditLog metadata did not record changed field names properly');
     const auditRaw = JSON.stringify(latestAuditLog?.metadata || {});
-    if (auditRaw.includes('SMOKE Future of Learning') || auditRaw.includes('SMOKE Custom Privacy')) {
-      c10Passed = false;
-      c10Errors.push('AuditLog leaked sensitive content into metadata');
-    }
+    assert(!(auditRaw.includes('SMOKE Future of Learning') || auditRaw.includes('SMOKE Custom Privacy')), 'AuditLog leaked sensitive content into metadata');
 
     // 4. Public Center & Content Summary
     const publicCenterRes = await req('/api/public/center');
-    if (publicCenterRes.status !== 200) {
-      c10Passed = false;
-      c10Errors.push(`GET /api/public/center returned status ${publicCenterRes.status}`);
-    }
-    if (publicCenterRes.body?.data?.officeHours !== 'SMOKE Sat-Thu 9am-6pm') {
-      c10Passed = false;
-      c10Errors.push(`officeHours not returned correctly in /api/public/center`);
-    }
+    assert(!(publicCenterRes.status !== 200), `GET /api/public/center returned status ${publicCenterRes.status}`);
+    assert(!(publicCenterRes.body?.data?.officeHours !== 'SMOKE Sat-Thu 9am-6pm'), `officeHours not returned correctly in /api/public/center`);
     const content = publicCenterRes.body?.data?.content;
-    if (!content || typeof content.hasAbout !== 'boolean' || content.hasAbout !== true) {
-      c10Passed = false;
-      c10Errors.push(`content.hasAbout should be true when about headline/body is set`);
-    }
+    assert(!(!content || typeof content.hasAbout !== 'boolean' || content.hasAbout !== true), `content.hasAbout should be true when about headline/body is set`);
 
     // 5. Pages Endpoints
     const aboutPageRes = await req('/api/public/pages/about');
-    if (aboutPageRes.status !== 200 || aboutPageRes.body?.data?.headline !== 'SMOKE Future of Learning') {
-      c10Passed = false;
-      c10Errors.push(`GET /api/public/pages/about failed: status ${aboutPageRes.status}`);
-    }
+    assert(!(aboutPageRes.status !== 200 || aboutPageRes.body?.data?.headline !== 'SMOKE Future of Learning'), `GET /api/public/pages/about failed: status ${aboutPageRes.status}`);
 
     const privacyPageRes = await req('/api/public/pages/privacy');
-    if (privacyPageRes.status !== 200 || privacyPageRes.body?.data?.text !== 'SMOKE Custom Privacy Policy Content') {
-      c10Passed = false;
-      c10Errors.push(`GET /api/public/pages/privacy failed: status ${privacyPageRes.status}`);
-    }
+    assert(!(privacyPageRes.status !== 200 || privacyPageRes.body?.data?.text !== 'SMOKE Custom Privacy Policy Content'), `GET /api/public/pages/privacy failed: status ${privacyPageRes.status}`);
 
     const termsPageRes = await req('/api/public/pages/terms');
-    if (termsPageRes.status !== 200 || termsPageRes.body?.data?.text !== 'SMOKE Custom Terms of Service Content') {
-      c10Passed = false;
-      c10Errors.push(`GET /api/public/pages/terms failed: status ${termsPageRes.status}`);
-    }
+    assert(!(termsPageRes.status !== 200 || termsPageRes.body?.data?.text !== 'SMOKE Custom Terms of Service Content'), `GET /api/public/pages/terms failed: status ${termsPageRes.status}`);
 
     // Toggle publicSite off: privacy & terms stay 200, about becomes 404
     await req('/api/settings', {
@@ -3173,35 +3134,21 @@ async function runSmokeTests() {
     });
 
     const aboutOffRes = await req('/api/public/pages/about');
-    if (aboutOffRes.status !== 404) {
-      c10Passed = false;
-      c10Errors.push(`Expected /pages/about to return 404 when publicSite is off, got ${aboutOffRes.status}`);
-    }
+    assert(!(aboutOffRes.status !== 404), `Expected /pages/about to return 404 when publicSite is off, got ${aboutOffRes.status}`);
 
     const privacyOffRes = await req('/api/public/pages/privacy');
-    if (privacyOffRes.status !== 200 || !privacyOffRes.body?.data?.text) {
-      c10Passed = false;
-      c10Errors.push(`Expected /pages/privacy to stay available (200) when publicSite is off, got ${privacyOffRes.status}`);
-    }
+    assert(!(privacyOffRes.status !== 200 || !privacyOffRes.body?.data?.text), `Expected /pages/privacy to stay available (200) when publicSite is off, got ${privacyOffRes.status}`);
 
     const termsOffRes = await req('/api/public/pages/terms');
-    if (termsOffRes.status !== 200 || !termsOffRes.body?.data?.text) {
-      c10Passed = false;
-      c10Errors.push(`Expected /pages/terms to stay available (200) when publicSite is off, got ${termsOffRes.status}`);
-    }
+    assert(!(termsOffRes.status !== 200 || !termsOffRes.body?.data?.text), `Expected /pages/terms to stay available (200) when publicSite is off, got ${termsOffRes.status}`);
 
     // Dynamic content summary reflection: when publicSite is off, all content flags are false
     const centerOffRes = await req('/api/public/center');
     const contentOff = centerOffRes.body?.data?.content;
-    if (
-      contentOff?.hasPublishedBatches !== false ||
+    assert(!(contentOff?.hasPublishedBatches !== false ||
       contentOff?.hasBlog !== false ||
       contentOff?.hasAbout !== false ||
-      contentOff?.hasFaq !== false
-    ) {
-      c10Passed = false;
-      c10Errors.push(`Expected all content flags to be false when publicSite is off`);
-    }
+      contentOff?.hasFaq !== false), `Expected all content flags to be false when publicSite is off`);
 
     // Re-enable publicSite
     await req('/api/settings', {
@@ -3217,10 +3164,7 @@ async function runSmokeTests() {
       body: JSON.stringify({ about: null }),
     });
     const aboutEmptyRes = await req('/api/public/pages/about');
-    if (aboutEmptyRes.status !== 404) {
-      c10Passed = false;
-      c10Errors.push(`Expected /pages/about to return 404 when about is null, got ${aboutEmptyRes.status}`);
-    }
+    assert(!(aboutEmptyRes.status !== 404), `Expected /pages/about to return 404 when about is null, got ${aboutEmptyRes.status}`);
 
     // 6. Sitemap Feed Verification
     const sampleSubject = await prisma.subject.findFirst();
@@ -3283,10 +3227,7 @@ async function runSmokeTests() {
     });
 
     const sitemapRes = await req('/api/public/sitemap');
-    if (sitemapRes.status !== 200) {
-      c10Passed = false;
-      c10Errors.push(`GET /api/public/sitemap returned status ${sitemapRes.status}`);
-    }
+    assert(!(sitemapRes.status !== 200), `GET /api/public/sitemap returned status ${sitemapRes.status}`);
     const sitemapBatches = sitemapRes.body?.data?.batches || [];
     const sitemapBlogPosts = sitemapRes.body?.data?.blogPosts || [];
 
@@ -3295,14 +3236,8 @@ async function runSmokeTests() {
     const hasPubPost = sitemapBlogPosts.some((p: any) => p.slug === pubPost.slug);
     const hasDraftPost = sitemapBlogPosts.some((p: any) => p.slug === draftPost.slug);
 
-    if (!hasPubBatch || hasUnpubBatch) {
-      c10Passed = false;
-      c10Errors.push(`Sitemap batch filtering failed: hasPubBatch=${hasPubBatch}, hasUnpubBatch=${hasUnpubBatch}`);
-    }
-    if (!hasPubPost || hasDraftPost) {
-      c10Passed = false;
-      c10Errors.push(`Sitemap blog filtering failed: hasPubPost=${hasPubPost}, hasDraftPost=${hasDraftPost}`);
-    }
+    assert(!(!hasPubBatch || hasUnpubBatch), `Sitemap batch filtering failed: hasPubBatch=${hasPubBatch}, hasUnpubBatch=${hasUnpubBatch}`);
+    assert(!(!hasPubPost || hasDraftPost), `Sitemap blog filtering failed: hasPubPost=${hasPubPost}, hasDraftPost=${hasDraftPost}`);
 
     // Sitemap respects publicSite and blog flags
     await req('/api/settings', {
@@ -3311,13 +3246,8 @@ async function runSmokeTests() {
       body: JSON.stringify({ features: { publicSite: false } }),
     });
     const sitemapDisabledRes = await req('/api/public/sitemap');
-    if (
-      sitemapDisabledRes.body?.data?.batches?.length !== 0 ||
-      sitemapDisabledRes.body?.data?.blogPosts?.length !== 0
-    ) {
-      c10Passed = false;
-      c10Errors.push(`Expected sitemap to return empty arrays when publicSite is off`);
-    }
+    assert(!(sitemapDisabledRes.body?.data?.batches?.length !== 0 ||
+      sitemapDisabledRes.body?.data?.blogPosts?.length !== 0), `Expected sitemap to return empty arrays when publicSite is off`);
 
     await req('/api/settings', {
       method: 'PATCH',
@@ -3325,10 +3255,7 @@ async function runSmokeTests() {
       body: JSON.stringify({ features: { publicSite: true, blog: false } }),
     });
     const sitemapBlogOffRes = await req('/api/public/sitemap');
-    if (sitemapBlogOffRes.body?.data?.blogPosts?.length !== 0) {
-      c10Passed = false;
-      c10Errors.push(`Expected sitemap blogPosts to be empty when blog flag is off`);
-    }
+    assert(!(sitemapBlogOffRes.body?.data?.blogPosts?.length !== 0), `Expected sitemap blogPosts to be empty when blog flag is off`);
 
     // Restore blog: true
     await req('/api/settings', {
@@ -3374,30 +3301,16 @@ async function runSmokeTests() {
     createdBlogPostIds.push(postA.id, postB.id, postC.id);
 
     const postDetailRes = await req(`/api/blog/${postA.slug}`);
-    if (postDetailRes.status !== 200) {
-      c10Passed = false;
-      c10Errors.push(`GET /api/blog/${postA.slug} failed: status ${postDetailRes.status}`);
-    }
+    assert(!(postDetailRes.status !== 200), `GET /api/blog/${postA.slug} failed: status ${postDetailRes.status}`);
     const relatedPosts = postDetailRes.body?.data?.relatedPosts;
-    if (!Array.isArray(relatedPosts)) {
-      c10Passed = false;
-      c10Errors.push(`relatedPosts missing or not an array`);
-    } else {
+    assert(Array.isArray(relatedPosts), `relatedPosts missing or not an array`);
+    if (Array.isArray(relatedPosts)) {
       const containsItself = relatedPosts.some((p: any) => p.slug === postA.slug);
       const containsB = relatedPosts.some((p: any) => p.slug === postB.slug);
       const containsC = relatedPosts.some((p: any) => p.slug === postC.slug);
-      if (containsItself) {
-        c10Passed = false;
-        c10Errors.push(`relatedPosts contains itself (postA)`);
-      }
-      if (!containsB || !containsC) {
-        c10Passed = false;
-        c10Errors.push(`relatedPosts did not contain same category posts (postB/postC)`);
-      }
-      if (relatedPosts.length > 3) {
-        c10Passed = false;
-        c10Errors.push(`relatedPosts length exceeds 3`);
-      }
+      assert(!containsItself, `relatedPosts contains itself (postA)`);
+      assert(containsB && containsC, `relatedPosts did not contain same category posts (postB/postC)`);
+      assert(relatedPosts.length <= 3, `relatedPosts length exceeds 3`);
     }
 
     // 8. Contact Enquiry with optional interestedBatchId
@@ -3411,18 +3324,12 @@ async function runSmokeTests() {
         interestedBatchId: pubBatch.id,
       }),
     });
-    if (validBatchContactRes.status !== 200) {
-      c10Passed = false;
-      c10Errors.push(`Contact enquiry with published batch failed: ${validBatchContactRes.status}`);
-    }
+    assert(!(validBatchContactRes.status !== 200), `Contact enquiry with published batch failed: ${validBatchContactRes.status}`);
     const savedContactValid = await prisma.contactMessage.findFirst({
       where: { name: 'SMOKE Batch Enquirer' },
       orderBy: { createdAt: 'desc' },
     });
-    if (!savedContactValid || savedContactValid.interestedBatchId !== pubBatch.id) {
-      c10Passed = false;
-      c10Errors.push(`Expected contact message interestedBatchId to be ${pubBatch.id}, got ${savedContactValid?.interestedBatchId}`);
-    }
+    assert(!(!savedContactValid || savedContactValid.interestedBatchId !== pubBatch.id), `Expected contact message interestedBatchId to be ${pubBatch.id}, got ${savedContactValid?.interestedBatchId}`);
 
     const invalidBatchContactRes = await req('/api/contact', {
       method: 'POST',
@@ -3434,36 +3341,24 @@ async function runSmokeTests() {
         interestedBatchId: unpubBatch.id,
       }),
     });
-    if (invalidBatchContactRes.status !== 200) {
-      c10Passed = false;
-      c10Errors.push(`Contact enquiry with unpublished batch should succeed silently, got ${invalidBatchContactRes.status}`);
-    }
+    assert(!(invalidBatchContactRes.status !== 200), `Contact enquiry with unpublished batch should succeed silently, got ${invalidBatchContactRes.status}`);
     const savedContactInvalid = await prisma.contactMessage.findFirst({
       where: { name: 'SMOKE Invalid Batch Enquirer' },
       orderBy: { createdAt: 'desc' },
     });
-    if (!savedContactInvalid || savedContactInvalid.interestedBatchId !== null) {
-      c10Passed = false;
-      c10Errors.push(`Expected contact message interestedBatchId to be null for unpublished batch, got ${savedContactInvalid?.interestedBatchId}`);
-    }
-
-    const c10Details = c10Passed
-      ? 'CenterSettings validation rejects HTML/oversized; content flags reflect toggles; pages & sitemap respect flags; relatedPosts exclude current post; interestedBatchId validated silently'
-      : c10Errors.join('; ');
+    assert(!(!savedContactInvalid || savedContactInvalid.interestedBatchId !== null), `Expected contact message interestedBatchId to be null for unpublished batch, got ${savedContactInvalid?.interestedBatchId}`);
 
     recordCheck(
       '10',
       'Public content, editable about/legal, sitemap feed & related posts',
-      c10Passed,
-      c10Details
+      undefined,
+      'CenterSettings validation rejects HTML/oversized; content flags reflect toggles; pages & sitemap respect flags; relatedPosts exclude current post; interestedBatchId validated silently'
     );
 
     // ─────────────────────────────────────────────────────────────────────────
     // 11. DECIMAL MONEY & APPEND-ONLY FEE LEDGER (FEE-LEDGER)
     // ─────────────────────────────────────────────────────────────────────────
     console.log('\n--- Running Check 11: Fee Ledger, Receipts, Dues, Reversals, Decimal Money & Accountant Role ---');
-    let c11Passed = true;
-    const c11Errors: string[] = [];
 
     // 1. information_schema check: verify no Float or double precision money columns in active tables
     const moneyCols: any[] = await prisma.$queryRaw`
@@ -3474,30 +3369,19 @@ async function runSmokeTests() {
         AND column_name IN ('feeAmount', 'customFeeAmount', 'discountValue', 'amount')
         AND data_type NOT IN ('numeric', 'decimal');
     `;
-    if (moneyCols.length > 0) {
-      c11Passed = false;
-      c11Errors.push(`Found non-decimal money columns: ${JSON.stringify(moneyCols)}`);
-    }
+    assert(!(moneyCols.length > 0), `Found non-decimal money columns: ${JSON.stringify(moneyCols)}`);
 
     // 2. Exact Decimal arithmetic
     const splits = FeeLedgerService.splitInstallments(new Prisma.Decimal('100.00'), 3);
-    if (
-      splits.length !== 3 ||
+    assert(!(splits.length !== 3 ||
       splits[0].toString() !== '33.33' ||
       splits[1].toString() !== '33.33' ||
       splits[2].toString() !== '33.34' ||
-      !splits[0].add(splits[1]).add(splits[2]).equals(new Prisma.Decimal('100.00'))
-    ) {
-      c11Passed = false;
-      c11Errors.push(`splitInstallments failed exact penny test: ${splits.map((s) => s.toString()).join(', ')}`);
-    }
+      !splits[0].add(splits[1]).add(splits[2]).equals(new Prisma.Decimal('100.00'))), `splitInstallments failed exact penny test: ${splits.map((s) => s.toString()).join(', ')}`);
 
     const discountUnrounded = new Prisma.Decimal('100.00').mul(new Prisma.Decimal('15.555')).div(100);
     const discountRounded = FeeLedgerService.round(discountUnrounded);
-    if (discountRounded.toString() !== '15.56') {
-      c11Passed = false;
-      c11Errors.push(`Decimal percent discount rounding expected 15.56, got ${discountRounded.toString()}`);
-    }
+    assert(!(discountRounded.toString() !== '15.56'), `Decimal percent discount rounding expected 15.56, got ${discountRounded.toString()}`);
 
     // 3. Legacy write endpoints return 410 Gone
     const legacyPayRes = await req('/api/payments', {
@@ -3505,62 +3389,38 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
       body: JSON.stringify({ studentId: 'none', batchId: 'none', period: '2026-10' }),
     });
-    if (legacyPayRes.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`POST /api/payments expected 410, got ${legacyPayRes.status}`);
-    }
+    assert(!(legacyPayRes.status !== 410), `POST /api/payments expected 410, got ${legacyPayRes.status}`);
 
     const legacyPatchRes = await req('/api/payments/test-id', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
       body: JSON.stringify({ amountPaid: 100 }),
     });
-    if (legacyPatchRes.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`PATCH /api/payments/:id expected 410, got ${legacyPatchRes.status}`);
-    }
+    assert(!(legacyPatchRes.status !== 410), `PATCH /api/payments/:id expected 410, got ${legacyPatchRes.status}`);
 
     const legacyPlanRes = await req('/api/payments/installment-plan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
       body: JSON.stringify({ studentId: 'none', batchId: 'none', installments: [] }),
     });
-    if (legacyPlanRes.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`POST /api/payments/installment-plan expected 410, got ${legacyPlanRes.status}`);
-    }
+    assert(!(legacyPlanRes.status !== 410), `POST /api/payments/installment-plan expected 410, got ${legacyPlanRes.status}`);
 
     // 3b. Legacy read endpoints return 410 Gone
     const legacyGetMyPayments = await req('/api/payments/my-payments', { headers: { Cookie: studentCookie } });
-    if (legacyGetMyPayments.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/payments/my-payments expected 410, got ${legacyGetMyPayments.status}`);
-    }
+    assert(!(legacyGetMyPayments.status !== 410), `GET /api/payments/my-payments expected 410, got ${legacyGetMyPayments.status}`);
 
     const legacyGetDueSummary = await req('/api/payments/due-summary', { headers: { Cookie: adminCookie } });
-    if (legacyGetDueSummary.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/payments/due-summary expected 410, got ${legacyGetDueSummary.status}`);
-    }
+    assert(!(legacyGetDueSummary.status !== 410), `GET /api/payments/due-summary expected 410, got ${legacyGetDueSummary.status}`);
 
     const legacyGetBatchPayments = await req('/api/batches/dummy-id/payments', { headers: { Cookie: adminCookie } });
-    if (legacyGetBatchPayments.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/batches/:id/payments expected 410, got ${legacyGetBatchPayments.status}`);
-    }
+    assert(!(legacyGetBatchPayments.status !== 410), `GET /api/batches/:id/payments expected 410, got ${legacyGetBatchPayments.status}`);
 
     const legacyGetStudentPayments = await req('/api/students/dummy-id/payments', { headers: { Cookie: adminCookie } });
-    if (legacyGetStudentPayments.status !== 410) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/students/:id/payments expected 410, got ${legacyGetStudentPayments.status}`);
-    }
+    assert(!(legacyGetStudentPayments.status !== 410), `GET /api/students/:id/payments expected 410, got ${legacyGetStudentPayments.status}`);
 
     // 3c. Exact installment split assertion: 100.00 over 3 installments returns 33.33, 33.33, 33.34
     const split3 = FeeLedgerService.splitInstallments(new Prisma.Decimal('100.00'), 3).map((d) => d.toFixed(2));
-    if (JSON.stringify(split3) !== JSON.stringify(['33.33', '33.33', '33.34'])) {
-      c11Passed = false;
-      c11Errors.push(`splitInstallments('100.00', 3) expected ['33.33', '33.33', '33.34'], got ${JSON.stringify(split3)}`);
-    }
+    assert(!(JSON.stringify(split3) !== JSON.stringify(['33.33', '33.33', '33.34'])), `splitInstallments('100.00', 3) expected ['33.33', '33.33', '33.34'], got ${JSON.stringify(split3)}`);
 
     // 4. Create smoke branch & fixtures
     const smokeFeeBranch = await prisma.branch.create({
@@ -3685,19 +3545,13 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sTeachCookie },
       body: JSON.stringify({ studentId: sStudent.id, amount: 100, method: 'CASH' }),
     });
-    if (teachDeniedRes.status !== 403) {
-      c11Passed = false;
-      c11Errors.push(`TEACHER on /api/fees/payments expected 403, got ${teachDeniedRes.status}`);
-    }
+    assert(!(teachDeniedRes.status !== 403), `TEACHER on /api/fees/payments expected 403, got ${teachDeniedRes.status}`);
 
     // Cross-branch admin denied
     const crossBranchRes = await req(`/api/fees/students/${sStudent.id}/account`, {
       headers: { Cookie: sOtherAdminCookie },
     });
-    if (crossBranchRes.status !== 404 && crossBranchRes.status !== 403) {
-      c11Passed = false;
-      c11Errors.push(`Cross-branch admin on student account expected 403/404, got ${crossBranchRes.status}`);
-    }
+    assert(!(crossBranchRes.status !== 404 && crossBranchRes.status !== 403), `Cross-branch admin on student account expected 403/404, got ${crossBranchRes.status}`);
 
     // 6. Manual Charge creation & string money verification
     const chargeRes = await req('/api/fees/charges', {
@@ -3713,15 +3567,9 @@ async function runSmokeTests() {
         period: '2026-11',
       }),
     });
-    if (chargeRes.status !== 201 || !chargeRes.body?.data?.charge?.id) {
-      c11Passed = false;
-      c11Errors.push(`POST /api/fees/charges failed: ${chargeRes.status} ${JSON.stringify(chargeRes.body)}`);
-    }
+    assert(!(chargeRes.status !== 201 || !chargeRes.body?.data?.charge?.id), `POST /api/fees/charges failed: ${chargeRes.status} ${JSON.stringify(chargeRes.body)}`);
     const charge1 = chargeRes.body?.data?.charge;
-    if (charge1?.amount !== '1000.00') {
-      c11Passed = false;
-      c11Errors.push(`Charge amount in response expected string "1000.00", got ${typeof charge1?.amount} ${charge1?.amount}`);
-    }
+    assert(!(charge1?.amount !== '1000.00'), `Charge amount in response expected string "1000.00", got ${typeof charge1?.amount} ${charge1?.amount}`);
 
     // 7. Partial Payment then Full Payment
     const pay1Res = await req('/api/fees/payments', {
@@ -3734,25 +3582,16 @@ async function runSmokeTests() {
         note: 'Partial payment 400',
       }),
     });
-    if (pay1Res.status !== 201 || !pay1Res.body?.data?.payment) {
-      c11Passed = false;
-      c11Errors.push(`POST /api/fees/payments (partial) failed: ${pay1Res.status} ${JSON.stringify(pay1Res.body)}`);
-    }
+    assert(!(pay1Res.status !== 201 || !pay1Res.body?.data?.payment), `POST /api/fees/payments (partial) failed: ${pay1Res.status} ${JSON.stringify(pay1Res.body)}`);
     const pay1 = pay1Res.body?.data?.payment;
-    if (pay1?.amount !== '400.00') {
-      c11Passed = false;
-      c11Errors.push(`Payment amount expected "400.00", got ${pay1?.amount}`);
-    }
+    assert(!(pay1?.amount !== '400.00'), `Payment amount expected "400.00", got ${pay1?.amount}`);
 
     // Check account shows PARTIAL status
     const acctAfterPay1 = await req(`/api/fees/students/${sStudent.id}/account`, {
       headers: { Cookie: sAccCookie },
     });
     const c1State = acctAfterPay1.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
-    if (c1State?.status !== 'PARTIAL' || c1State?.balance !== '600.00' || c1State?.paid !== '400.00') {
-      c11Passed = false;
-      c11Errors.push(`Charge status after partial pay expected PARTIAL with balance 600.00, got ${c1State?.status} bal=${c1State?.balance}`);
-    }
+    assert(!(c1State?.status !== 'PARTIAL' || c1State?.balance !== '600.00' || c1State?.paid !== '400.00'), `Charge status after partial pay expected PARTIAL with balance 600.00, got ${c1State?.status} bal=${c1State?.balance}`);
 
     // Void rules: cannot void charge with paid > 0
     const voidChargeFail = await req(`/api/fees/charges/${charge1?.id}/void`, {
@@ -3760,10 +3599,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
       body: JSON.stringify({ reason: 'Accidentally created' }),
     });
-    if (voidChargeFail.status !== 400) {
-      c11Passed = false;
-      c11Errors.push(`Voiding charge with paid > 0 expected 400, got ${voidChargeFail.status}`);
-    }
+    assert(!(voidChargeFail.status !== 400), `Voiding charge with paid > 0 expected 400, got ${voidChargeFail.status}`);
 
     // ACCOUNTANT cannot void charge
     const accVoidRes = await req(`/api/fees/charges/${charge1?.id}/void`, {
@@ -3771,10 +3607,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
       body: JSON.stringify({ reason: 'Attempted accountant void' }),
     });
-    if (accVoidRes.status !== 403) {
-      c11Passed = false;
-      c11Errors.push(`ACCOUNTANT void charge expected 403, got ${accVoidRes.status}`);
-    }
+    assert(!(accVoidRes.status !== 403), `ACCOUNTANT void charge expected 403, got ${accVoidRes.status}`);
 
     // Full payment for the remainder
     const pay2Res = await req('/api/fees/payments', {
@@ -3788,10 +3621,7 @@ async function runSmokeTests() {
         note: 'Full payoff 600',
       }),
     });
-    if (pay2Res.status !== 201) {
-      c11Passed = false;
-      c11Errors.push(`Payment remainder failed: ${pay2Res.status}`);
-    }
+    assert(!(pay2Res.status !== 201), `Payment remainder failed: ${pay2Res.status}`);
     const pay2 = pay2Res.body?.data?.payment;
 
     // Check account shows PAID status
@@ -3799,10 +3629,7 @@ async function runSmokeTests() {
       headers: { Cookie: sAdminCookie },
     });
     const c1PaidState = acctAfterPay2.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
-    if (c1PaidState?.status !== 'PAID' || c1PaidState?.balance !== '0.00') {
-      c11Passed = false;
-      c11Errors.push(`Charge status after full pay expected PAID with balance 0.00, got ${c1PaidState?.status} bal=${c1PaidState?.balance}`);
-    }
+    assert(!(c1PaidState?.status !== 'PAID' || c1PaidState?.balance !== '0.00'), `Charge status after full pay expected PAID with balance 0.00, got ${c1PaidState?.status} bal=${c1PaidState?.balance}`);
 
     // 8. Reversal
     // ACCOUNTANT cannot reverse
@@ -3811,10 +3638,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
       body: JSON.stringify({ reason: 'Accountant trying to reverse' }),
     });
-    if (accRevRes.status !== 403) {
-      c11Passed = false;
-      c11Errors.push(`ACCOUNTANT reverse payment expected 403, got ${accRevRes.status}`);
-    }
+    assert(!(accRevRes.status !== 403), `ACCOUNTANT reverse payment expected 403, got ${accRevRes.status}`);
 
     // ADMIN reverses pay2
     const adminRevRes = await req(`/api/fees/payments/${pay2?.id}/reverse`, {
@@ -3822,20 +3646,14 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
       body: JSON.stringify({ reason: 'Reversing 600 payment for test' }),
     });
-    if (adminRevRes.status !== 200 || !adminRevRes.body?.data?.reversal) {
-      c11Passed = false;
-      c11Errors.push(`ADMIN reverse payment failed: ${adminRevRes.status} ${JSON.stringify(adminRevRes.body)}`);
-    }
+    assert(!(adminRevRes.status !== 200 || !adminRevRes.body?.data?.reversal), `ADMIN reverse payment failed: ${adminRevRes.status} ${JSON.stringify(adminRevRes.body)}`);
 
     // Check account restored to PARTIAL with balance 600.00
     const acctAfterRev = await req(`/api/fees/students/${sStudent.id}/account`, {
       headers: { Cookie: sAdminCookie },
     });
     const c1RevState = acctAfterRev.body?.data?.charges?.find((c: any) => c.id === charge1?.id);
-    if (c1RevState?.status !== 'PARTIAL' || c1RevState?.balance !== '600.00') {
-      c11Passed = false;
-      c11Errors.push(`Charge balance after reversal expected 600.00, got ${c1RevState?.balance} status=${c1RevState?.status}`);
-    }
+    assert(!(c1RevState?.status !== 'PARTIAL' || c1RevState?.balance !== '600.00'), `Charge balance after reversal expected 600.00, got ${c1RevState?.balance} status=${c1RevState?.status}`);
 
     // 9. Overpayment becomes Student Credit & auto-applies
     const overpayRes = await req('/api/fees/payments', {
@@ -3848,17 +3666,11 @@ async function runSmokeTests() {
         note: 'Overpaying to generate 400 credit',
       }),
     });
-    if (overpayRes.status !== 201) {
-      c11Passed = false;
-      c11Errors.push(`Overpayment failed: ${overpayRes.status}`);
-    }
+    assert(!(overpayRes.status !== 201), `Overpayment failed: ${overpayRes.status}`);
     const acctAfterOverpay = await req(`/api/fees/students/${sStudent.id}/account`, {
       headers: { Cookie: sAdminCookie },
     });
-    if (acctAfterOverpay.body?.data?.creditBalance !== '400.00') {
-      c11Passed = false;
-      c11Errors.push(`Credit balance expected 400.00, got ${acctAfterOverpay.body?.data?.creditBalance}`);
-    }
+    assert(!(acctAfterOverpay.body?.data?.creditBalance !== '400.00'), `Credit balance expected 400.00, got ${acctAfterOverpay.body?.data?.creditBalance}`);
 
     // Create a new charge of 500.00 and apply credit
     const charge2Res = await req('/api/fees/charges', {
@@ -3876,23 +3688,14 @@ async function runSmokeTests() {
 
     // Apply available credit via service
     const creditApplied = await FeeLedgerService.applyAvailableCreditToCharge(charge2Id);
-    if (creditApplied.toString() !== '400.00' && creditApplied.toFixed?.(2) !== '400.00') {
-      c11Passed = false;
-      c11Errors.push(`applyAvailableCreditToCharge expected 400.00 applied, got ${creditApplied.toString()}`);
-    }
+    assert(!(creditApplied.toString() !== '400.00' && creditApplied.toFixed?.(2) !== '400.00'), `applyAvailableCreditToCharge expected 400.00 applied, got ${creditApplied.toString()}`);
 
     const acctAfterCreditApply = await req(`/api/fees/students/${sStudent.id}/account`, {
       headers: { Cookie: sAdminCookie },
     });
-    if (acctAfterCreditApply.body?.data?.creditBalance !== '0.00') {
-      c11Passed = false;
-      c11Errors.push(`Credit balance after apply expected 0.00, got ${acctAfterCreditApply.body?.data?.creditBalance}`);
-    }
+    assert(!(acctAfterCreditApply.body?.data?.creditBalance !== '0.00'), `Credit balance after apply expected 0.00, got ${acctAfterCreditApply.body?.data?.creditBalance}`);
     const c2State = acctAfterCreditApply.body?.data?.charges?.find((c: any) => c.id === charge2Id);
-    if (c2State?.balance !== '100.00') {
-      c11Passed = false;
-      c11Errors.push(`Charge 2 balance after credit apply expected 100.00, got ${c2State?.balance}`);
-    }
+    assert(!(c2State?.balance !== '100.00'), `Charge 2 balance after credit apply expected 100.00, got ${c2State?.balance}`);
 
     // 10. Idempotency test (same key returns original payment, 5 concurrent identical return 1)
     const idemKey = `IDEM-TEST-${Date.now()}`;
@@ -3914,10 +3717,7 @@ async function runSmokeTests() {
       body: JSON.stringify(idemReqPayload),
     });
 
-    if (idem1.status !== 201 || idem2.status !== 200 || idem1.body?.data?.payment?.id !== idem2.body?.data?.payment?.id) {
-      c11Passed = false;
-      c11Errors.push(`Sequential idempotency failed: s1=${idem1.status} s2=${idem2.status} id1=${idem1.body?.data?.payment?.id} id2=${idem2.body?.data?.payment?.id}`);
-    }
+    assert(!(idem1.status !== 201 || idem2.status !== 200 || idem1.body?.data?.payment?.id !== idem2.body?.data?.payment?.id), `Sequential idempotency failed: s1=${idem1.status} s2=${idem2.status} id1=${idem1.body?.data?.payment?.id} id2=${idem2.body?.data?.payment?.id}`);
 
     // 5 concurrent requests with identical key
     const concIdemKey = `CONC-IDEM-${Date.now()}`;
@@ -3930,15 +3730,9 @@ async function runSmokeTests() {
     );
     const concIdemResults = await Promise.all(concIdemPromises);
     const concSuccesses = concIdemResults.filter((r) => r.status === 200 || r.status === 201);
-    if (concSuccesses.length !== 5) {
-      c11Passed = false;
-      c11Errors.push(`Concurrent idempotency expected all 5 requests to resolve 200/201, got statuses: ${concIdemResults.map((r) => r.status).join(',')}`);
-    }
+    assert(!(concSuccesses.length !== 5), `Concurrent idempotency expected all 5 requests to resolve 200/201, got statuses: ${concIdemResults.map((r) => r.status).join(',')}`);
     const uniqueConcIds = new Set(concSuccesses.map((r) => r.body?.data?.payment?.id));
-    if (uniqueConcIds.size !== 1) {
-      c11Passed = false;
-      c11Errors.push(`Concurrent idempotency expected exactly 1 distinct payment ID, got ${uniqueConcIds.size}`);
-    }
+    assert(!(uniqueConcIds.size !== 1), `Concurrent idempotency expected exactly 1 distinct payment ID, got ${uniqueConcIds.size}`);
 
     // 11. Concurrency test: 10 concurrent different payments yield gap-free receipts
     const concDiffPromises = Array.from({ length: 10 }, (_, i) =>
@@ -3950,15 +3744,9 @@ async function runSmokeTests() {
     );
     const concDiffResults = await Promise.all(concDiffPromises);
     const diffReceipts = concDiffResults.map((r) => r.body?.data?.payment?.receiptNumber).filter(Boolean);
-    if (diffReceipts.length !== 10) {
-      c11Passed = false;
-      c11Errors.push(`10 concurrent payments expected 10 receipts, got ${diffReceipts.length}`);
-    }
+    assert(!(diffReceipts.length !== 10), `10 concurrent payments expected 10 receipts, got ${diffReceipts.length}`);
     const uniqueReceipts = new Set(diffReceipts);
-    if (uniqueReceipts.size !== 10) {
-      c11Passed = false;
-      c11Errors.push(`Expected 10 unique receipts, got duplicate: ${diffReceipts.join(', ')}`);
-    }
+    assert(!(uniqueReceipts.size !== 10), `Expected 10 unique receipts, got duplicate: ${diffReceipts.join(', ')}`);
 
     // 12. Dues Generation (dryRun & idempotency)
     const genDryRun = await req('/api/fees/charges/generate', {
@@ -3966,15 +3754,9 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
       body: JSON.stringify({ month: '2027-01', dryRun: true }),
     });
-    if (genDryRun.status !== 200 || !genDryRun.body?.data?.dryRun) {
-      c11Passed = false;
-      c11Errors.push(`Generate dues dryRun expected 200 with dryRun: true, got ${genDryRun.status}`);
-    }
+    assert(!(genDryRun.status !== 200 || !genDryRun.body?.data?.dryRun), `Generate dues dryRun expected 200 with dryRun: true, got ${genDryRun.status}`);
     const dryRunDbCount = await prisma.feeCharge.count({ where: { period: '2027-01' } });
-    if (dryRunDbCount !== 0) {
-      c11Passed = false;
-      c11Errors.push(`Generate dues dryRun wrote ${dryRunDbCount} charges to DB!`);
-    }
+    assert(!(dryRunDbCount !== 0), `Generate dues dryRun wrote ${dryRunDbCount} charges to DB!`);
 
     // Actual generate
     const genActual1 = await req('/api/fees/charges/generate', {
@@ -3982,10 +3764,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
       body: JSON.stringify({ month: '2027-01', dryRun: false }),
     });
-    if (genActual1.status !== 200 || genActual1.body?.data?.createdCount < 1) {
-      c11Passed = false;
-      c11Errors.push(`Generate dues actual expected createdCount >= 1, got ${genActual1.body?.data?.createdCount}`);
-    }
+    assert(!(genActual1.status !== 200 || genActual1.body?.data?.createdCount < 1), `Generate dues actual expected createdCount >= 1, got ${genActual1.body?.data?.createdCount}`);
 
     // Run again for same month: must be 0 created
     const genActual2 = await req('/api/fees/charges/generate', {
@@ -3993,10 +3772,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: sAccCookie },
       body: JSON.stringify({ month: '2027-01', dryRun: false }),
     });
-    if (genActual2.status !== 200 || genActual2.body?.data?.createdCount !== 0) {
-      c11Passed = false;
-      c11Errors.push(`Generate dues rerun expected createdCount: 0 (idempotent), got ${genActual2.body?.data?.createdCount}`);
-    }
+    assert(!(genActual2.status !== 200 || genActual2.body?.data?.createdCount !== 0), `Generate dues rerun expected createdCount: 0 (idempotent), got ${genActual2.body?.data?.createdCount}`);
 
     // 13. CSV formula neutralization
     const csvFormulaPay = await req('/api/fees/payments', {
@@ -4010,46 +3786,28 @@ async function runSmokeTests() {
         reference: '+8801700000000',
       }),
     });
-    if (csvFormulaPay.status !== 201) {
-      c11Passed = false;
-      c11Errors.push(`Failed to create CSV formula payment: ${csvFormulaPay.status}`);
-    }
+    assert(!(csvFormulaPay.status !== 201), `Failed to create CSV formula payment: ${csvFormulaPay.status}`);
 
     const csvRes = await req('/api/fees/payments?format=csv', {
       headers: { Cookie: sAdminCookie },
     });
-    if (csvRes.status !== 200 || !csvRes.headers.get('content-type')?.includes('text/csv')) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/fees/payments?format=csv failed: ${csvRes.status}`);
-    }
-    if (!csvRes.rawText.includes("'+8801700000000") && !csvRes.rawText.includes("'=SUM(A1:A10)")) {
-      c11Passed = false;
-      c11Errors.push(`CSV export did not neutralize formula prefixes! Found raw text: ${csvRes.rawText.slice(0, 300)}`);
-    }
+    assert(!(csvRes.status !== 200 || !csvRes.headers.get('content-type')?.includes('text/csv')), `GET /api/fees/payments?format=csv failed: ${csvRes.status}`);
+    assert(!(!csvRes.rawText.includes("'+8801700000000") && !csvRes.rawText.includes("'=SUM(A1:A10)")), `CSV export did not neutralize formula prefixes! Found raw text: ${csvRes.rawText.slice(0, 300)}`);
 
     // 14. Student & Guardian View Endpoints
     const myAcctRes = await req('/api/fees/my-account', {
       headers: { Cookie: sStudentCookie },
     });
-    if (myAcctRes.status !== 200 || myAcctRes.body?.data?.student?.id !== sStudent.id) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/fees/my-account failed: ${myAcctRes.status}`);
-    }
+    assert(!(myAcctRes.status !== 200 || myAcctRes.body?.data?.student?.id !== sStudent.id), `GET /api/fees/my-account failed: ${myAcctRes.status}`);
 
     const guardAcctRes = await req(`/api/fees/guardian/students/${sStudent.id}/account`, {
       headers: { Cookie: sGuardianCookie },
     });
-    if (guardAcctRes.status !== 200 || guardAcctRes.body?.data?.student?.id !== sStudent.id) {
-      c11Passed = false;
-      c11Errors.push(`GET /api/fees/guardian/students/:id/account failed: ${guardAcctRes.status}`);
-    }
+    assert(!(guardAcctRes.status !== 200 || guardAcctRes.body?.data?.student?.id !== sStudent.id), `GET /api/fees/guardian/students/:id/account failed: ${guardAcctRes.status}`);
 
     // 15. Reconciliation script execution
     const reconResult = await reconcileFees(false);
-    if (!reconResult.isMatch || reconResult.mismatchCount > 0) {
-      c11Passed = false;
-      c11Errors.push(`reconcileFees failed: isMatch=${reconResult.isMatch} mismatches=${reconResult.mismatchCount}`);
-    }
+    assert(!(!reconResult.isMatch || reconResult.mismatchCount > 0), `reconcileFees failed: isMatch=${reconResult.isMatch} mismatches=${reconResult.mismatchCount}`);
 
     // 16. Audit log hygiene
     const feeAuditLogs = await prisma.auditLog.findMany({
@@ -4060,30 +3818,20 @@ async function runSmokeTests() {
     });
     for (const log of feeAuditLogs) {
       const metaStr = JSON.stringify(log.metadata || {});
-      if (metaStr.includes('TRX-') || metaStr.includes('password') || metaStr.includes('secret')) {
-        c11Passed = false;
-        c11Errors.push(`Audit log ${log.id} leaked sensitive references/notes in metadata: ${metaStr}`);
-      }
+      assert(!(metaStr.includes('TRX-') || metaStr.includes('password') || metaStr.includes('secret')), `Audit log ${log.id} leaked sensitive references/notes in metadata: ${metaStr}`);
     }
-
-    const c11Details = c11Passed
-      ? 'Decimal money exact arithmetic; AUTO/MANUAL allocations; partial/full payments; overpayment student credit; idempotency deduplication; 10 concurrent gap-free receipts; payment reversals; void guards; dryRun & idempotent dues generation; role matrix with ACCOUNTANT; CSV formula sanitization; legacy 410s; reconcileFees cent-for-cent pass'
-      : c11Errors.join('; ');
 
     recordCheck(
       '11',
       'Decimal money, fee ledger, receipts, dues generation, reversals, accountant role',
-      c11Passed,
-      c11Details,
-      45
+      undefined,
+      'Decimal money exact arithmetic; AUTO/MANUAL allocations; partial/full payments; overpayment student credit; idempotency deduplication; 10 concurrent gap-free receipts; payment reversals; void guards; dryRun & idempotent dues generation; role matrix with ACCOUNTANT; CSV formula sanitization; legacy 410s; reconcileFees cent-for-cent pass'
     );
 
     // ─────────────────────────────────────────────────────────────────────────
     // CHECK 30: EXAM INTEGRITY — ATTEMPTS, AUTOSAVE, DEADLINES, EXTRA TIME, SAFE RANKS, ARCHIVE
     // ─────────────────────────────────────────────────────────────────────────
     console.log('\nRunning Check 30: Server-side attempts, deadlines, safe ranks, and archive...');
-    let c30Passed = true;
-    const c30Errors: string[] = [];
 
     // Setup: Create a dedicated batch and enroll demoStudent and 2 new students
     const smokeExamBatch = await prisma.batch.create({
@@ -4194,77 +3942,49 @@ async function runSmokeTests() {
 
     // 2. Metadata only before start
     const metaCheck = await req(`/api/tests/${onlineTest.id}`, { headers: { Cookie: studentCookie } });
-    if (metaCheck.status !== 200 || (metaCheck.body?.data?.questions && metaCheck.body?.data?.questions.length > 0)) {
-      c30Passed = false;
-      c30Errors.push(`Expected metadata only before start, got status=${metaCheck.status}, questions=${JSON.stringify(metaCheck.body?.data?.questions)}`);
-    }
+    assert(!(metaCheck.status !== 200 || (metaCheck.body?.data?.questions && metaCheck.body?.data?.questions.length > 0)), `Expected metadata only before start, got status=${metaCheck.status}, questions=${JSON.stringify(metaCheck.body?.data?.questions)}`);
 
     // 3. Idempotent start: first call creates attempt
     const start1 = await req(`/api/tests/${onlineTest.id}/start`, {
       method: 'POST',
       headers: { Cookie: studentCookie },
     });
-    if (start1.status !== 200 || !start1.body?.data?.attempt?.id) {
-      c30Passed = false;
-      c30Errors.push(`Start attempt failed: status=${start1.status}, body=${JSON.stringify(start1.body)}`);
-    }
+    assert(!(start1.status !== 200 || !start1.body?.data?.attempt?.id), `Start attempt failed: status=${start1.status}, body=${JSON.stringify(start1.body)}`);
 
     const attempt1 = start1.body?.data?.attempt;
     const questions1 = start1.body?.data?.questions;
 
     // Verify isCorrect is never returned to student
     const anyIsCorrect = questions1?.some((q: any) => q.options?.some((o: any) => o.isCorrect !== undefined));
-    if (anyIsCorrect) {
-      c30Passed = false;
-      c30Errors.push('Questions on start exposed isCorrect on options!');
-    }
+    assert(!(anyIsCorrect), 'Questions on start exposed isCorrect on options!');
 
     // Verify deadline calculation: min(startedAt + duration, windowEnd)
     const expectedDeadlineMinutes = 30;
     const actualDiffMinutes = (new Date(attempt1?.deadlineAt).getTime() - new Date(attempt1?.startedAt).getTime()) / 60000;
-    if (Math.abs(actualDiffMinutes - expectedDeadlineMinutes) > 1) {
-      c30Passed = false;
-      c30Errors.push(`Expected deadline diff ~${expectedDeadlineMinutes} min, got ${actualDiffMinutes}`);
-    }
+    assert(!(Math.abs(actualDiffMinutes - expectedDeadlineMinutes) > 1), `Expected deadline diff ~${expectedDeadlineMinutes} min, got ${actualDiffMinutes}`);
 
     // Second call to start returns identical attempt (idempotency) and identical order (deterministic seed)
     const start2 = await req(`/api/tests/${onlineTest.id}/start`, {
       method: 'POST',
       headers: { Cookie: studentCookie },
     });
-    if (start2.status !== 200 || start2.body?.data?.attempt?.id !== attempt1?.id) {
-      c30Passed = false;
-      c30Errors.push(`Start not idempotent: status=${start2.status}, secondId=${start2.body?.data?.attempt?.id}`);
-    }
+    assert(!(start2.status !== 200 || start2.body?.data?.attempt?.id !== attempt1?.id), `Start not idempotent: status=${start2.status}, secondId=${start2.body?.data?.attempt?.id}`);
     const questions2 = start2.body?.data?.questions;
-    if (JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questions2?.map((q: any) => q.id))) {
-      c30Passed = false;
-      c30Errors.push('Deterministic seed shuffling failed across idempotent start calls');
-    }
+    assert(!(JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questions2?.map((q: any) => q.id))), 'Deterministic seed shuffling failed across idempotent start calls');
 
     // Verify GET test returns identically shuffled question and option sequence
     const getTestForStudent = await req(`/api/tests/${onlineTest.id}`, {
       headers: { Cookie: studentCookie },
     });
     const questionsFromGet = getTestForStudent.body?.data?.questions;
-    if (
-      !questionsFromGet ||
-      JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questionsFromGet?.map((q: any) => q.id))
-    ) {
-      c30Passed = false;
-      c30Errors.push('Harmonized shuffle mismatch between POST start and GET test');
-    }
+    assert(!(!questionsFromGet ||
+      JSON.stringify(questions1?.map((q: any) => q.id)) !== JSON.stringify(questionsFromGet?.map((q: any) => q.id))), 'Harmonized shuffle mismatch between POST start and GET test');
 
     // 3b. Regression assertion: Fixed seed with fixed questions and options produces exact expected order
     const fixedQOrder = shuffleArray(['q1', 'q2', 'q3', 'q4', 'q5'], 'fixed-test-seed-2026:questions');
     const fixedOptOrder = shuffleArray(['optA', 'optB', 'optC', 'optD'], 'fixed-test-seed-2026:options:q1');
-    if (
-      JSON.stringify(fixedQOrder) !== JSON.stringify(['q5', 'q4', 'q1', 'q2', 'q3']) ||
-      JSON.stringify(fixedOptOrder) !== JSON.stringify(['optC', 'optB', 'optA', 'optD'])
-    ) {
-      c30Passed = false;
-      c30Errors.push(`Deterministic shuffle regression mismatch: Q=${JSON.stringify(fixedQOrder)}, Opt=${JSON.stringify(fixedOptOrder)}`);
-    }
+    assert(!(JSON.stringify(fixedQOrder) !== JSON.stringify(['q5', 'q4', 'q1', 'q2', 'q3']) ||
+      JSON.stringify(fixedOptOrder) !== JSON.stringify(['optC', 'optB', 'optA', 'optD'])), `Deterministic shuffle regression mismatch: Q=${JSON.stringify(fixedQOrder)}, Opt=${JSON.stringify(fixedOptOrder)}`);
 
     // 4. Autosave answers: PUT /api/tests/:id/attempt/answers
     const autosaveRes = await req(`/api/tests/${onlineTest.id}/attempt/answers`, {
@@ -4274,20 +3994,14 @@ async function runSmokeTests() {
         answers: [{ questionId: qA.id, optionId: qACorrectOpt }],
       }),
     });
-    if (autosaveRes.status !== 200 || autosaveRes.body?.data?.savedCount !== 1) {
-      c30Passed = false;
-      c30Errors.push(`Autosave failed: status=${autosaveRes.status}, body=${JSON.stringify(autosaveRes.body)}`);
-    }
+    assert(!(autosaveRes.status !== 200 || autosaveRes.body?.data?.savedCount !== 1), `Autosave failed: status=${autosaveRes.status}, body=${JSON.stringify(autosaveRes.body)}`);
 
     // GET attempt shows saved answers
     const getAttemptRes = await req(`/api/tests/${onlineTest.id}/attempt`, {
       headers: { Cookie: studentCookie },
     });
     const savedAns = getAttemptRes.body?.data?.savedAnswers;
-    if (getAttemptRes.status !== 200 || !savedAns || savedAns.length !== 1 || savedAns[0].optionId !== qACorrectOpt) {
-      c30Passed = false;
-      c30Errors.push(`GET attempt did not show autosaved answer: status=${getAttemptRes.status}, saved=${JSON.stringify(savedAns)}`);
-    }
+    assert(!(getAttemptRes.status !== 200 || !savedAns || savedAns.length !== 1 || savedAns[0].optionId !== qACorrectOpt), `GET attempt did not show autosaved answer: status=${getAttemptRes.status}, saved=${JSON.stringify(savedAns)}`);
 
     // 5. Exam locked: attempts exist -> modify test/questions rejected with 409 EXAM_LOCKED
     const addQBlocked = await req(`/api/tests/${onlineTest.id}/questions`, {
@@ -4310,10 +4024,7 @@ async function runSmokeTests() {
       method: 'DELETE',
       headers: { Cookie: adminCookie },
     });
-    if (addQBlocked.status !== 409 || updateTestBlocked.status !== 409 || deleteQBlocked.status !== 409) {
-      c30Passed = false;
-      c30Errors.push(`EXAM_LOCKED check failed: addQ=${addQBlocked.status}, updateTest=${updateTestBlocked.status}, delQ=${deleteQBlocked.status}`);
-    }
+    assert(!(addQBlocked.status !== 409 || updateTestBlocked.status !== 409 || deleteQBlocked.status !== 409), `EXAM_LOCKED check failed: addQ=${addQBlocked.status}, updateTest=${updateTestBlocked.status}, delQ=${deleteQBlocked.status}`);
 
     // Verify timing change blocked when results exist without attempts
     const resultOnlyTest = await prisma.test.create({
@@ -4342,10 +4053,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
       body: JSON.stringify({ durationMinutes: 45 }),
     });
-    if (updateResultOnlyBlocked.status !== 409 || updateResultOnlyBlocked.body?.code !== 'EXAM_LOCKED') {
-      c30Passed = false;
-      c30Errors.push(`Expected 409 EXAM_LOCKED when modifying timing with existing results, got ${updateResultOnlyBlocked.status}`);
-    }
+    assert(!(updateResultOnlyBlocked.status !== 409 || updateResultOnlyBlocked.body?.code !== 'EXAM_LOCKED'), `Expected 409 EXAM_LOCKED when modifying timing with existing results, got ${updateResultOnlyBlocked.status}`);
 
     // Verify audit log for EXAM_LOCKED_ATTEMPT
     const lockedAudit = await prisma.auditLog.findFirst({
@@ -4354,10 +4062,7 @@ async function runSmokeTests() {
         entityId: onlineTest.id,
       },
     });
-    if (!lockedAudit) {
-      c30Passed = false;
-      c30Errors.push('EXAM_LOCKED_ATTEMPT audit log entry not found in database');
-    }
+    assert(!(!lockedAudit), 'EXAM_LOCKED_ATTEMPT audit log entry not found in database');
 
     // 6. Extra time with audit trail: POST /api/tests/:id/attempts/:attemptId/extend
     const extendRes = await req(`/api/tests/${onlineTest.id}/attempts/${attempt1.id}/extend`, {
@@ -4368,10 +4073,7 @@ async function runSmokeTests() {
         reason: 'SMOKE network reconnection grant',
       }),
     });
-    if (extendRes.status !== 200 || extendRes.body?.data?.extendedMinutes !== 15) {
-      c30Passed = false;
-      c30Errors.push(`Extend attempt failed: status=${extendRes.status}, body=${JSON.stringify(extendRes.body)}`);
-    }
+    assert(!(extendRes.status !== 200 || extendRes.body?.data?.extendedMinutes !== 15), `Extend attempt failed: status=${extendRes.status}, body=${JSON.stringify(extendRes.body)}`);
 
     const extendAudit = await prisma.auditLog.findFirst({
       where: {
@@ -4379,10 +4081,7 @@ async function runSmokeTests() {
         entityId: attempt1.id,
       },
     });
-    if (!extendAudit) {
-      c30Passed = false;
-      c30Errors.push('EXTEND_TEST_ATTEMPT audit log entry not found');
-    }
+    assert(!(!extendAudit), 'EXTEND_TEST_ATTEMPT audit log entry not found');
 
     // 7. Submit test merges final answers + autosaved answers
     // demoStudent submits question B; question A was already autosaved
@@ -4393,10 +4092,7 @@ async function runSmokeTests() {
         answers: [{ questionId: qB.id, selectedOptionId: qBCorrectOpt }],
       }),
     });
-    if (submitRes.status !== 201 || submitRes.body?.data?.totalMarksObtained !== 20) {
-      c30Passed = false;
-      c30Errors.push(`Submit test failed: status=${submitRes.status}, score=${submitRes.body?.data?.totalMarksObtained}`);
-    }
+    assert(!(submitRes.status !== 201 || submitRes.body?.data?.totalMarksObtained !== 20), `Submit test failed: status=${submitRes.status}, score=${submitRes.body?.data?.totalMarksObtained}`);
 
     // Double submit rejected with 409
     const doubleSubmitRes = await req(`/api/tests/${onlineTest.id}/submit`, {
@@ -4404,10 +4100,7 @@ async function runSmokeTests() {
       headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
       body: JSON.stringify({ answers: [] }),
     });
-    if (doubleSubmitRes.status !== 409) {
-      c30Passed = false;
-      c30Errors.push(`Double submit expected 409, got ${doubleSubmitRes.status}`);
-    }
+    assert(!(doubleSubmitRes.status !== 409), `Double submit expected 409, got ${doubleSubmitRes.status}`);
 
     // 8. Submit by studentB (gets score 20 -> tied with demoStudent)
     await req(`/api/tests/${onlineTest.id}/start`, { method: 'POST', headers: { Cookie: studentBCookie } });
@@ -4438,30 +4131,21 @@ async function runSmokeTests() {
     const resultsStaff = await req(`/api/tests/${onlineTest.id}/results`, {
       headers: { Cookie: adminCookie },
     });
-    if (resultsStaff.status !== 200) {
-      c30Passed = false;
-      c30Errors.push(`Get test results failed: status=${resultsStaff.status}`);
-    }
+    assert(!(resultsStaff.status !== 200), `Get test results failed: status=${resultsStaff.status}`);
     const allResults = resultsStaff.body?.data || [];
     const rankMap = new Map(allResults.map((r: any) => [r.studentId, { score: r.totalMarksObtained, rank: r.rank }]));
     const studentARank = rankMap.get(demoStudent.id)?.rank;
     const studentBRank = rankMap.get(smokeStudentB.id)?.rank;
     const studentCRank = rankMap.get(smokeStudentC.id)?.rank;
 
-    if (studentARank !== 1 || studentBRank !== 1 || studentCRank !== 3) {
-      c30Passed = false;
-      c30Errors.push(`Competition ranking failed: expected (1, 1, 3), got A=${studentARank}, B=${studentBRank}, C=${studentCRank}`);
-    }
+    assert(!(studentARank !== 1 || studentBRank !== 1 || studentCRank !== 3), `Competition ranking failed: expected (1, 1, 3), got A=${studentARank}, B=${studentBRank}, C=${studentCRank}`);
 
     // 10. Zero writes on GET results: re-read results and verify updatedAt timestamps did not change
     const resultsBefore = await prisma.result.findMany({ where: { testId: onlineTest.id }, select: { id: true, updatedAt: true } });
     await req(`/api/tests/${onlineTest.id}/results`, { headers: { Cookie: adminCookie } });
     const resultsAfter = await prisma.result.findMany({ where: { testId: onlineTest.id }, select: { id: true, updatedAt: true } });
     const anyUpdated = resultsBefore.some((r, i) => r.updatedAt.getTime() !== resultsAfter[i].updatedAt.getTime());
-    if (anyUpdated) {
-      c30Passed = false;
-      c30Errors.push('GET /api/tests/:id/results performed write operations on Result table!');
-    }
+    assert(!(anyUpdated), 'GET /api/tests/:id/results performed write operations on Result table!');
 
     // 11. Lazy finalization of expired attempt
     const expiredPastTest = await prisma.test.create({
@@ -4517,10 +4201,7 @@ async function runSmokeTests() {
     const lazyGet = await req(`/api/tests/${expiredPastTest.id}/attempt`, {
       headers: { Cookie: studentBCookie },
     });
-    if (lazyGet.status !== 200 || lazyGet.body?.data?.attempt?.status !== 'EXPIRED' || !lazyGet.body?.data?.result) {
-      c30Passed = false;
-      c30Errors.push(`Lazy finalization failed: status=${lazyGet.status}, attStatus=${lazyGet.body?.data?.attempt?.status}`);
-    }
+    assert(!(lazyGet.status !== 200 || lazyGet.body?.data?.attempt?.status !== 'EXPIRED' || !lazyGet.body?.data?.result), `Lazy finalization failed: status=${lazyGet.status}, attStatus=${lazyGet.body?.data?.attempt?.status}`);
 
     // 12. Staff bulk finalize: POST /api/tests/:id/finalize
     await prisma.testAttempt.create({
@@ -4537,10 +4218,7 @@ async function runSmokeTests() {
       method: 'POST',
       headers: { Cookie: adminCookie },
     });
-    if (finalizeRes.status !== 200 || finalizeRes.body?.data?.finalizedCount < 1) {
-      c30Passed = false;
-      c30Errors.push(`Staff finalize failed: status=${finalizeRes.status}, count=${finalizeRes.body?.data?.finalizedCount}`);
-    }
+    assert(!(finalizeRes.status !== 200 || finalizeRes.body?.data?.finalizedCount < 1), `Staff finalize failed: status=${finalizeRes.status}, count=${finalizeRes.body?.data?.finalizedCount}`);
 
     // 13. Soft archive vs Hard delete for Test
     // onlineTest has attempts and results -> DELETE soft archives
@@ -4549,10 +4227,7 @@ async function runSmokeTests() {
       headers: { Cookie: adminCookie },
     });
     const dbTestArchived = await prisma.test.findUnique({ where: { id: onlineTest.id } });
-    if (delOnlineTest.status !== 200 || !delOnlineTest.body?.data?.archived || !dbTestArchived?.archivedAt) {
-      c30Passed = false;
-      c30Errors.push(`Soft archive test failed: status=${delOnlineTest.status}, body=${JSON.stringify(delOnlineTest.body)}`);
-    }
+    assert(!(delOnlineTest.status !== 200 || !delOnlineTest.body?.data?.archived || !dbTestArchived?.archivedAt), `Soft archive test failed: status=${delOnlineTest.status}, body=${JSON.stringify(delOnlineTest.body)}`);
 
     // Restore test
     const restoreTestRes = await req(`/api/tests/${onlineTest.id}/restore`, {
@@ -4560,10 +4235,7 @@ async function runSmokeTests() {
       headers: { Cookie: adminCookie },
     });
     const dbTestRestored = await prisma.test.findUnique({ where: { id: onlineTest.id } });
-    if (restoreTestRes.status !== 200 || dbTestRestored?.archivedAt !== null) {
-      c30Passed = false;
-      c30Errors.push(`Restore test failed: status=${restoreTestRes.status}, archivedAt=${dbTestRestored?.archivedAt}`);
-    }
+    assert(!(restoreTestRes.status !== 200 || dbTestRestored?.archivedAt !== null), `Restore test failed: status=${restoreTestRes.status}, archivedAt=${dbTestRestored?.archivedAt}`);
 
     // Hard delete truly empty test
     const emptyTest = await prisma.test.create({
@@ -4581,10 +4253,7 @@ async function runSmokeTests() {
       headers: { Cookie: adminCookie },
     });
     const dbEmptyTest = await prisma.test.findUnique({ where: { id: emptyTest.id } });
-    if (delEmptyTest.status !== 200 || !delEmptyTest.body?.data?.deleted || dbEmptyTest !== null) {
-      c30Passed = false;
-      c30Errors.push(`Hard delete empty test failed: status=${delEmptyTest.status}, exists=${!!dbEmptyTest}`);
-    }
+    assert(!(delEmptyTest.status !== 200 || !delEmptyTest.body?.data?.deleted || dbEmptyTest !== null), `Hard delete empty test failed: status=${delEmptyTest.status}, exists=${!!dbEmptyTest}`);
 
     // 14. Soft archive vs Hard delete for Batch
     // smokeExamBatch has enrollments and tests -> DELETE soft archives
@@ -4593,10 +4262,7 @@ async function runSmokeTests() {
       headers: { Cookie: adminCookie },
     });
     const dbBatchArchived = await prisma.batch.findUnique({ where: { id: smokeExamBatch.id } });
-    if (delBatch.status !== 200 || !delBatch.body?.data?.archived || !dbBatchArchived?.archivedAt) {
-      c30Passed = false;
-      c30Errors.push(`Soft archive batch failed: status=${delBatch.status}, body=${JSON.stringify(delBatch.body)}`);
-    }
+    assert(!(delBatch.status !== 200 || !delBatch.body?.data?.archived || !dbBatchArchived?.archivedAt), `Soft archive batch failed: status=${delBatch.status}, body=${JSON.stringify(delBatch.body)}`);
 
     // Enrollment in archived batch rejected with 400
     const enrollArchived = await req('/api/enrollments', {
@@ -4607,10 +4273,7 @@ async function runSmokeTests() {
         batchId: smokeExamBatch.id,
       }),
     });
-    if (enrollArchived.status !== 400) {
-      c30Passed = false;
-      c30Errors.push(`Enroll in archived batch expected 400, got ${enrollArchived.status}`);
-    }
+    assert(!(enrollArchived.status !== 400), `Enroll in archived batch expected 400, got ${enrollArchived.status}`);
 
     // Restore batch
     const restoreBatchRes = await req(`/api/batches/${smokeExamBatch.id}/restore`, {
@@ -4618,10 +4281,7 @@ async function runSmokeTests() {
       headers: { Cookie: adminCookie },
     });
     const dbBatchRestored = await prisma.batch.findUnique({ where: { id: smokeExamBatch.id } });
-    if (restoreBatchRes.status !== 200 || dbBatchRestored?.archivedAt !== null) {
-      c30Passed = false;
-      c30Errors.push(`Restore batch failed: status=${restoreBatchRes.status}, archivedAt=${dbBatchRestored?.archivedAt}`);
-    }
+    assert(!(restoreBatchRes.status !== 200 || dbBatchRestored?.archivedAt !== null), `Restore batch failed: status=${restoreBatchRes.status}, archivedAt=${dbBatchRestored?.archivedAt}`);
 
     // Hard delete truly empty batch
     const emptyBatch = await prisma.batch.create({
@@ -4638,21 +4298,13 @@ async function runSmokeTests() {
       headers: { Cookie: adminCookie },
     });
     const dbEmptyBatch = await prisma.batch.findUnique({ where: { id: emptyBatch.id } });
-    if (delEmptyBatch.status !== 200 || !delEmptyBatch.body?.data?.deleted || dbEmptyBatch !== null) {
-      c30Passed = false;
-      c30Errors.push(`Hard delete empty batch failed: status=${delEmptyBatch.status}, exists=${!!dbEmptyBatch}`);
-    }
-
-    const c30Details = c30Passed
-      ? 'Idempotent starts; deterministic seed shuffle; autosave resume; extra time audit; competition ties (1, 1, 3); zero read writes; 409 EXAM_LOCKED protection; lazy & bulk finalize; soft archive & restore for tests and batches'
-      : c30Errors.join('; ');
+    assert(!(delEmptyBatch.status !== 200 || !delEmptyBatch.body?.data?.deleted || dbEmptyBatch !== null), `Hard delete empty batch failed: status=${delEmptyBatch.status}, exists=${!!dbEmptyBatch}`);
 
     recordCheck(
       '30',
       'Exam attempts, autosave, deadlines, safe competition ranks, soft archive',
-      c30Passed,
-      c30Details,
-      32
+      undefined,
+      'Idempotent starts; deterministic seed shuffle; autosave resume; extra time audit; competition ties (1, 1, 3); zero read writes; 409 EXAM_LOCKED protection; lazy & bulk finalize; soft archive & restore for tests and batches'
     );
   }
 } finally {

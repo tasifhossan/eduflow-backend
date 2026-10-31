@@ -106,6 +106,12 @@ export async function getCenterSettings(forceRefresh = false) {
           lectures: true,
           assignments: true,
           onlineClasses: true,
+          attendanceAlerts: true,
+        },
+        attendancePolicy: {
+          alertOnLate: false,
+          lowThresholdPercent: 75,
+          editWindowDays: 7,
         },
         homepage: {
           heroBadge: '',

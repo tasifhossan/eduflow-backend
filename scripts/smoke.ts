@@ -3357,6 +3357,411 @@ async function runSmokeTests() {
       );
     }
 
+    // Check 62: Guardian Attendance Alerts, Edit Window Enforcement, Low-Attendance & Monthly Sheet Matrix
+    if (shouldRun('62', 'Guardian Attendance Alerts, Edit Window, Low-Attendance & Monthly Sheet Matrix', false)) {
+      const branchId = demoAdmin.branchId;
+      const pwdHash = await bcrypt.hash('SmokePass123!', 10);
+
+      // Create test teacher, students, and guardians
+      const teacherUser = await prisma.user.create({
+        data: {
+          name: 'SMOKE Teacher 62',
+          email: 'smoke-teacher-62@demo.eduflow.local',
+          role: 'TEACHER',
+          branchId,
+          password: pwdHash,
+        },
+      });
+      createdUserIds.push(teacherUser.id);
+
+      const studentA = await prisma.user.create({
+        data: {
+          name: 'SMOKE Student 62A',
+          email: 'smoke-student-62a@demo.eduflow.local',
+          studentCode: 'SMK-62A',
+          role: 'STUDENT',
+          branchId,
+          password: pwdHash,
+        },
+      });
+      const studentB = await prisma.user.create({
+        data: {
+          name: 'SMOKE Student 62B',
+          email: 'smoke-student-62b@demo.eduflow.local',
+          studentCode: 'SMK-62B',
+          role: 'STUDENT',
+          branchId,
+          password: pwdHash,
+        },
+      });
+      createdUserIds.push(studentA.id, studentB.id);
+
+      const guardianA = await prisma.user.create({
+        data: {
+          name: 'SMOKE Guardian 62',
+          email: 'smoke-guardian-62@demo.eduflow.local',
+          role: 'GUARDIAN',
+          branchId,
+          password: pwdHash,
+          notifyByEmail: true,
+        },
+      });
+      const guardianUnlinked = await prisma.user.create({
+        data: {
+          name: 'SMOKE Unlinked Guardian 62',
+          email: 'smoke-unlinked-62@demo.eduflow.local',
+          role: 'GUARDIAN',
+          branchId,
+          password: pwdHash,
+          notifyByEmail: true,
+        },
+      });
+      createdUserIds.push(guardianA.id, guardianUnlinked.id);
+
+      const gLink = await prisma.guardianLink.create({
+        data: {
+          guardianId: guardianA.id,
+          studentId: studentA.id,
+        },
+      });
+      createdGuardianLinkIds.push(gLink.id);
+
+      // Create batch taught by teacherUser
+      const batch62 = await prisma.batch.create({
+        data: {
+          name: 'SMOKE-Batch-Att-62',
+          branchId,
+          teacherId: teacherUser.id,
+          subjectId: smokeSubject.id,
+          classLevel: '10',
+          type: 'ACADEMIC',
+          feeAmount: 2000,
+        },
+      });
+      createdBatchIds.push(batch62.id);
+
+      await prisma.enrollment.createMany({
+        data: [
+          { batchId: batch62.id, studentId: studentA.id, status: 'ACTIVE' },
+          { batchId: batch62.id, studentId: studentB.id, status: 'ACTIVE' },
+        ],
+      });
+
+      // Login sessions
+      const teacherLogin = await req('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'smoke-teacher-62@demo.eduflow.local', password: 'SmokePass123!' }),
+      });
+      const teacherCookie62 = extractCookie(teacherLogin.headers);
+
+      const studentLogin = await req('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'smoke-student-62a@demo.eduflow.local', password: 'SmokePass123!' }),
+      });
+      const studentCookie62 = extractCookie(studentLogin.headers);
+
+      const guardianLogin = await req('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'smoke-guardian-62@demo.eduflow.local', password: 'SmokePass123!' }),
+      });
+      const guardianCookie62 = extractCookie(guardianLogin.headers);
+
+      const unlinkedLogin = await req('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'smoke-unlinked-62@demo.eduflow.local', password: 'SmokePass123!' }),
+      });
+      const unlinkedCookie62 = extractCookie(unlinkedLogin.headers);
+
+      // Obtain SUPER_ADMIN credentials for settings checks
+      const saUser62 = await prisma.user.findFirst({
+        where: { role: Role.SUPER_ADMIN, isActive: true },
+      });
+      if (!saUser62) {
+        throw new Error('No active SUPER_ADMIN user found in database for smoke Check 62');
+      }
+      const saCookie62 = `token=${jwt.sign(
+        { userId: saUser62.id, role: Role.SUPER_ADMIN, branchId: saUser62.branchId },
+        env.JWT_SECRET,
+        { expiresIn: '1d' }
+      )}`;
+
+      const initialSettings62 = await prisma.centerSettings.findUnique({
+        where: { key: 'center' },
+      });
+
+      try {
+        // Ensure center policy: alerts on, alertOnLate false, editWindowDays 3, lowThreshold 75
+        await req('/api/settings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Cookie: saCookie62 },
+          body: JSON.stringify({
+            features: { attendanceAlerts: true },
+            attendancePolicy: { alertOnLate: false, lowThresholdPercent: 75, editWindowDays: 3 },
+          }),
+        });
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const nowMs = Date.now();
+      const past5DaysDate = new Date(nowMs - 5 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const yesterdayStr = new Date(nowMs - 1 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+      // 1. Mark attendance for today: student A = ABSENT, student B = PRESENT
+      const markToday = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie62 },
+        body: JSON.stringify({
+          batchId: batch62.id,
+          date: todayStr,
+          records: [
+            { studentId: studentA.id, status: 'ABSENT' },
+            { studentId: studentB.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(markToday.status === 200, `Mark today failed: ${markToday.status}`);
+
+      const dbAttA = await prisma.attendance.findUnique({
+        where: { studentId_batchId_date: { studentId: studentA.id, batchId: batch62.id, date: new Date(todayStr + 'T00:00:00.000Z') } },
+      });
+      const dbAttB = await prisma.attendance.findUnique({
+        where: { studentId_batchId_date: { studentId: studentB.id, batchId: batch62.id, date: new Date(todayStr + 'T00:00:00.000Z') } },
+      });
+      assert(Boolean(dbAttA?.alertedAt), 'Student A alertedAt was not set on ABSENT');
+      assert(dbAttB?.alertedAt === null, 'Student B alertedAt was unexpectedly set on PRESENT');
+
+      // Wait brief moment for async notification creation
+      await new Promise((r) => setTimeout(r, 200));
+
+      const guardianNotifs = await prisma.notification.findMany({
+        where: { userId: guardianA.id, type: 'ATTENDANCE_ALERT' },
+      });
+      assert(guardianNotifs.length === 1, `Guardian expected 1 notification, got ${guardianNotifs.length}`);
+      const notifBody = guardianNotifs[0]?.body || '';
+      assert(notifBody.includes('SMOKE') && notifBody.includes('absent'), `Notification text mismatch: ${notifBody}`);
+      assert(!notifBody.includes('017') && !notifBody.includes('+880') && !notifBody.includes('http'), `Private data/links leaked in notification body: ${notifBody}`);
+
+      const unlinkedNotifs = await prisma.notification.findMany({
+        where: { userId: guardianUnlinked.id },
+      });
+      assert(unlinkedNotifs.length === 0, `Unlinked guardian received notifications: ${unlinkedNotifs.length}`);
+
+      // 2. Re-save attendance for today with student A = ABSENT -> no duplicate alert
+      const markResave = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie62 },
+        body: JSON.stringify({
+          batchId: batch62.id,
+          date: todayStr,
+          records: [
+            { studentId: studentA.id, status: 'ABSENT' },
+            { studentId: studentB.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(markResave.status === 200, 'Re-save attendance failed');
+      await new Promise((r) => setTimeout(r, 100));
+      const guardianNotifsAfterResave = await prisma.notification.findMany({
+        where: { userId: guardianA.id, type: 'ATTENDANCE_ALERT' },
+      });
+      assert(guardianNotifsAfterResave.length === 1, `Re-save triggered duplicate notification: ${guardianNotifsAfterResave.length}`);
+
+      // 3. Correct student A from ABSENT to PRESENT -> no alert, writes AuditLog
+      const markCorrect = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie62 },
+        body: JSON.stringify({
+          batchId: batch62.id,
+          date: todayStr,
+          records: [
+            { studentId: studentA.id, status: 'PRESENT' },
+            { studentId: studentB.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(markCorrect.status === 200, 'Correct attendance failed');
+      await new Promise((r) => setTimeout(r, 100));
+      const guardianNotifsAfterCorrect = await prisma.notification.findMany({
+        where: { userId: guardianA.id, type: 'ATTENDANCE_ALERT' },
+      });
+      assert(guardianNotifsAfterCorrect.length === 1, `Correction triggered notification: ${guardianNotifsAfterCorrect.length}`);
+
+      const auditAttUpdate = await prisma.auditLog.findFirst({
+        where: { action: 'ATTENDANCE_UPDATED', entityType: 'Attendance' },
+        orderBy: { createdAt: 'desc' },
+      });
+      assert(Boolean(auditAttUpdate), 'AuditLog ATTENDANCE_UPDATED was not written');
+      assert(auditAttUpdate?.metadata?.oldStatus === 'ABSENT' && auditAttUpdate?.metadata?.newStatus === 'PRESENT', 'AuditLog metadata status mismatch');
+
+      // 4. Test flag attendanceAlerts = false -> mark student A = ABSENT -> NO notification sent
+      await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: saCookie62 },
+        body: JSON.stringify({
+          features: { attendanceAlerts: false },
+        }),
+      });
+
+      const markNoAlerts = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie62 },
+        body: JSON.stringify({
+          batchId: batch62.id,
+          date: yesterdayStr,
+          records: [
+            { studentId: studentA.id, status: 'ABSENT' },
+            { studentId: studentB.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(markNoAlerts.status === 200, 'Mark yesterday with flag off failed');
+      await new Promise((r) => setTimeout(r, 100));
+      const guardianNotifsFlagOff = await prisma.notification.findMany({
+        where: { userId: guardianA.id, type: 'ATTENDANCE_ALERT' },
+      });
+      assert(guardianNotifsFlagOff.length === 1, `Alert fired when attendanceAlerts was false! Total: ${guardianNotifsFlagOff.length}`);
+
+      // Restore flag
+      await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: saCookie62 },
+        body: JSON.stringify({
+          features: { attendanceAlerts: true },
+        }),
+      });
+
+      // 5. Edit window rules: teacher blocked on records older than 3 days, admin allowed
+      const teacherOldMark = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie62 },
+        body: JSON.stringify({
+          batchId: batch62.id,
+          date: past5DaysDate,
+          records: [
+            { studentId: studentA.id, status: 'ABSENT' },
+            { studentId: studentB.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(teacherOldMark.status === 403, `Teacher was not blocked on old record: ${teacherOldMark.status}`);
+
+      const adminOldMark = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          batchId: batch62.id,
+          date: past5DaysDate,
+          records: [
+            { studentId: studentA.id, status: 'ABSENT' },
+            { studentId: studentB.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(adminOldMark.status === 200, `Admin was blocked on old record: ${adminOldMark.status}`);
+
+      // Teacher cannot mark another teacher's batch
+      const teacherOtherBatch = await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie62 },
+        body: JSON.stringify({
+          batchId: smokeBatch1.id,
+          date: todayStr,
+          records: [
+            { studentId: studentA.id, status: 'PRESENT' },
+          ],
+        }),
+      });
+      assert(teacherOtherBatch.status === 403, `Teacher was allowed to mark another teacher batch: ${teacherOtherBatch.status}`);
+
+      // 6. Low attendance report (GET /api/attendance/low)
+      // studentA has 2 absent, 1 present -> 33% (< 75%)
+      // studentB has 3 present -> 100%
+      const lowReport = await req(`/api/attendance/low?batchId=${batch62.id}&threshold=75`, {
+        headers: { Cookie: adminCookie },
+      });
+      assert(lowReport.status === 200, `Low report failed: ${lowReport.status}`);
+      const lowItems = lowReport.body?.data?.items || [];
+      const foundStudentA = lowItems.find((i: any) => i.studentId === studentA.id);
+      const foundStudentB = lowItems.find((i: any) => i.studentId === studentB.id);
+      assert(Boolean(foundStudentA), 'Student A not in low attendance report');
+      assert(!foundStudentB, 'Student B should not be in low attendance report');
+      assert(foundStudentA.ratePercent < 75, `Student A rate expected < 75%, got ${foundStudentA.ratePercent}%`);
+
+      const lowCsv = await req(`/api/attendance/low?batchId=${batch62.id}&format=csv`, {
+        headers: { Cookie: adminCookie },
+      });
+      assert(lowCsv.status === 200, `Low attendance CSV export failed: ${lowCsv.status}`);
+      const lowCsvText = lowCsv.rawText || (typeof lowCsv.body === 'string' ? lowCsv.body : JSON.stringify(lowCsv.body));
+      assert(lowCsvText.includes('Student Name'), 'CSV does not have expected header');
+
+      // 7. Batch attendance sheet (GET /api/batches/:id/attendance/sheet?month=YYYY-MM)
+      const currentMonth = todayStr.slice(0, 7);
+      const sheetRes = await req(`/api/batches/${batch62.id}/attendance/sheet?month=${currentMonth}`, {
+        headers: { Cookie: teacherCookie62 },
+      });
+      assert(sheetRes.status === 200, `Attendance sheet failed: ${sheetRes.status}`);
+      const sheetData = sheetRes.body?.data;
+      assert(Array.isArray(sheetData?.dates) && sheetData.dates.length >= 2, 'Sheet dates array missing or incomplete');
+      assert(Array.isArray(sheetData?.students) && sheetData.students.length === 2, 'Sheet students count mismatch');
+
+      const sheetCsv = await req(`/api/batches/${batch62.id}/attendance/sheet?month=${currentMonth}&format=csv`, {
+        headers: { Cookie: adminCookie },
+      });
+      assert(sheetCsv.status === 200, `Sheet CSV export failed: ${sheetCsv.status}`);
+      const sheetCsvText = sheetCsv.rawText || (typeof sheetCsv.body === 'string' ? sheetCsv.body : JSON.stringify(sheetCsv.body));
+      assert(sheetCsvText.includes('Student Name'), 'Sheet CSV missing Student Name header');
+
+      // 8. Student & Guardian summary (GET /api/my/attendance/summary)
+      const studentSummary = await req('/api/my/attendance/summary', {
+        headers: { Cookie: studentCookie62 },
+      });
+      assert(studentSummary.status === 200, `Student self summary failed: ${studentSummary.status}`);
+      assert(typeof studentSummary.body?.data?.monthPercent === 'number', 'Student monthPercent missing');
+
+      const studentSnoop = await req(`/api/my/attendance/summary?studentId=${studentB.id}`, {
+        headers: { Cookie: studentCookie62 },
+      });
+      assert(studentSnoop.status === 403, `Student snoop should be 403, got ${studentSnoop.status}`);
+
+      const guardianSummary = await req(`/api/my/attendance/summary?studentId=${studentA.id}`, {
+        headers: { Cookie: guardianCookie62 },
+      });
+      assert(guardianSummary.status === 200, `Guardian child summary failed: ${guardianSummary.status}`);
+      assert(guardianSummary.body?.data?.student?.id === studentA.id, 'Guardian child data mismatch');
+
+      const guardianUnlinkedSnoop = await req(`/api/my/attendance/summary?studentId=${studentB.id}`, {
+        headers: { Cookie: guardianCookie62 },
+      });
+      assert(guardianUnlinkedSnoop.status === 403, `Guardian accessing unlinked student should be 403, got ${guardianUnlinkedSnoop.status}`);
+
+      const unlinkedSummary = await req('/api/my/attendance/summary', {
+        headers: { Cookie: unlinkedCookie62 },
+      });
+      assert(unlinkedSummary.status === 200, `Unlinked guardian summary failed: ${unlinkedSummary.status}`);
+      assert(Array.isArray(unlinkedSummary.body?.data?.linkedChildren) && unlinkedSummary.body.data.linkedChildren.length === 0, 'Unlinked guardian should have empty children');
+
+        recordCheck(
+          '62',
+          'Attendance guardian alerts, edit window enforcement, low attendance report & monthly matrix sheet',
+          true,
+          'Alerts fire once per student/day on absent, never to unlinked guardians or when disabled; edit window enforced for teachers (403 past threshold, admin override audited); low attendance filter & CSV export; monthly sheet matrix & CSV export; student and guardian summary properly scoped'
+        );
+      } finally {
+        if (initialSettings62) {
+          await prisma.centerSettings.update({
+            where: { key: 'center' },
+            data: {
+              features: initialSettings62.features as any,
+              attendancePolicy: initialSettings62.attendancePolicy as any,
+            },
+          });
+        }
+      }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────

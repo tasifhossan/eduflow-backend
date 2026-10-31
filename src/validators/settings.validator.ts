@@ -192,6 +192,15 @@ export const updateSettingsSchema = z
         lectures: z.boolean().optional(),
         assignments: z.boolean().optional(),
         onlineClasses: z.boolean().optional(),
+        attendanceAlerts: z.boolean().optional(),
+      })
+      .partial()
+      .optional(),
+    attendancePolicy: z
+      .object({
+        alertOnLate: z.boolean().optional(),
+        lowThresholdPercent: z.number().int().min(1).max(100).optional(),
+        editWindowDays: z.number().int().min(0).max(30).optional(),
       })
       .partial()
       .optional(),

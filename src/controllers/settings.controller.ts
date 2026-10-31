@@ -64,6 +64,15 @@ export async function updateSettings(req: Request, res: Response) {
       };
     }
 
+    // Deep merge attendancePolicy object if provided
+    if (parseResult.data.attendancePolicy) {
+      const existingPolicy = (currentSettings.attendancePolicy as Record<string, unknown>) || {};
+      updateData.attendancePolicy = {
+        ...existingPolicy,
+        ...parseResult.data.attendancePolicy,
+      };
+    }
+
     // Deep merge socials object if provided
     if (parseResult.data.socials !== undefined) {
       if (parseResult.data.socials === null) {

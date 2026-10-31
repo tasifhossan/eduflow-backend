@@ -427,6 +427,7 @@ model Attendance {
   status     AttendanceStatus
   markedById String
   markedBy   User             @relation(name: "MarkedAttendances", fields: [markedById], references: [id])
+  alertedAt  DateTime?
 
   @@unique([studentId, batchId, date])
   @@index([batchId])
@@ -792,7 +793,8 @@ model CenterSettings {
   feeDueDay              Int      @default(10)
   receiptHeader          String?
   receiptFooter          String?
-  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true}")
+  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true,\"attendanceAlerts\":true}")
+  attendancePolicy       Json     @default("{\"alertOnLate\":false,\"lowThresholdPercent\":75,\"editWindowDays\":7}")
   homepage               Json     @default("{\"heroBadge\":\"\",\"heroPoints\":[],\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
   officeHours            String?
   about                  Json?

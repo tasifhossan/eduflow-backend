@@ -83,7 +83,8 @@ function isAllowedTemporaryPasswordEndpoint(method: string, endpoint: string): b
   return (
     /^\/api\/auth\/register(?:\?.*)?$/.test(endpoint) ||
     /^\/api\/users\/import(?:\?.*)?$/.test(endpoint) ||
-    /^\/api\/users\/[^/]+\/reset-password(?:\?.*)?$/.test(endpoint)
+    /^\/api\/users\/[^/]+\/reset-password(?:\?.*)?$/.test(endpoint) ||
+    /^\/api\/enquiries\/[^/]+\/convert(?:\?.*)?$/.test(endpoint)
   );
 }
 
@@ -3113,6 +3114,249 @@ async function runSmokeTests() {
     );
     }
 
+    // Check 61: Enquiry Pipeline, Scoping, Duplicates, Atomic Convert & Zero Leakage
+    if (shouldRun('61', 'Enquiry Pipeline, Scoping, Duplicates, Atomic Convert & Zero Leakage', false)) {
+      const branch2 = (await prisma.branch.findFirst({ where: { id: { not: demoAdmin.branchId } } }))!;
+      await prisma.batch.update({ where: { id: smokeBatch1.id }, data: { isPublished: true } });
+
+      // 1. Public submission lands with the right branch rules
+      // (a) Interested batch branch
+      const pubBatchSubmit = await req('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'SMOKE-Pub-Batch-Enq',
+          phone: '01712000001',
+          interestedBatchId: smokeBatch1.id,
+          source: 'WEBSITE',
+        }),
+      });
+      const dbPubBatch = await prisma.contactMessage.findFirst({
+        where: { name: 'SMOKE-Pub-Batch-Enq' },
+        select: { id: true, branchId: true, stage: true },
+      });
+      assert(pubBatchSubmit.status === 200 && dbPubBatch?.branchId === smokeBatch1.branchId && dbPubBatch?.stage === 'NEW', 'Public batch submission branch failed');
+
+      // (b) Preferred branch
+      const pubPrefSubmit = await req('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'SMOKE-Pub-Pref-Enq',
+          phone: '01712000002',
+          preferredBranchId: branch2.id,
+          source: 'WEBSITE',
+        }),
+      });
+      const dbPubPref = await prisma.contactMessage.findFirst({
+        where: { name: 'SMOKE-Pub-Pref-Enq' },
+        select: { id: true, branchId: true, preferredBranchId: true },
+      });
+      assert(pubPrefSubmit.status === 200 && dbPubPref?.branchId === branch2.id, 'Public preferred branch submission failed');
+
+      // 2. Scoping: ADMIN of another branch denied; TEACHER, STUDENT, GUARDIAN denied
+      const adminList = await req('/api/enquiries', { headers: { Cookie: adminCookie } });
+      assert(adminList.status === 200, `Admin enquiries list failed: ${adminList.status}`);
+      const adminItems = adminList.body?.data?.items || [];
+      const hasOtherBranchInAdmin = adminItems.some((e: any) => e.branchId === branch2.id);
+      assert(!hasOtherBranchInAdmin, 'Admin can see enquiries from another branch in list');
+
+      // Admin reading branch 2 enquiry by ID directly -> 403
+      const adminCrossRead = await req(`/api/enquiries/${dbPubPref!.id}`, { headers: { Cookie: adminCookie } });
+      assert(adminCrossRead.status === 403, `Admin cross-branch read status ${adminCrossRead.status} != 403`);
+
+      // Teacher, student, guardian -> 403
+      const teacherEnq = await req('/api/enquiries', { headers: { Cookie: teacherCookie } });
+      const studentEnq = await req('/api/enquiries', { headers: { Cookie: studentCookie } });
+      const guardianEnq = await req('/api/enquiries', { headers: { Cookie: guardianCookie } });
+      assert(teacherEnq.status === 403 && studentEnq.status === 403 && guardianEnq.status === 403, 'Unauthorized roles were not denied 403');
+
+      // 3. Duplicate detection
+      const dupCheck = await req('/api/enquiries/duplicates?phone=01712000001', { headers: { Cookie: adminCookie } });
+      assert(dupCheck.status === 200, `Duplicate check failed: ${dupCheck.status}`);
+      const dupEnquiries = dupCheck.body?.data?.enquiries || [];
+      const dupFound = dupEnquiries.some((d: any) => d.id === dbPubBatch!.id);
+      assert(dupFound, 'Duplicate enquiry not found in duplicate check');
+      const sampleDupName = dupEnquiries[0]?.name || '';
+      assert(sampleDupName.includes('*'), 'Duplicate enquiry name was not masked');
+
+      // 4. Stage flow and LOST requires a reason
+      const walkInCreate = await req('/api/enquiries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: 'SMOKE-Walkin-1',
+          phone: '01712000003',
+          source: 'WALK_IN',
+        }),
+      });
+      assert(walkInCreate.status === 201, `Walk-in create failed: ${walkInCreate.status}`);
+      const walkInId = walkInCreate.body?.data?.id;
+
+      // Contacted stage
+      const stageContacted = await req(`/api/enquiries/${walkInId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ stage: 'CONTACTED' }),
+      });
+      assert(stageContacted.status === 200 && stageContacted.body?.data?.stage === 'CONTACTED', 'Stage update to CONTACTED failed');
+
+      // Lost stage without reason -> 400
+      const stageLostNoReason = await req(`/api/enquiries/${walkInId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ stage: 'LOST' }),
+      });
+      assert(stageLostNoReason.status === 400, `LOST stage without reason did not return 400: ${stageLostNoReason.status}`);
+
+      // Lost stage with reason -> 200
+      const stageLostWithReason = await req(`/api/enquiries/${walkInId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ stage: 'LOST', lostReason: 'Fee too high' }),
+      });
+      assert(stageLostWithReason.status === 200 && stageLostWithReason.body?.data?.stage === 'LOST', 'LOST stage with reason failed');
+
+      // Add note
+      const addNote = await req(`/api/enquiries/${walkInId}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ kind: 'CALL', body: 'SMOKE call note for test' }),
+      });
+      assert(addNote.status === 201 && addNote.body?.data?.body === 'SMOKE call note for test', 'Add note failed');
+
+      // 5. Convert creates student, guardian link, enrollment and optional admission charge atomically
+      const toConvertEnq = await req('/api/enquiries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: 'SMOKE-Convert-Me',
+          phone: '01712000004',
+          guardianName: 'SMOKE Guardian 1',
+          source: 'WALK_IN',
+        }),
+      });
+      assert(toConvertEnq.status === 201, `To-convert enquiry create failed: ${toConvertEnq.status}`);
+      const toConvertId = toConvertEnq.body?.data?.id;
+
+      const convertRes = await req(`/api/enquiries/${toConvertId}/convert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: 'SMOKE Converted Student',
+          phone: '01712000004',
+          batchId: smokeBatch1.id,
+          guardian: {
+            name: 'SMOKE Guardian 1',
+            phone: '01712000005',
+          },
+          admissionFee: '1500',
+        }),
+      });
+      assert(convertRes.status === 200, `Convert failed: ${convertRes.status} - ${JSON.stringify(convertRes.body)}`);
+      const convData = convertRes.body?.data;
+      assert(Boolean(convData?.student?.id && convData?.student?.studentCode && convData?.student?.temporaryPassword), 'Converted student credentials missing');
+      assert(Boolean(convData?.guardian?.id && convData?.guardian?.temporaryPassword), 'Converted guardian credentials missing');
+      assert(Boolean(convData?.enrollment?.id && convData?.enrollment?.status === 'ACTIVE'), 'Enrollment not created active');
+      assert(Boolean(convData?.feeCharge?.id), 'Admission fee charge not created');
+
+      const convertedStudentId = convData.student.id;
+      const convertedGuardianId = convData.guardian.id;
+
+      // Verify db link
+      const dbLink = await prisma.guardianLink.findFirst({
+        where: { studentId: convertedStudentId, guardianId: convertedGuardianId },
+      });
+      assert(Boolean(dbLink), 'GuardianLink was not created');
+
+      // 6. Double convert returns 409
+      const doubleConvert = await req(`/api/enquiries/${toConvertId}/convert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: 'SMOKE Converted Student 2',
+          phone: '01712000004',
+          batchId: smokeBatch1.id,
+        }),
+      });
+      assert(doubleConvert.status === 409, `Double convert did not return 409: ${doubleConvert.status}`);
+
+      // 7. Atomic rollback verification: invalid batch inside convert fails and leaves nothing behind
+      const rollbackEnq = await req('/api/enquiries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: 'SMOKE-Rollback-Test',
+          phone: '01712000099',
+        }),
+      });
+      const rollbackEnqId = rollbackEnq.body?.data?.id;
+      const failedConvert = await req(`/api/enquiries/${rollbackEnqId}/convert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: 'SMOKE Rollback Student',
+          phone: '01712000099',
+          batchId: 'non-existent-batch-id-12345',
+        }),
+      });
+      assert(failedConvert.status === 404, `Convert with invalid batch returned ${failedConvert.status} != 404`);
+      const orphanUser = await prisma.user.findFirst({ where: { phone: '01712000099' } });
+      assert(orphanUser === null, 'User was left behind after failed convert transaction');
+
+      // 8. Temporary password not in subsequent responses, audit or logs
+      const getEnquiryAfter = await req(`/api/enquiries/${toConvertId}`, { headers: { Cookie: adminCookie } });
+      assert(getEnquiryAfter.status === 200, 'Get enquiry after convert failed');
+      const stringifiedEnquiry = JSON.stringify(getEnquiryAfter.body);
+      assert(!stringifiedEnquiry.includes(convData.student.temporaryPassword), 'Temporary password leaked in GET /api/enquiries/:id');
+      assert(!stringifiedEnquiry.includes(convData.guardian.temporaryPassword), 'Guardian temporary password leaked in GET /api/enquiries/:id');
+
+      // Audit log inspection: zero passwords, zero phones, zero note text in metadata
+      const auditEntries = await prisma.auditLog.findMany({
+        where: {
+          action: { in: ['ENQUIRY_CREATE', 'ENQUIRY_UPDATE', 'ENQUIRY_STAGE_CHANGE', 'ENQUIRY_CONVERT', 'ENQUIRIES_EXPORT_CSV'] },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      });
+      for (const entry of auditEntries) {
+        const metaStr = JSON.stringify(entry.metadata || {});
+        assert(!metaStr.includes('01712'), `Phone number leaked in audit metadata: ${metaStr}`);
+        assert(!metaStr.includes('SMOKE call note for test'), `Note text leaked in audit metadata: ${metaStr}`);
+        assert(!metaStr.toLowerCase().includes('password'), `Password leaked in audit metadata: ${metaStr}`);
+      }
+
+      // 9. CSV formula neutralization
+      const csvEnq = await req('/api/enquiries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: '=1+2',
+          phone: '01712000006',
+        }),
+      });
+      assert(csvEnq.status === 201, `CSV test enquiry create failed: ${csvEnq.status}`);
+
+      const csvRes = await req('/api/enquiries?format=csv', { headers: { Cookie: adminCookie } });
+      assert(csvRes.status === 200, `CSV export failed: ${csvRes.status}`);
+      const csvText = csvRes.rawText || (typeof csvRes.body === 'string' ? csvRes.body : JSON.stringify(csvRes.body));
+      assert(csvText.includes("''=1+2") || csvText.includes("'=1+2"), `Formula was not neutralized in CSV: ${csvText.slice(0, 300)}`);
+
+      // 10. Summary numbers match fixtures
+      const summaryRes = await req('/api/enquiries/summary', { headers: { Cookie: adminCookie } });
+      assert(summaryRes.status === 200, `Summary endpoint failed: ${summaryRes.status}`);
+      const stagesSummary = summaryRes.body?.data?.stages;
+      assert(typeof stagesSummary?.NEW === 'number' && typeof stagesSummary?.LOST === 'number' && typeof stagesSummary?.ADMITTED === 'number', 'Summary stage counts missing');
+      assert(stagesSummary.ADMITTED >= 1, 'Summary admitted count does not reflect conversion');
+
+      recordCheck(
+        '61',
+        'Enquiry pipeline, branch rules, scoping, duplicates, atomic convert, CSV neutralization & audit security',
+        true,
+        'Public branch rules (batch & pref branch); scoping (Admin cross-branch 403, Teacher/Student/Guardian 403); duplicate masked names; LOST requires reason; atomic convert with studentCode, enrollment, fee charge & guardian link; double-convert 409; rollback verified; CSV formula neutralized; zero secret/phone leakage in audit'
+      );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
@@ -4700,6 +4944,51 @@ async function runSmokeTests() {
       }
       await prisma.faqItem.deleteMany({ where: { question: { startsWith: 'SMOKE-' } } });
 
+      await prisma.enquiryNote.deleteMany({
+        where: {
+          OR: [
+            { body: { startsWith: 'SMOKE' } },
+            { enquiry: { name: { startsWith: 'SMOKE' } } },
+          ],
+        },
+      });
+      await prisma.contactMessage.deleteMany({
+        where: {
+          OR: [
+            { name: { startsWith: 'SMOKE' } },
+            { name: '=1+2' },
+            { phone: { in: ['01712000001', '01712000002', '01712000003', '01712000004', '01712000005', '01712000006', '01712000099'] } },
+          ],
+        },
+      });
+      const smokeUsersToDelete = await prisma.user.findMany({
+        where: {
+          OR: [
+            { phone: { in: ['01712000004', '01712000005', '01712000099'] } },
+            { name: { startsWith: 'SMOKE Converted' } },
+            { name: { startsWith: 'SMOKE Guardian' } },
+          ],
+        },
+        select: { id: true },
+      });
+      const uIds = smokeUsersToDelete.map((u) => u.id);
+      if (uIds.length > 0) {
+        await prisma.guardianLink.deleteMany({
+          where: { OR: [{ studentId: { in: uIds } }, { guardianId: { in: uIds } }] },
+        });
+        await prisma.feeCharge.deleteMany({
+          where: { studentId: { in: uIds } },
+        });
+        await prisma.enrollment.deleteMany({
+          where: { studentId: { in: uIds } },
+        });
+        await prisma.auditLog.deleteMany({
+          where: { OR: [{ actorId: { in: uIds } }, { entityId: { in: uIds } }] },
+        });
+        await prisma.user.deleteMany({
+          where: { id: { in: uIds } },
+        });
+      }
       console.log('Smoke test fixtures cleaned up successfully.');
     } catch (cleanupErr) {
       console.error('Error cleaning up fixtures:', cleanupErr);

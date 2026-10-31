@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { Prisma, Role, ContactMessageStatus } from '@prisma/client';
+import { Prisma, Role, ContactMessageStatus, EnquiryStage } from '@prisma/client';
 import prisma from '../utils/prisma';
 import { parsePagination, buildMeta } from '../utils/pagination';
 import {
@@ -631,7 +631,19 @@ export async function submitContactMessage(req: Request, res: Response) {
       });
     }
 
-    const { name, email, phone, subject, message, interestedBatchId, interestedGrade, source, website } = parseResult.data;
+    const {
+      name,
+      email,
+      phone,
+      subject,
+      message,
+      interestedBatchId,
+      interestedGrade,
+      preferredBranchId,
+      guardianName,
+      source,
+      website,
+    } = parseResult.data;
 
     // Honeypot check: If filled, silently succeed without saving
     if (website && website.trim().length > 0) {
@@ -645,16 +657,46 @@ export async function submitContactMessage(req: Request, res: Response) {
     const batchIdToSet = interestedBatchId && interestedBatchId.trim().length > 0 ? interestedBatchId.trim() : null;
 
     let validatedBatchId: string | null = null;
+    let batchBranchId: string | null = null;
     if (batchIdToSet) {
       const publishedBatch = await prisma.batch.findFirst({
         where: {
           id: batchIdToSet,
           isPublished: true,
         },
-        select: { id: true },
+        select: { id: true, branchId: true },
       });
       if (publishedBatch) {
         validatedBatchId = publishedBatch.id;
+        batchBranchId = publishedBatch.branchId;
+      }
+    }
+
+    let validatedPreferredBranchId: string | null = null;
+    if (preferredBranchId && preferredBranchId.trim().length > 0) {
+      const branchExists = await prisma.branch.findUnique({
+        where: { id: preferredBranchId.trim() },
+        select: { id: true },
+      });
+      if (branchExists) {
+        validatedPreferredBranchId = branchExists.id;
+      }
+    }
+
+    // Branch rule: branchId = the interested batch's branch, else preferredBranchId, else null;
+    // When the center has exactly one branch, set it automatically.
+    let branchIdToSet: string | null = null;
+    if (batchBranchId) {
+      branchIdToSet = batchBranchId;
+    } else if (validatedPreferredBranchId) {
+      branchIdToSet = validatedPreferredBranchId;
+    } else {
+      const branchCount = await prisma.branch.count();
+      if (branchCount === 1) {
+        const singleBranch = await prisma.branch.findFirst({ select: { id: true } });
+        if (singleBranch) {
+          branchIdToSet = singleBranch.id;
+        }
       }
     }
 
@@ -667,8 +709,12 @@ export async function submitContactMessage(req: Request, res: Response) {
         message: message && message.trim().length > 0 ? message.trim() : null,
         interestedBatchId: validatedBatchId,
         interestedGrade: interestedGrade && interestedGrade.trim().length > 0 ? interestedGrade.trim() : null,
+        preferredBranchId: validatedPreferredBranchId,
+        branchId: branchIdToSet,
+        guardianName: guardianName && guardianName.trim().length > 0 ? guardianName.trim() : null,
         source: source || 'WEBSITE',
         status: ContactMessageStatus.NEW,
+        stage: EnquiryStage.NEW,
       },
       select: {
         id: true,
@@ -722,9 +768,10 @@ export async function getContactMessages(req: Request, res: Response) {
           message: 'Admin is not associated with any branch',
         });
       }
-      where.interestedBatch = {
-        branchId: userBranchId,
-      };
+      where.OR = [
+        { branchId: userBranchId },
+        { interestedBatch: { branchId: userBranchId } },
+      ];
     }
 
     const [total, items] = await Promise.all([

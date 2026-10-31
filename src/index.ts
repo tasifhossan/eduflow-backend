@@ -149,6 +149,7 @@ import lectureRouter from './routes/lecture.routes';
 import assignmentRouter from './routes/assignment.routes';
 import attachmentRouter from './routes/attachment.routes';
 import notificationRouter from './routes/notification.routes';
+import enquiryRouter from './routes/enquiry.routes';
 
 // Routes
 app.use('/api/health', healthRouter);
@@ -187,6 +188,7 @@ app.use('/api', lectureRouter);
 app.use('/api', assignmentRouter);
 app.use('/api', attachmentRouter);
 app.use('/api', notificationRouter);
+app.use('/api/enquiries', enquiryRouter);
 
 
 // Global Error Handler

@@ -139,6 +139,21 @@ enum ContactMessageStatus {
   ARCHIVED
 }
 
+enum EnquiryStage {
+  NEW
+  CONTACTED
+  VISIT_SCHEDULED
+  TRIAL
+  ADMITTED
+  LOST
+}
+
+enum EnquiryNoteKind {
+  NOTE
+  CALL
+  VISIT
+}
+
 enum LectureStatus {
   PLANNED
   COMPLETED
@@ -183,6 +198,8 @@ model Branch {
   paymentAllocations PaymentAllocation[]
   paymentReversals PaymentReversal[]
   receiptSequences ReceiptSequence[]
+  enquiries ContactMessage[] @relation("BranchEnquiries")
+  preferredEnquiries ContactMessage[] @relation("PreferredBranchEnquiries")
 }
 
 model User {
@@ -243,6 +260,9 @@ model User {
   paymentReversals     PaymentReversal[]       @relation(name: "PaymentReversals")
   testAttempts         TestAttempt[]           @relation(name: "StudentTestAttempts")
   extendedAttempts     TestAttempt[]           @relation(name: "AttemptExtensions")
+  assignedEnquiries    ContactMessage[]        @relation(name: "AssignedEnquiries")
+  convertedEnquiries   ContactMessage[]        @relation(name: "ConvertedStudentEnquiries")
+  authoredEnquiryNotes EnquiryNote[]           @relation(name: "EnquiryNoteAuthor")
 
 
   @@index([branchId])
@@ -684,22 +704,53 @@ model Testimonial {
 }
 
 model ContactMessage {
-  id                String               @id @default(cuid())
-  name              String
-  email             String?
-  phone             String?
-  subject           String?
-  message           String?
-  interestedBatchId String?
-  interestedBatch   Batch?               @relation(fields: [interestedBatchId], references: [id], onDelete: SetNull)
-  interestedGrade   String?
-  source            String               @default("WEBSITE")
-  status            ContactMessageStatus @default(NEW)
-  createdAt         DateTime             @default(now())
+  id                  String               @id @default(cuid())
+  name                String
+  email               String?
+  phone               String?
+  subject             String?
+  message             String?
+  interestedBatchId   String?
+  interestedBatch     Batch?               @relation(fields: [interestedBatchId], references: [id], onDelete: SetNull)
+  interestedGrade     String?
+  source              String               @default("WEBSITE")
+  status              ContactMessageStatus @default(NEW)
+  stage               EnquiryStage         @default(NEW)
+  branchId            String?
+  branch              Branch?              @relation("BranchEnquiries", fields: [branchId], references: [id], onDelete: SetNull)
+  preferredBranchId   String?
+  preferredBranch     Branch?              @relation("PreferredBranchEnquiries", fields: [preferredBranchId], references: [id], onDelete: SetNull)
+  assignedToId        String?
+  assignedTo          User?                @relation("AssignedEnquiries", fields: [assignedToId], references: [id], onDelete: SetNull)
+  followUpAt          DateTime?
+  lostReason          String?
+  convertedStudentId  String?
+  convertedStudent    User?                @relation("ConvertedStudentEnquiries", fields: [convertedStudentId], references: [id], onDelete: SetNull)
+  guardianName        String?
+  notes               EnquiryNote[]
+  createdAt           DateTime             @default(now())
 
   @@index([status])
   @@index([createdAt])
   @@index([interestedBatchId])
+  @@index([branchId, stage])
+  @@index([assignedToId])
+  @@index([followUpAt])
+  @@index([phone])
+}
+
+model EnquiryNote {
+  id        String          @id @default(cuid())
+  enquiryId String
+  enquiry   ContactMessage  @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User            @relation("EnquiryNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  kind      EnquiryNoteKind @default(NOTE)
+  body      String
+  createdAt DateTime        @default(now())
+
+  @@index([enquiryId, createdAt])
+  @@index([authorId])
 }
 
 model NewsletterSubscriber {

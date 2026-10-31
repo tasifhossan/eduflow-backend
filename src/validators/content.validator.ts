@@ -58,6 +58,8 @@ export const createContactMessageSchema = z
     message: z.string().trim().max(1000, 'Message cannot exceed 1000 characters').optional().nullable(),
     interestedBatchId: z.string().trim().optional().nullable().or(z.literal('')),
     interestedGrade: z.string().trim().max(40, 'Grade cannot exceed 40 characters').optional().nullable().or(z.literal('')),
+    preferredBranchId: z.string().trim().optional().nullable().or(z.literal('')),
+    guardianName: z.string().trim().max(100, 'Guardian name cannot exceed 100 characters').optional().nullable().or(z.literal('')),
     source: z.string().trim().max(50).optional().default('WEBSITE'),
     website: z.string().optional(), // Honeypot field
   })

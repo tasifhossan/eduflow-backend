@@ -148,6 +148,34 @@ export const homepageSchema = z
   })
   .strict();
 
+export const gradingScaleRangeSchema = z.object({
+  minPercent: z.number().min(0).max(100),
+  label: z.string().trim().min(1).max(10),
+});
+
+export const gradingScaleSchema = z
+  .array(gradingScaleRangeSchema)
+  .min(1)
+  .max(10)
+  .superRefine((ranges, ctx) => {
+    for (let i = 1; i < ranges.length; i++) {
+      if (ranges[i].minPercent >= ranges[i - 1].minPercent) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Grading scale ranges must be in strictly descending order of minPercent',
+        });
+        return;
+      }
+    }
+    const lowest = ranges[ranges.length - 1];
+    if (lowest.minPercent !== 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'The lowest range in the grading scale must have minPercent = 0',
+      });
+    }
+  });
+
 export const updateSettingsSchema = z
   .object({
     name: z.string().trim().min(2).max(100).optional(),
@@ -208,6 +236,7 @@ export const updateSettingsSchema = z
     officeHours: plainText(120).optional().nullable(),
     about: aboutSchema.partial().optional().nullable(),
     legal: legalSchema.partial().optional().nullable(),
+    gradingScale: gradingScaleSchema.nullable().optional(),
   })
   .strict();
 

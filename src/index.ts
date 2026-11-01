@@ -28,6 +28,8 @@ import branchRouter from './routes/branch.routes';
 import practiceRouter from './routes/practice.routes';
 import publicRouter from './routes/public.routes';
 import contentRouter from './routes/content.routes';
+import reportCardRouter from './routes/report-card.routes';
+import exportRouter from './routes/export.routes';
 import tablesRouter from './routes/tables.routes';
 import chartsRouter from './routes/charts.routes';
 import meRouter from './routes/me.routes';
@@ -189,6 +191,8 @@ app.use('/api', assignmentRouter);
 app.use('/api', attachmentRouter);
 app.use('/api', notificationRouter);
 app.use('/api/enquiries', enquiryRouter);
+app.use('/api', reportCardRouter);
+app.use('/api', exportRouter);
 
 
 // Global Error Handler

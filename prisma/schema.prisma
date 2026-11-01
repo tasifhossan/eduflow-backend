@@ -263,6 +263,9 @@ model User {
   assignedEnquiries    ContactMessage[]        @relation(name: "AssignedEnquiries")
   convertedEnquiries   ContactMessage[]        @relation(name: "ConvertedStudentEnquiries")
   authoredEnquiryNotes EnquiryNote[]           @relation(name: "EnquiryNoteAuthor")
+  createdReportPeriods ReportPeriod[]          @relation(name: "ReportPeriodCreatedBy")
+  studentRemarks       ReportRemark[]          @relation(name: "ReportRemarkStudent")
+  updatedRemarks       ReportRemark[]          @relation(name: "ReportRemarkUpdatedBy")
 
 
   @@index([branchId])
@@ -375,6 +378,7 @@ model Batch {
   contactMessages  ContactMessage[]
   lectures         Lecture[]
   assignments      Assignment[]
+  reportPeriods    ReportPeriod[]
   archivedAt       DateTime?
 
 
@@ -799,6 +803,7 @@ model CenterSettings {
   officeHours            String?
   about                  Json?
   legal                  Json?
+  gradingScale           Json?
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
@@ -1060,6 +1065,41 @@ model ReceiptSequence {
 
   @@unique([branchId, year])
 }
+
+model ReportPeriod {
+  id          String         @id @default(cuid())
+  batchId     String
+  batch       Batch          @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  label       String         @db.VarChar(60)
+  from        DateTime       @db.Date
+  to          DateTime       @db.Date
+  publishedAt DateTime?
+  createdById String
+  createdBy   User           @relation("ReportPeriodCreatedBy", fields: [createdById], references: [id])
+  remarks     ReportRemark[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([batchId, label])
+  @@index([batchId])
+}
+
+model ReportRemark {
+  id          String       @id @default(cuid())
+  periodId    String
+  period      ReportPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     User         @relation("ReportRemarkStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  remark      String       @db.VarChar(600)
+  updatedById String
+  updatedBy   User         @relation("ReportRemarkUpdatedBy", fields: [updatedById], references: [id])
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([periodId, studentId])
+  @@index([periodId])
+  @@index([studentId])
+}
+
 
 
 

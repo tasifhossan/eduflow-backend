@@ -19,6 +19,7 @@ export interface CenterPublicData {
   timezone: string;
   defaultLocale: string;
   weekStartsOn: number;
+  gradingScale?: Array<{ minPercent: number; label: string }> | null;
   features: {
     publicSite?: boolean;
     aiAssistant?: boolean;
@@ -214,6 +215,7 @@ export async function getPublicCenterSettings(forceRefresh = false): Promise<Cen
     timezone: settings.timezone,
     defaultLocale: settings.defaultLocale,
     weekStartsOn: settings.weekStartsOn ?? 6,
+    gradingScale: (settings.gradingScale as CenterPublicData['gradingScale']) ?? null,
     features,
     homepage: (settings.homepage as CenterPublicData['homepage']) || {
       heroBadge: '',

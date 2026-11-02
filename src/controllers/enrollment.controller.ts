@@ -267,14 +267,40 @@ export async function getBatchesByStudent(req: Request, res: Response) {
       });
     }
 
-    // Verify student belongs to the same branch
+    if (req.user.role === Role.GUARDIAN) {
+      const link = await prisma.guardianLink.findFirst({
+        where: {
+          guardianId: req.user.userId,
+          studentId,
+        },
+      });
+      if (!link) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Access denied to unlinked student batches',
+        });
+      }
+    }
+
+    // Verify student exists and check branch for staff
     const student = await prisma.user.findUnique({
       where: { id: studentId },
     });
-    if (!student || student.branchId !== branchId) {
+    if (!student) {
       return res.status(404).json({
         success: false,
         message: 'Student not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role !== Role.STUDENT &&
+      req.user.role !== Role.GUARDIAN &&
+      student.branchId !== branchId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Access denied to other branch student',
       });
     }
 

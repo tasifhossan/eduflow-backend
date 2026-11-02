@@ -300,6 +300,7 @@ export async function getMyLinkedStudents(req: Request, res: Response) {
       success: true,
       message: 'Linked students retrieved successfully',
       data: students,
+      children: students,
     });
   } catch (error) {
     console.error('Get my linked students error:', error);

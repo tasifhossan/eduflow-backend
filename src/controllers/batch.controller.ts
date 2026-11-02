@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { Role } from '@prisma/client';
 import { createBatchSchema, updateBatchSchema } from '../validators/batch.validator';
 import prisma from '../utils/prisma';
 import { createAuditLog } from '../utils/audit';
@@ -89,18 +90,51 @@ export async function getBatches(req: Request, res: Response) {
       });
     }
 
+    const isStudentOrGuardian = req.user.role === Role.STUDENT || req.user.role === Role.GUARDIAN;
     const whereClause: any = {
       archivedAt: null,
     };
-    if (req.effectiveBranchId) {
+    if (req.effectiveBranchId && !isStudentOrGuardian) {
       whereClause.branchId = req.effectiveBranchId;
     }
     if (req.query.teacherId && typeof req.query.teacherId === 'string') {
       whereClause.teacherId = req.query.teacherId;
     }
 
+    if (req.user.role === Role.STUDENT) {
+      whereClause.enrollments = {
+        some: {
+          studentId: req.user.userId,
+          status: 'ACTIVE',
+        },
+      };
+    } else if (req.user.role === Role.GUARDIAN) {
+      const targetStudentId = (req.query.studentId as string) || undefined;
+      whereClause.enrollments = {
+        some: {
+          student: {
+            guardianLinks: {
+              some: { guardianId: req.user.userId },
+            },
+          },
+          ...(targetStudentId ? { studentId: targetStudentId } : {}),
+          status: 'ACTIVE',
+        },
+      };
+    } else if (req.query.studentId && typeof req.query.studentId === 'string') {
+      whereClause.enrollments = {
+        some: {
+          studentId: req.query.studentId,
+          status: 'ACTIVE',
+        },
+      };
+    }
+
+    const takeLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+
     const batches = await prisma.batch.findMany({
       where: whereClause,
+      ...(takeLimit && !isNaN(takeLimit) && takeLimit > 0 ? { take: takeLimit } : {}),
       include: {
         subject: {
           select: { name: true },

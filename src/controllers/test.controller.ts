@@ -106,12 +106,12 @@ export async function getTestsByBatch(req: Request, res: Response) {
     const batchId = req.params.batchId as string;
     const branchId = req.user.branchId;
 
-    // Verify batch belongs to branch and is not archived
+    // Verify batch exists and is not archived
     const batch = await prisma.batch.findUnique({
       where: { id: batchId },
     });
 
-    if (!batch || batch.branchId !== branchId || batch.archivedAt !== null) {
+    if (!batch || batch.archivedAt !== null) {
       return res.status(404).json({
         success: false,
         message: 'Batch not found or access denied',
@@ -133,6 +133,14 @@ export async function getTestsByBatch(req: Request, res: Response) {
           message: 'Forbidden: Active enrollment required',
         });
       }
+    } else {
+      // For staff (ADMIN, TEACHER): batch must belong to their branch
+      if (req.user.role !== Role.SUPER_ADMIN && batch.branchId !== branchId) {
+        return res.status(404).json({
+          success: false,
+          message: 'Batch not found or access denied',
+        });
+      }
     }
 
     // Filter out archived tests
@@ -141,13 +149,27 @@ export async function getTestsByBatch(req: Request, res: Response) {
         batchId,
         archivedAt: null,
       },
+      include: req.user.role === Role.STUDENT ? {
+        results: {
+          where: { studentId: req.user.userId },
+          select: { id: true },
+        },
+      } : undefined,
       orderBy: { testDate: 'asc' },
+    });
+
+    const data = tests.map((t: any) => {
+      const { results, ...rest } = t;
+      return {
+        ...rest,
+        isSubmitted: results ? results.length > 0 : undefined,
+      };
     });
 
     return res.status(200).json({
       success: true,
       message: 'Tests retrieved successfully',
-      data: tests,
+      data,
     });
   } catch (error) {
     console.error('Get tests by batch error:', error);

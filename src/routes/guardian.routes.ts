@@ -35,7 +35,7 @@ router.delete(
 );
 
 router.get(
-  '/guardians/my-students',
+  ['/guardians/my-students', '/guardian/children', '/guardians/children', '/guardian/my-students'],
   authenticate,
   authorize(Role.GUARDIAN),
   getMyLinkedStudents

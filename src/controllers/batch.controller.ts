@@ -135,6 +135,10 @@ export async function getBatchById(req: Request, res: Response) {
       });
     }
 
+    if (req.user.role === 'STUDENT') {
+      return getBatchForStudent(req, res);
+    }
+
     const id = req.params.id as string;
     const whereClause: any = { id, archivedAt: null };
     if (req.effectiveBranchId) {

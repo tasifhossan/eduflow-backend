@@ -13,6 +13,7 @@ const router = Router();
 router.get(
   '/academic-summary',
   authenticate,
+  authorize(Role.ADMIN, Role.SUPER_ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN),
   getAcademicSummary,
 );
 

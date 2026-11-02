@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { authenticate } from '../middleware/auth.middleware';
+import { Role } from '@prisma/client';
+import { authenticate, authorize } from '../middleware/auth.middleware';
 import { requireFeature } from '../middleware/featureFlag.middleware';
 import {
   createLecture,
@@ -17,7 +18,7 @@ const router = Router();
 
 router.use(requireFeature('lectures'));
 
-router.post('/lectures', authenticate, createLecture);
+router.post('/lectures', authenticate, authorize(Role.SUPER_ADMIN, Role.ADMIN, Role.TEACHER), createLecture);
 router.get('/lectures', authenticate, getLectures);
 router.get('/lectures/:id', authenticate, getLectureById);
 router.patch('/lectures/:id', authenticate, updateLecture);

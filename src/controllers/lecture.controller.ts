@@ -1479,26 +1479,42 @@ export async function getSyllabusProgress(req: Request, res: Response) {
     }
 
     if (user.role === Role.GUARDIAN) {
-      const studentId = req.query.studentId as string;
+      let studentId = req.query.studentId as string;
       if (!studentId) {
-        return res.status(400).json({
-          success: false,
-          message: 'studentId query parameter is required for guardians',
-        });
-      }
-      const link = await prisma.guardianLink.findUnique({
-        where: {
-          guardianId_studentId: {
+        const link = await prisma.guardianLink.findFirst({
+          where: {
             guardianId: user.userId,
-            studentId,
+            student: {
+              enrollments: {
+                some: { batchId, status: EnrollmentStatus.ACTIVE },
+              },
+            },
           },
-        },
-      });
-      if (!link) {
-        return res.status(403).json({
-          success: false,
-          message: 'Forbidden: Guardian is not linked to this student',
+          select: { studentId: true },
         });
+        if (link) {
+          studentId = link.studentId;
+        } else {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: No linked student with active enrollment in this batch',
+          });
+        }
+      } else {
+        const link = await prisma.guardianLink.findUnique({
+          where: {
+            guardianId_studentId: {
+              guardianId: user.userId,
+              studentId,
+            },
+          },
+        });
+        if (!link) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: Guardian is not linked to this student',
+          });
+        }
       }
       const enrollment = await prisma.enrollment.findUnique({
         where: {

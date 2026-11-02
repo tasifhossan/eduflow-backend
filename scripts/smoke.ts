@@ -542,6 +542,7 @@ async function runSmokeTests() {
     }
 
     let smokeBatch1: any = null;
+    let smokeBatch2: any = null;
     let smokeEnrollment1: any = null;
 
     smokeBatch1 = await prisma.batch.create({
@@ -645,7 +646,7 @@ async function runSmokeTests() {
 
     // Check 11: Student not enrolled in a batch -> 403 on tests and routine
     if (shouldRun('11', 'Student not enrolled in a batch -> 403 on tests and routine', false)) {
-      const smokeBatch2 = await prisma.batch.create({
+      smokeBatch2 = await prisma.batch.create({
         data: {
           name: 'SMOKE-UnenrolledBatch-2',
           slug: `smoke-unenroll-2-${Date.now()}`,
@@ -992,6 +993,19 @@ async function runSmokeTests() {
 
     // Check 21: Reviews (non-enrolled 403, enrolled 201, duplicate 409, edit/delete other 403)
     if (shouldRun('21', 'Reviews (non-enrolled 403, enrolled 201, duplicate 409, edit/delete other 403)', false)) {
+      if (!smokeBatch2) {
+        smokeBatch2 = await prisma.batch.create({
+          data: {
+            name: 'SMOKE-UnenrolledBatch-2',
+            slug: `smoke-unenroll-2-${Date.now()}`,
+            type: 'ADMISSION',
+            branchId: demoAdmin.branchId,
+            subjectId: smokeSubject!.id,
+            isPublished: false,
+          },
+        });
+        createdBatchIds.push(smokeBatch2.id);
+      }
       const c21NonEnrolled = await req(`/api/batches/${smokeBatch2.id}/reviews`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
@@ -1167,12 +1181,12 @@ async function runSmokeTests() {
       const c25AdminScores = await req('/api/charts/my-scores', { headers: { Cookie: adminCookie } });
 
       // Compare fee-status with direct Prisma aggregate
-      const dbFeeGroups = await prisma.feePayment.groupBy({
-        by: ['status'],
-        where: { batch: { branchId: demoAdmin.branchId } },
-        _count: { _all: true },
+      const dbTotalCount = await prisma.feeCharge.count({
+        where: {
+          status: 'ACTIVE',
+          branchId: demoAdmin.branchId,
+        },
       });
-      const dbTotalCount = dbFeeGroups.reduce((acc, g) => acc + g._count._all, 0);
       const statusSummary = c25AdminFee.body?.data?.statusSummary || {};
       const chartTotalCount = Object.values(statusSummary).reduce((acc: number, s: any) => acc + (s.count || 0), 0);
       const feeMatch = dbTotalCount === chartTotalCount;
@@ -1358,9 +1372,17 @@ async function runSmokeTests() {
     // AUTH LIFECYCLE & PROVISIONING CHECKS (30 - 38)
     // ─────────────────────────────────────────────────────────────────────────
 
+    let phoneNum = '0171234' + String(Date.now()).slice(-4);
+    let c30User: any = null;
+    let c30TempPass: any = null;
+    let c30bTempPass: any = null;
+    let c31Email: any = null;
+    let tempUserCookie: any = null;
+    let updatedCookie: any = null;
+
     // Check 30: Staff-only user provisioning (returns temporaryPassword, studentCode, mustChangePassword=true)
     if (shouldRun('30', 'Staff-only user provisioning (returns temporaryPassword, studentCode, mustChangePassword=true)', false)) {
-      const phoneNum = '0171234' + String(Date.now()).slice(-4);
+      phoneNum = '0171234' + String(Date.now()).slice(-4);
       const c30 = await req('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
@@ -1371,8 +1393,8 @@ async function runSmokeTests() {
           role: 'STUDENT',
         }),
       });
-      const c30User = c30.body?.data?.user;
-      const c30TempPass = c30.body?.data?.temporaryPassword;
+      c30User = c30.body?.data?.user;
+      c30TempPass = c30.body?.data?.temporaryPassword;
       const c30Ident = c30.body?.data?.identifier;
       if (c30User?.id) createdUserIds.push(c30User.id);
       const c30Passed =
@@ -1396,7 +1418,7 @@ async function runSmokeTests() {
         method: 'POST',
         headers: { Cookie: adminCookie },
       });
-      const c30bTempPass = c30bReset.body?.data?.temporaryPassword;
+      c30bTempPass = c30bReset.body?.data?.temporaryPassword;
       const c30bPassed =
         c30bReset.status === 200 &&
         typeof c30bTempPass === 'string' &&
@@ -1411,7 +1433,7 @@ async function runSmokeTests() {
 
     // Check 31: Login by phone, student code, and email using reset temporary password
     if (shouldRun('31', 'Login by phone, student code, and email using reset temporary password', false)) {
-      const c31Email = await req('/api/auth/login', {
+      c31Email = await req('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1450,7 +1472,7 @@ async function runSmokeTests() {
 
     // Check 32: Forced password change gate (PASSWORD_CHANGE_REQUIRED on other endpoints)
     if (shouldRun('32', 'Forced password change gate (PASSWORD_CHANGE_REQUIRED on other endpoints)', false)) {
-      const tempUserCookie = extractCookie(c31Email.headers);
+      tempUserCookie = extractCookie(c31Email.headers);
       const c32Blocked = await req('/api/me', {
         headers: { Cookie: tempUserCookie },
       });
@@ -1465,7 +1487,7 @@ async function runSmokeTests() {
           newPassword: 'BrandNewSecurePassword123!',
         }),
       });
-      const updatedCookie = extractCookie(c32ChangeAllowed.headers) || tempUserCookie;
+      updatedCookie = extractCookie(c32ChangeAllowed.headers) || tempUserCookie;
       const c32NowAllowed = await req('/api/me', {
         headers: { Cookie: updatedCookie },
       });
@@ -2237,10 +2259,14 @@ async function runSmokeTests() {
       },
     });
 
+    let nowTime = Date.now();
+    let draftLecId: any = null;
+    let monLec: any = null;
+
     // Check 49: Academics scoping & draft protection
     if (shouldRun('49', 'Academics scoping & draft protection', false)) {
       // 1. Create a draft lecture and draft assignment
-      const nowTime = Date.now();
+      nowTime = Date.now();
       const c49DraftLecRes = await req('/api/lectures', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
@@ -2256,7 +2282,7 @@ async function runSmokeTests() {
           isPublished: false,
         }),
       });
-      const draftLecId = c49DraftLecRes.body?.data?.id;
+      draftLecId = c49DraftLecRes.body?.data?.id;
       if (draftLecId) createdLectureIds.push(draftLecId);
 
       const c49DraftAssignRes = await req('/api/assignments', {
@@ -2433,7 +2459,7 @@ async function runSmokeTests() {
       for (const r of realDbLectures) createdLectureIds.push(r.id);
 
       // Verify UTC offset for Monday slot (10:00 AM Asia/Dhaka is UTC 04:00 AM)
-      const monLec = realDbLectures.find((l) => l.routineSlotId === slot1.id);
+      monLec = realDbLectures.find((l) => l.routineSlotId === slot1.id);
       const isCorrectUtc = monLec?.startsAt?.toISOString() === '2026-11-09T04:00:00.000Z';
 
       // Idempotent second run
@@ -2513,6 +2539,13 @@ async function runSmokeTests() {
         c1Prog?.covered === true &&
         c1Prog?.lastCoveredAt !== null &&
         c2Prog?.covered === false;
+
+      // Verify syllabus-progress for all roles
+      const sSylAdmin = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: adminCookie } });
+      const sSylTeacher = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: teacherCookie } });
+      const sSylStudent = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: studentCookie } });
+      const sSylGuardian = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: guardianCookie } });
+      assert(!(sSylAdmin.status !== 200 || sSylTeacher.status !== 200 || sSylStudent.status !== 200 || sSylGuardian.status !== 200), 'syllabus-progress failed for roles');
 
       recordCheck(
         '52',
@@ -3127,7 +3160,7 @@ async function runSmokeTests() {
       // (a) Interested batch branch
       const pubBatchSubmit = await req('/api/contact', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.61' },
         body: JSON.stringify({
           name: 'SMOKE-Pub-Batch-Enq',
           phone: '01712000001',
@@ -3144,7 +3177,7 @@ async function runSmokeTests() {
       // (b) Preferred branch
       const pubPrefSubmit = await req('/api/contact', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.62' },
         body: JSON.stringify({
           name: 'SMOKE-Pub-Pref-Enq',
           phone: '01712000002',
@@ -3599,6 +3632,32 @@ async function runSmokeTests() {
         });
         assert(Boolean(auditAttUpdate), 'AuditLog ATTENDANCE_UPDATED was not written');
         assert(auditAttUpdate?.metadata?.oldStatus === 'ABSENT' && auditAttUpdate?.metadata?.newStatus === 'PRESENT', 'AuditLog metadata status mismatch');
+
+        // 3b. Forced notification failure safety: proving notification creation error cannot fail attendance save
+        const forcedDateStr = new Date(nowMs - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const countBeforeForced = await prisma.notification.count({ where: { userId: guardianA.id, type: 'ATTENDANCE_ALERT' } });
+        const markForcedFail = await req('/api/attendance', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: teacherCookie62,
+            'x-smoke-force-notification-failure': 'true',
+          },
+          body: JSON.stringify({
+            batchId: batch62.id,
+            date: forcedDateStr,
+            records: [
+              { studentId: studentA.id, status: 'ABSENT' },
+            ],
+          }),
+        });
+        assert(markForcedFail.status === 200, `Save must succeed (200) even when notifications fail, got ${markForcedFail.status}`);
+        const dbForcedAtt = await prisma.attendance.findUnique({
+          where: { studentId_batchId_date: { studentId: studentA.id, batchId: batch62.id, date: new Date(forcedDateStr + 'T00:00:00.000Z') } },
+        });
+        assert(Boolean(dbForcedAtt), 'Attendance record was not saved when notification failed');
+        const countAfterForced = await prisma.notification.count({ where: { userId: guardianA.id, type: 'ATTENDANCE_ALERT' } });
+        assert(countAfterForced === countBeforeForced, 'Notifications should not be created when notification dispatch throws');
 
         // 4. Test flag attendanceAlerts = false -> mark student A = ABSENT -> NO notification sent
         await req('/api/settings', {
@@ -4592,7 +4651,7 @@ async function runSmokeTests() {
             email: 'smoke-superadmin-fixture@example.com',
             role: Role.SUPER_ADMIN,
             isActive: true,
-            passwordHash: await bcrypt.hash('Password123!', 10),
+            password: await bcrypt.hash('Password123!', 10),
             branchId: demoAdmin.branchId,
           },
         });
@@ -4910,7 +4969,7 @@ async function runSmokeTests() {
         where: { name: 'SMOKE Invalid Batch Enquirer' },
         orderBy: { createdAt: 'desc' },
       });
-      assert(false, `Expected contact message interestedBatchId to be null for unpublished batch, got ${savedContactInvalid?.interestedBatchId}`);
+      assert(savedContactInvalid !== null && savedContactInvalid.interestedBatchId === null, `Expected contact message interestedBatchId to be null for unpublished batch, got ${savedContactInvalid?.interestedBatchId}`);
 
       recordCheck(
         '10',
@@ -5386,6 +5445,71 @@ async function runSmokeTests() {
         const metaStr = JSON.stringify(log.metadata || {});
         assert(!(metaStr.includes('TRX-') || metaStr.includes('password') || metaStr.includes('secret')), `Audit log ${log.id} leaked sensitive references/notes in metadata: ${metaStr}`);
       }
+
+      // 17. Frontend exact bodies: manual charge, void with reason, installments 100/3 & 200/3
+      const manualChargeExact = await req('/api/fees/charges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({
+          studentId: sStudent.id,
+          batchId: sBatch.id,
+          amount: '150.00',
+          dueDate: '2026-11-20',
+          description: 'Frontend Exact Manual Charge',
+          kind: 'OTHER',
+          period: null,
+        }),
+      });
+      assert(!(manualChargeExact.status !== 201 || !manualChargeExact.body?.data?.charge?.id), 'Manual charge with frontend exact body failed');
+      const manualChargeId = manualChargeExact.body.data.charge.id;
+
+      // Void the manual charge with reason
+      const voidManualRes = await req('/api/fees/charges/' + manualChargeId + '/void', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({ reason: 'Smoke test void with reason' }),
+      });
+      assert(!(voidManualRes.status !== 200), 'Void manual charge failed');
+
+      // Installments: 100.00 over 3, intervalMonths 1
+      const inst100Res = await req('/api/fees/charges/installments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({
+          studentId: sStudent.id,
+          batchId: sBatch.id,
+          total: '100.00',
+          count: 3,
+          firstDueDate: '2026-12-01',
+          intervalMonths: 1,
+          description: 'Frontend Exact Installment 100',
+        }),
+      });
+      assert(!(inst100Res.status !== 201), 'POST /api/fees/charges/installments (100.00/3) failed');
+      const inst100Charges = Array.isArray(inst100Res.body?.data) ? inst100Res.body.data : inst100Res.body?.data?.charges || [];
+      const inst100Amounts = inst100Charges.map((c: any) => c.amount);
+      const expected100 = ['33.33', '33.33', '33.34'];
+      assert(!(JSON.stringify(inst100Amounts) !== JSON.stringify(expected100)), '100.00 / 3 installments split mismatch');
+
+      // Installments: 200.00 over 3, intervalMonths 1
+      const inst200Res = await req('/api/fees/charges/installments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({
+          studentId: sStudent.id,
+          batchId: sBatch.id,
+          total: '200.00',
+          count: 3,
+          firstDueDate: '2026-12-01',
+          intervalMonths: 1,
+          description: 'Frontend Exact Installment 200',
+        }),
+      });
+      assert(!(inst200Res.status !== 201), 'POST /api/fees/charges/installments (200.00/3) failed');
+      const inst200Charges = Array.isArray(inst200Res.body?.data) ? inst200Res.body.data : inst200Res.body?.data?.charges || [];
+      const inst200Amounts = inst200Charges.map((c: any) => c.amount);
+      const expected200 = ['66.67', '66.67', '66.66'];
+      assert(!(JSON.stringify(inst200Amounts) !== JSON.stringify(expected200)), '200.00 / 3 installments split mismatch');
 
       recordCheck(
         '11',

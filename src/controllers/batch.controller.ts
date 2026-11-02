@@ -95,6 +95,9 @@ export async function getBatches(req: Request, res: Response) {
     if (req.effectiveBranchId) {
       whereClause.branchId = req.effectiveBranchId;
     }
+    if (req.query.teacherId && typeof req.query.teacherId === 'string') {
+      whereClause.teacherId = req.query.teacherId;
+    }
 
     const batches = await prisma.batch.findMany({
       where: whereClause,

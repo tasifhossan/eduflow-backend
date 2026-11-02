@@ -1181,12 +1181,12 @@ async function runSmokeTests() {
       const c25AdminScores = await req('/api/charts/my-scores', { headers: { Cookie: adminCookie } });
 
       // Compare fee-status with direct Prisma aggregate
-      const dbFeeGroups = await prisma.feePayment.groupBy({
-        by: ['status'],
-        where: { batch: { branchId: demoAdmin.branchId } },
-        _count: { _all: true },
+      const dbTotalCount = await prisma.feeCharge.count({
+        where: {
+          status: 'ACTIVE',
+          branchId: demoAdmin.branchId,
+        },
       });
-      const dbTotalCount = dbFeeGroups.reduce((acc, g) => acc + g._count._all, 0);
       const statusSummary = c25AdminFee.body?.data?.statusSummary || {};
       const chartTotalCount = Object.values(statusSummary).reduce((acc: number, s: any) => acc + (s.count || 0), 0);
       const feeMatch = dbTotalCount === chartTotalCount;
@@ -2539,6 +2539,13 @@ async function runSmokeTests() {
         c1Prog?.covered === true &&
         c1Prog?.lastCoveredAt !== null &&
         c2Prog?.covered === false;
+
+      // Verify syllabus-progress for all roles
+      const sSylAdmin = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: adminCookie } });
+      const sSylTeacher = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: teacherCookie } });
+      const sSylStudent = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: studentCookie } });
+      const sSylGuardian = await req('/api/batches/' + smokeBatch.id + '/syllabus-progress', { headers: { Cookie: guardianCookie } });
+      assert(!(sSylAdmin.status !== 200 || sSylTeacher.status !== 200 || sSylStudent.status !== 200 || sSylGuardian.status !== 200), 'syllabus-progress failed for roles');
 
       recordCheck(
         '52',
@@ -5438,6 +5445,71 @@ async function runSmokeTests() {
         const metaStr = JSON.stringify(log.metadata || {});
         assert(!(metaStr.includes('TRX-') || metaStr.includes('password') || metaStr.includes('secret')), `Audit log ${log.id} leaked sensitive references/notes in metadata: ${metaStr}`);
       }
+
+      // 17. Frontend exact bodies: manual charge, void with reason, installments 100/3 & 200/3
+      const manualChargeExact = await req('/api/fees/charges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({
+          studentId: sStudent.id,
+          batchId: sBatch.id,
+          amount: '150.00',
+          dueDate: '2026-11-20',
+          description: 'Frontend Exact Manual Charge',
+          kind: 'OTHER',
+          period: null,
+        }),
+      });
+      assert(!(manualChargeExact.status !== 201 || !manualChargeExact.body?.data?.charge?.id), 'Manual charge with frontend exact body failed');
+      const manualChargeId = manualChargeExact.body.data.charge.id;
+
+      // Void the manual charge with reason
+      const voidManualRes = await req('/api/fees/charges/' + manualChargeId + '/void', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({ reason: 'Smoke test void with reason' }),
+      });
+      assert(!(voidManualRes.status !== 200), 'Void manual charge failed');
+
+      // Installments: 100.00 over 3, intervalMonths 1
+      const inst100Res = await req('/api/fees/charges/installments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({
+          studentId: sStudent.id,
+          batchId: sBatch.id,
+          total: '100.00',
+          count: 3,
+          firstDueDate: '2026-12-01',
+          intervalMonths: 1,
+          description: 'Frontend Exact Installment 100',
+        }),
+      });
+      assert(!(inst100Res.status !== 201), 'POST /api/fees/charges/installments (100.00/3) failed');
+      const inst100Charges = Array.isArray(inst100Res.body?.data) ? inst100Res.body.data : inst100Res.body?.data?.charges || [];
+      const inst100Amounts = inst100Charges.map((c: any) => c.amount);
+      const expected100 = ['33.33', '33.33', '33.34'];
+      assert(!(JSON.stringify(inst100Amounts) !== JSON.stringify(expected100)), '100.00 / 3 installments split mismatch');
+
+      // Installments: 200.00 over 3, intervalMonths 1
+      const inst200Res = await req('/api/fees/charges/installments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: sAdminCookie },
+        body: JSON.stringify({
+          studentId: sStudent.id,
+          batchId: sBatch.id,
+          total: '200.00',
+          count: 3,
+          firstDueDate: '2026-12-01',
+          intervalMonths: 1,
+          description: 'Frontend Exact Installment 200',
+        }),
+      });
+      assert(!(inst200Res.status !== 201), 'POST /api/fees/charges/installments (200.00/3) failed');
+      const inst200Charges = Array.isArray(inst200Res.body?.data) ? inst200Res.body.data : inst200Res.body?.data?.charges || [];
+      const inst200Amounts = inst200Charges.map((c: any) => c.amount);
+      const expected200 = ['66.67', '66.67', '66.66'];
+      assert(!(JSON.stringify(inst200Amounts) !== JSON.stringify(expected200)), '200.00 / 3 installments split mismatch');
 
       recordCheck(
         '11',

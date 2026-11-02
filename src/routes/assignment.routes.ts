@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
+import { Role } from '@prisma/client';
 import rateLimit from 'express-rate-limit';
-import { authenticate } from '../middleware/auth.middleware';
+import { authenticate, authorize } from '../middleware/auth.middleware';
 import { requireFeature } from '../middleware/featureFlag.middleware';
 import {
   createAssignment,
@@ -33,7 +34,7 @@ const submissionLimiter = rateLimit({
   },
 });
 
-router.post('/assignments', authenticate, createAssignment);
+router.post('/assignments', authenticate, authorize(Role.SUPER_ADMIN, Role.ADMIN, Role.TEACHER), createAssignment);
 router.get('/assignments', authenticate, getAssignments);
 router.get('/assignments/:id', authenticate, getAssignmentById);
 router.patch('/assignments/:id', authenticate, updateAssignment);

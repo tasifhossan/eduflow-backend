@@ -1321,8 +1321,10 @@ export async function createInstallments(req: Request, res: Response) {
             batchId,
             enrollmentId: enrollment?.id || null,
             kind: 'TUITION',
-            period: `Installment ${i + 1}/${count}`,
-            description: description || `Installment ${i + 1} of ${count} - ${batch.name}`,
+            period: null,
+            description: description
+              ? `${description} (${i + 1}/${count})`
+              : `Installment ${i + 1} of ${count} - ${batch.name}`,
             amount: splitAmounts[i],
             dueDate,
             source: 'INSTALLMENT',

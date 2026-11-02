@@ -303,6 +303,9 @@ export async function markAttendance(req: Request, res: Response) {
         }
 
         if (inAppNotifications.length > 0) {
+          if (process.env.NODE_ENV !== 'production' && req.headers['x-smoke-force-notification-failure'] === 'true') {
+            throw new Error('SIMULATED_NOTIFICATION_FAILURE');
+          }
           await prisma.notification.createMany({
             data: inAppNotifications,
           });
@@ -320,7 +323,7 @@ export async function markAttendance(req: Request, res: Response) {
           });
         }
       } catch (err) {
-        console.error('[attendance] Alert dispatch error:', err);
+        console.error('[attendance] Alert dispatch error:', err instanceof Error ? err.message : err);
       }
     }
 

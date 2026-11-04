@@ -4557,6 +4557,250 @@ async function runSmokeTests() {
     }
 
 
+    // Check 64: Batch access properties (a)-(e) with 2 students, 2 guardians, 2 teachers
+    if (shouldRun('64', 'Batch access properties (a)-(e) with 2 students, 2 guardians, 2 teachers', true)) {
+      const c64UserIds: string[] = [];
+      const c64BatchIds: string[] = [];
+      const c64TestIds: string[] = [];
+
+      try {
+        const branchA = demoAdmin.branchId;
+        const branchB = smokeBranch2?.id || (await prisma.branch.findFirst({ where: { id: { not: branchA } } }))?.id || branchA;
+
+        // 2 teachers
+        const teacherA = await prisma.user.create({
+          data: {
+            name: 'Teacher 64A',
+            email: `teacher64a_${Date.now()}@test.local`,
+            password: 'dummy',
+            role: Role.TEACHER,
+            branchId: branchA,
+            isActive: true,
+          },
+        });
+        const teacherB = await prisma.user.create({
+          data: {
+            name: 'Teacher 64B',
+            email: `teacher64b_${Date.now()}@test.local`,
+            password: 'dummy',
+            role: Role.TEACHER,
+            branchId: branchB,
+            isActive: true,
+          },
+        });
+
+        // 2 students
+        const studentA = await prisma.user.create({
+          data: {
+            name: 'Student 64A',
+            email: `student64a_${Date.now()}@test.local`,
+            password: 'dummy',
+            role: Role.STUDENT,
+            branchId: branchA,
+            isActive: true,
+            studentCode: `STU-64A-${Date.now().toString().slice(-4)}`,
+          },
+        });
+        const studentB = await prisma.user.create({
+          data: {
+            name: 'Student 64B',
+            email: `student64b_${Date.now()}@test.local`,
+            password: 'dummy',
+            role: Role.STUDENT,
+            branchId: branchB,
+            isActive: true,
+            studentCode: `STU-64B-${Date.now().toString().slice(-4)}`,
+          },
+        });
+
+        // 2 guardians
+        const guardianA = await prisma.user.create({
+          data: {
+            name: 'Guardian 64A',
+            email: `guardian64a_${Date.now()}@test.local`,
+            password: 'dummy',
+            role: Role.GUARDIAN,
+            branchId: branchA,
+            isActive: true,
+          },
+        });
+        const guardianB = await prisma.user.create({
+          data: {
+            name: 'Guardian 64B',
+            email: `guardian64b_${Date.now()}@test.local`,
+            password: 'dummy',
+            role: Role.GUARDIAN,
+            branchId: branchB,
+            isActive: true,
+          },
+        });
+
+        c64UserIds.push(teacherA.id, teacherB.id, studentA.id, studentB.id, guardianA.id, guardianB.id);
+
+        // Guardian links
+        await prisma.guardianLink.create({
+          data: { guardianId: guardianA.id, studentId: studentA.id },
+        });
+        await prisma.guardianLink.create({
+          data: { guardianId: guardianB.id, studentId: studentB.id },
+        });
+
+        // 2 Batches
+        const batch1 = await prisma.batch.create({
+          data: {
+            name: `Batch 64-1 ${Date.now()}`,
+            branchId: branchA,
+            subjectId: smokeSubject.id,
+            teacherId: teacherA.id,
+            type: 'ACADEMIC',
+          },
+        });
+        const batch2 = await prisma.batch.create({
+          data: {
+            name: `Batch 64-2 ${Date.now()}`,
+            branchId: branchB,
+            subjectId: smokeSubject.id,
+            teacherId: teacherB.id,
+            type: 'ACADEMIC',
+          },
+        });
+        c64BatchIds.push(batch1.id, batch2.id);
+
+        // Enrollments
+        await prisma.enrollment.create({
+          data: { studentId: studentA.id, batchId: batch1.id, status: 'ACTIVE' },
+        });
+        await prisma.enrollment.create({
+          data: { studentId: studentB.id, batchId: batch2.id, status: 'ACTIVE' },
+        });
+
+        // Test on Batch 1
+        const test1 = await prisma.test.create({
+          data: {
+            batch: { connect: { id: batch1.id } },
+            createdBy: { connect: { id: teacherA.id } },
+            title: 'Test 64-1',
+            type: 'OFFLINE',
+            testDate: new Date(),
+            totalMarks: 50,
+          },
+        });
+        c64TestIds.push(test1.id);
+
+        // Submission for studentA on test1
+        await prisma.result.create({
+          data: {
+            test: { connect: { id: test1.id } },
+            student: { connect: { id: studentA.id } },
+            totalMarksObtained: 45,
+            submittedAt: new Date(),
+          },
+        });
+
+        // Auth cookies
+        const studentACookie = `token=${jwt.sign({ userId: studentA.id, role: Role.STUDENT, branchId: branchA }, env.JWT_SECRET)}`;
+        const guardianACookie = `token=${jwt.sign({ userId: guardianA.id, role: Role.GUARDIAN, branchId: branchA }, env.JWT_SECRET)}`;
+        const teacherACookie = `token=${jwt.sign({ userId: teacherA.id, role: Role.TEACHER, branchId: branchA }, env.JWT_SECRET)}`;
+
+        // (a) STUDENT on GET /api/batches and /api/batches/:id
+        const stABatchesRes = await req('/api/batches', { headers: { Cookie: studentACookie } });
+        assert(stABatchesRes.status === 200, 'StudentA GET /api/batches must be 200');
+        const stABatches = Array.isArray(stABatchesRes.body?.data) ? stABatchesRes.body.data : stABatchesRes.body?.data?.items || [];
+        assert(stABatches.some((b: any) => b.id === batch1.id), 'StudentA must see enrolled batch1');
+        assert(!stABatches.some((b: any) => b.id === batch2.id), 'StudentA must NOT see unenrolled batch2');
+
+        const stABatch1Res = await req(`/api/batches/${batch1.id}`, { headers: { Cookie: studentACookie } });
+        assert(stABatch1Res.status === 200, 'StudentA GET /api/batches/:id for batch1 must be 200');
+        const b1Data = stABatch1Res.body?.data;
+        assert(!b1Data.enrollments && !b1Data.students && !b1Data.feeLedger && !b1Data.payments, 'Student batch view must not include roster or fee ledger');
+        assert(b1Data.teacher && !b1Data.teacher.email, 'Student batch view teacher object must omit email');
+        const b1Str = JSON.stringify(b1Data);
+        assert(!b1Str.includes(studentB.name) && !b1Str.includes(studentB.email), 'Student batch view must never leak another student details');
+
+        const stABatch2Res = await req(`/api/batches/${batch2.id}`, { headers: { Cookie: studentACookie } });
+        assert(stABatch2Res.status === 403, 'StudentA GET /api/batches/:id for unenrolled batch2 must be 403');
+
+        // (b) GUARDIAN on GET /api/batches and /api/batches/:id
+        const gNoStudentRes = await req('/api/batches', { headers: { Cookie: guardianACookie } });
+        assert(gNoStudentRes.status === 400, 'Guardian without studentId must be rejected with 400');
+
+        const gUnlinkedRes = await req(`/api/batches?studentId=${studentB.id}`, { headers: { Cookie: guardianACookie } });
+        assert(gUnlinkedRes.status === 403, 'Guardian with unlinked studentId must be rejected with 403');
+
+        const gLinkedRes = await req(`/api/batches?studentId=${studentA.id}`, { headers: { Cookie: guardianACookie } });
+        assert(gLinkedRes.status === 200, 'Guardian with linked studentId must be 200');
+        const gBatches = Array.isArray(gLinkedRes.body?.data) ? gLinkedRes.body.data : gLinkedRes.body?.data?.items || [];
+        assert(gBatches.some((b: any) => b.id === batch1.id), 'Guardian must see linked child batch1');
+        assert(!gBatches.some((b: any) => b.id === batch2.id), 'Guardian must NOT see unenrolled batch2');
+
+        const gBatch1Res = await req(`/api/batches/${batch1.id}`, { headers: { Cookie: guardianACookie } });
+        assert(gBatch1Res.status === 200, 'Guardian GET /api/batches/:id for enrolled child batch1 must be 200');
+        const gB1Data = gBatch1Res.body?.data;
+        assert(!gB1Data.enrollments && !gB1Data.students && !gB1Data.feeLedger && (gB1Data.teacher && !gB1Data.teacher.email), 'Guardian batch view must be sanitized');
+
+        const gBatch2Res = await req(`/api/batches/${batch2.id}`, { headers: { Cookie: guardianACookie } });
+        assert(gBatch2Res.status === 403, 'Guardian GET /api/batches/:id for unenrolled child batch2 must be 403');
+
+        // (c) TEACHER teacherId filter forced
+        const tAnotherRes = await req(`/api/batches?teacherId=${teacherB.id}`, { headers: { Cookie: teacherACookie } });
+        assert(tAnotherRes.status === 403, 'Teacher querying another teacherId must be rejected with 403');
+
+        const tDefaultRes = await req('/api/batches', { headers: { Cookie: teacherACookie } });
+        assert(tDefaultRes.status === 200, 'Teacher GET /api/batches must be 200');
+        const tBatches = Array.isArray(tDefaultRes.body?.data) ? tDefaultRes.body.data : tDefaultRes.body?.data?.items || [];
+        assert(tBatches.some((b: any) => b.id === batch1.id), 'TeacherA must see own assigned batch1');
+        assert(!tBatches.some((b: any) => b.id === batch2.id), 'TeacherA must NOT see batch assigned to teacherB');
+
+        const adminFilterRes = await req(`/api/batches?teacherId=${teacherB.id}`, { headers: { Cookie: adminCookie } });
+        assert(adminFilterRes.status === 200, 'Admin can freely filter batches by teacherId');
+
+        // (d) isSubmitted on tests
+        const studentTestsRes = await req(`/api/batches/${batch1.id}/tests`, { headers: { Cookie: studentACookie } });
+        assert(studentTestsRes.status === 200, 'Student GET /api/batches/:batchId/tests must be 200');
+        const studentTests = Array.isArray(studentTestsRes.body?.data) ? studentTestsRes.body.data : studentTestsRes.body?.data?.items || [];
+        const studentT1 = studentTests.find((t: any) => t.id === test1.id);
+        assert(studentT1 && studentT1.isSubmitted === true, 'Student test must have isSubmitted === true');
+
+        const staffTestsRes = await req(`/api/batches/${batch1.id}/tests`, { headers: { Cookie: teacherACookie } });
+        assert(staffTestsRes.status === 200, 'Staff GET /api/batches/:batchId/tests must be 200');
+        const staffTests = Array.isArray(staffTestsRes.body?.data) ? staffTestsRes.body.data : staffTestsRes.body?.data?.items || [];
+        const staffT1 = staffTests.find((t: any) => t.id === test1.id);
+        assert(staffT1 && staffT1.isSubmitted === undefined, 'Staff test must omit isSubmitted');
+
+        const guardianTestsRes = await req(`/api/batches/${batch1.id}/tests`, { headers: { Cookie: guardianACookie } });
+        if (guardianTestsRes.status === 200) {
+          const gTests = Array.isArray(guardianTestsRes.body?.data) ? guardianTestsRes.body.data : guardianTestsRes.body?.data?.items || [];
+          const gT1 = gTests.find((t: any) => t.id === test1.id);
+          assert(gT1 && gT1.isSubmitted === undefined, 'Guardian test must omit isSubmitted');
+        }
+
+        // (e) Cross-branch enrollment reading
+        const crossEnroll = await prisma.enrollment.create({
+          data: { studentId: studentA.id, batchId: batch2.id, status: 'ACTIVE' },
+        });
+        const crossReadRes = await req(`/api/batches/${batch2.id}`, { headers: { Cookie: studentACookie } });
+        assert(crossReadRes.status === 200, 'StudentA must be able to read batch2 across branches via active enrollment');
+
+        // Clean up crossEnroll
+        await prisma.enrollment.delete({ where: { id: crossEnroll.id } });
+
+        recordCheck('64', 'Batch access properties (a)-(e) for Student, Guardian, Teacher, Staff', true, 'All 5 properties verified');
+      } finally {
+        if (c64TestIds.length > 0) {
+          await prisma.result.deleteMany({ where: { testId: { in: c64TestIds } } });
+          await prisma.test.deleteMany({ where: { id: { in: c64TestIds } } });
+        }
+        if (c64BatchIds.length > 0) {
+          await prisma.enrollment.deleteMany({ where: { batchId: { in: c64BatchIds } } });
+          await prisma.batch.deleteMany({ where: { id: { in: c64BatchIds } } });
+        }
+        if (c64UserIds.length > 0) {
+          await prisma.guardianLink.deleteMany({ where: { OR: [{ studentId: { in: c64UserIds } }, { guardianId: { in: c64UserIds } }] } });
+          await prisma.user.deleteMany({ where: { id: { in: c64UserIds } } });
+        }
+      }
+    }
+
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
 

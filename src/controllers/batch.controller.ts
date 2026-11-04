@@ -90,34 +90,70 @@ export async function getBatches(req: Request, res: Response) {
       });
     }
 
-    const isStudentOrGuardian = req.user.role === Role.STUDENT || req.user.role === Role.GUARDIAN;
+    const isStudent = req.user.role === Role.STUDENT;
+    const isGuardian = req.user.role === Role.GUARDIAN;
+    const isTeacher = req.user.role === Role.TEACHER;
+    const isAdmin = req.user.role === Role.ADMIN || req.user.role === Role.SUPER_ADMIN;
+
     const whereClause: any = {
       archivedAt: null,
     };
-    if (req.effectiveBranchId && !isStudentOrGuardian) {
+
+    if (req.effectiveBranchId && !isStudent && !isGuardian) {
       whereClause.branchId = req.effectiveBranchId;
     }
-    if (req.query.teacherId && typeof req.query.teacherId === 'string') {
-      whereClause.teacherId = req.query.teacherId;
+
+    if (isTeacher) {
+      // (c) for a TEACHER the teacherId filter is forced to the caller's own id on the server
+      if (req.query.teacherId && req.query.teacherId !== req.user.userId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Teachers can only query their own batches',
+        });
+      }
+      whereClause.teacherId = req.user.userId;
+    } else if (isAdmin) {
+      // Admins may filter freely
+      if (req.query.teacherId && typeof req.query.teacherId === 'string') {
+        whereClause.teacherId = req.query.teacherId;
+      }
     }
 
-    if (req.user.role === Role.STUDENT) {
+    if (isStudent) {
+      // (a) a STUDENT sees only batches with their own ACTIVE enrollment
       whereClause.enrollments = {
         some: {
           studentId: req.user.userId,
           status: 'ACTIVE',
         },
       };
-    } else if (req.user.role === Role.GUARDIAN) {
-      const targetStudentId = (req.query.studentId as string) || undefined;
+    } else if (isGuardian) {
+      // (b) a GUARDIAN sees only batches of linked children (studentId verified through GuardianLink); a missing or unlinked studentId is rejected
+      const targetStudentId = req.query.studentId as string;
+      if (!targetStudentId || typeof targetStudentId !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'studentId query parameter is required for guardians',
+        });
+      }
+
+      const link = await prisma.guardianLink.findFirst({
+        where: {
+          guardianId: req.user.userId,
+          studentId: targetStudentId,
+        },
+      });
+
+      if (!link) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Access denied to unlinked student',
+        });
+      }
+
       whereClause.enrollments = {
         some: {
-          student: {
-            guardianLinks: {
-              some: { guardianId: req.user.userId },
-            },
-          },
-          ...(targetStudentId ? { studentId: targetStudentId } : {}),
+          studentId: targetStudentId,
           status: 'ACTIVE',
         },
       };
@@ -169,8 +205,12 @@ export async function getBatchById(req: Request, res: Response) {
       });
     }
 
-    if (req.user.role === 'STUDENT') {
+    if (req.user.role === Role.STUDENT) {
       return getBatchForStudent(req, res);
+    }
+
+    if (req.user.role === Role.GUARDIAN) {
+      return getBatchForGuardian(req, res);
     }
 
     const id = req.params.id as string;
@@ -487,6 +527,80 @@ export async function restoreBatch(req: Request, res: Response) {
   }
 }
 
+export async function getBatchForGuardian(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const id = req.params.id as string;
+    const guardianId = req.user.userId;
+
+    // Verify requesting guardian has at least one linked child with an ACTIVE enrollment in this batch
+    const link = await prisma.guardianLink.findFirst({
+      where: {
+        guardianId,
+        student: {
+          enrollments: {
+            some: {
+              batchId: id,
+              status: 'ACTIVE',
+            },
+          },
+        },
+      },
+    });
+
+    if (!link) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You do not have a linked student actively enrolled in this batch',
+      });
+    }
+
+    // Retrieve sanitized batch details (no other students' details, fee data, or staff-only fields)
+    const batch = await prisma.batch.findUnique({
+      where: { id, archivedAt: null },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        classLevel: true,
+        feeType: true,
+        createdAt: true,
+        subject: {
+          select: { id: true, name: true },
+        },
+        teacher: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    if (!batch) {
+      return res.status(404).json({
+        success: false,
+        message: 'Batch not found or archived',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Batch details retrieved successfully',
+      data: batch,
+    });
+  } catch (error) {
+    console.error('Get batch for guardian error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
 export async function getBatchForStudent(req: Request, res: Response) {
   try {
     if (!req.user) {
@@ -530,7 +644,7 @@ export async function getBatchForStudent(req: Request, res: Response) {
           select: { id: true, name: true },
         },
         teacher: {
-          select: { id: true, name: true, email: true },
+          select: { id: true, name: true },
         },
       },
     });

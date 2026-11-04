@@ -2,6 +2,72 @@ import jwt from 'jsonwebtoken';
 import { Role } from '@prisma/client';
 import prisma from '../src/utils/prisma';
 import env from '../src/config/env';
+import app from '../src/index';
+
+function introspectRoutes(expressApp: any): Array<{ method: string; path: string }> {
+  const routes: Array<{ method: string; path: string }> = [];
+  const stack = expressApp.router?.stack || expressApp._router?.stack || [];
+
+  // Top-level direct routes
+  for (const layer of stack) {
+    if (layer.route) {
+      const methods = Object.keys(layer.route.methods);
+      for (const m of methods) {
+        routes.push({
+          method: m.toUpperCase(),
+          path: String(layer.route.path).replace(/\/+/g, '/'),
+        });
+      }
+    }
+  }
+
+  // Sub-routers
+  const specificPrefixes = [
+    '/api/health',
+    '/api/public',
+    '/api/tables',
+    '/api/charts',
+    '/api/me',
+    '/api/auth',
+    '/api/branches',
+    '/api/batches',
+    '/api/subjects',
+    '/api/users',
+    '/api/chapters',
+    '/api/dashboard',
+    '/api/ai',
+    '/api/audit-logs',
+    '/api/settings',
+    '/api/enquiries',
+  ];
+
+  for (const layer of stack) {
+    if (layer.handle?.stack) {
+      let matchedPrefix = '/api';
+      for (const pref of specificPrefixes) {
+        if (layer.matchers?.some((fn: any) => fn(pref))) {
+          matchedPrefix = pref;
+          break;
+        }
+      }
+
+      for (const sub of layer.handle.stack) {
+        if (sub.route) {
+          const methods = Object.keys(sub.route.methods);
+          for (const m of methods) {
+            const fullPath = `${matchedPrefix}${sub.route.path}`.replace(/\/+/g, '/');
+            routes.push({
+              method: m.toUpperCase(),
+              path: fullPath,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return routes;
+}
 
 interface EndpointSpec {
   name: string;
@@ -179,10 +245,12 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
         student: { connect: { id: student.id } },
         batch: { connect: { id: batch.id } },
         branch: { connect: { id: branchId } },
+        createdBy: { connect: { id: admin.id } },
         amount: new (require('@prisma/client').Prisma.Decimal)('100.00'),
         dueDate: new Date(),
         description: 'Matrix Test Fee',
         kind: 'ADMISSION',
+        source: 'MANUAL' as any,
         status: 'ACTIVE',
       },
     });
@@ -197,6 +265,7 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
         method: 'CASH',
         receiptNumber: `MAT-26-${Date.now().toString().slice(-6)}`,
         receivedAt: new Date(),
+        period: '2026-11',
       },
     });
 
@@ -272,6 +341,18 @@ const ENDPOINTS: EndpointSpec[] = [
   },
 
   // 4. Batches & Academics
+  {
+    name: 'GET /api/batches',
+    method: 'GET',
+    path: (f) => `/api/batches?studentId=${f.studentId}`,
+    allowedRoles: [Role.SUPER_ADMIN, Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN],
+  },
+  {
+    name: 'GET /api/batches/:id',
+    method: 'GET',
+    path: (f) => `/api/batches/${f.batchId}`,
+    allowedRoles: [Role.SUPER_ADMIN, Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN],
+  },
   {
     name: 'POST /api/batches',
     method: 'POST',
@@ -477,6 +558,100 @@ async function runRoleMatrix() {
   const mismatches: Mismatch[] = [];
   const port = process.env.PORT || '5000';
   const baseUrl = `http://localhost:${port}`;
+
+  // Wait up to 5s for server to be ready
+  for (let i = 0; i < 20; i++) {
+    try {
+      const res = await fetch(`${baseUrl}/api/health`);
+      if (res.ok) break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  // 1. Router Introspection
+  console.log('Inspecting Express router for all registered routes...');
+  const introspectedRoutes = introspectRoutes(app);
+  console.log(`Introspected ${introspectedRoutes.length} registered routes from Express app.`);
+
+  const PUBLIC_ALLOWLIST_PREFIXES = [
+    '/api/health',
+    '/api/auth/login',
+    '/api/auth/demo',
+    '/api/auth/logout',
+    '/api/auth/forgot-password',
+    '/api/auth/reset-password',
+    '/api/ai/chat',
+    '/api/contact',
+    '/api/newsletter',
+    '/api/public/',
+    '/api/blog',
+  ];
+
+  for (const r of introspectedRoutes) {
+    const isPublic = PUBLIC_ALLOWLIST_PREFIXES.some((p) => r.path.startsWith(p));
+    if (!isPublic) {
+      const testPath = r.path.replace(/:[a-zA-Z0-9_]+/g, 'dummy-id-test');
+      try {
+        const res = await fetch(`${baseUrl}${testPath}`, {
+          method: r.method,
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.status !== 401 && res.status !== 403 && res.status !== 404) {
+          const text = await res.text();
+          mismatches.push({
+            endpoint: `${r.method} ${r.path}`,
+            method: r.method,
+            role: 'ANONYMOUS',
+            expected: '401 Unauthorized',
+            actualStatus: res.status,
+            actualBodySnippet: text.slice(0, 80),
+          });
+        }
+      } catch (err: any) {
+        // network or route-specific error
+      }
+    }
+  }
+
+  // 2. Batch Ownership & Field Sanitization Verification
+  console.log('Verifying batch ownership fixtures...');
+  const teacherOwnRes = await fetch(`${baseUrl}/api/batches`, {
+    headers: { Cookie: `token=${tokens[Role.TEACHER]}` },
+  });
+  const teacherOwnBatches = await teacherOwnRes.json();
+  if (teacherOwnBatches.success) {
+    const items = Array.isArray(teacherOwnBatches.data) ? teacherOwnBatches.data : teacherOwnBatches.data?.items || [];
+    const notOwn = items.some((b: any) => b.teacherId && b.teacherId !== fixtures.teacherId);
+    if (notOwn) {
+      mismatches.push({
+        endpoint: 'GET /api/batches (TEACHER)',
+        method: 'GET',
+        role: 'TEACHER',
+        expected: 'Only own batches',
+        actualStatus: 200,
+        actualBodySnippet: 'Leaked batch not assigned to caller teacher',
+      });
+    }
+  }
+
+  const studentBatchRes = await fetch(`${baseUrl}/api/batches/${fixtures.batchId}`, {
+    headers: { Cookie: `token=${tokens[Role.STUDENT]}` },
+  });
+  const studentBatchData = await studentBatchRes.json();
+  if (studentBatchData.success) {
+    const b = studentBatchData.data;
+    if (b.enrollments || b.students || b.feeLedger || b.payments || (b.teacher && b.teacher.email)) {
+      mismatches.push({
+        endpoint: 'GET /api/batches/:id (STUDENT)',
+        method: 'GET',
+        role: 'STUDENT',
+        expected: 'Sanitized fields only',
+        actualStatus: 200,
+        actualBodySnippet: 'Leaked roster/fees/teacher email in student batch response',
+      });
+    }
+  }
 
   console.log(`Auditing ${ENDPOINTS.length} endpoints across Anonymous and 6 Roles...\n`);
 

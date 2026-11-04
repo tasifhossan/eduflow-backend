@@ -38,6 +38,7 @@ import auditRouter from './routes/audit.routes';
 import settingsRouter from './routes/settings.routes';
 import { requireFeature } from './middleware/featureFlag.middleware';
 import { noCache } from './middleware/noCache.middleware';
+import { authenticate } from './middleware/auth.middleware';
 
 const app = express();
 const PORT = env.PORT || 5000;
@@ -183,7 +184,7 @@ app.use('/api', practiceRouter);
 app.use('/api/ai', requireFeature('aiAssistant'), aiRouter);
 app.use('/api/audit-logs', auditRouter);
 app.use('/api/settings', settingsRouter);
-app.get('/api/online-classes', requireFeature('onlineClasses'), (_req: Request, res: Response) => {
+app.get('/api/online-classes', authenticate, requireFeature('onlineClasses'), (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, message: 'Online classes feature active', data: [] });
 });
 app.use('/api', lectureRouter);

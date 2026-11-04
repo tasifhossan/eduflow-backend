@@ -1,8 +1,12 @@
+process.env.ALLOW_RELAXED_RATE_LIMIT = 'true';
+process.env.NODE_ENV = 'test';
+
 import jwt from 'jsonwebtoken';
+import fs from 'fs';
+import path from 'path';
 import { Role } from '@prisma/client';
 import prisma from '../src/utils/prisma';
 import env from '../src/config/env';
-import app from '../src/index';
 
 function introspectRoutes(expressApp: any): Array<{ method: string; path: string }> {
   const routes: Array<{ method: string; path: string }> = [];
@@ -90,6 +94,7 @@ interface Fixtures {
   reportPeriodId: string;
   chargeId: string;
   paymentId: string;
+  targetUserId: string;
 }
 
 interface Mismatch {
@@ -138,6 +143,12 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
     where: { id: batch.id },
     data: { teacherId: teacher.id },
   });
+  if (teacher.branchId !== branchId) {
+    await prisma.user.update({
+      where: { id: teacher.id },
+      data: { branchId },
+    });
+  }
   await prisma.user.update({
     where: { id: student.id },
     data: { branchId },
@@ -148,6 +159,12 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
       data: { branchId },
     });
   }
+
+  // Clear passwordChangedAt and ensure active for test users
+  await prisma.user.updateMany({
+    where: { id: { in: [superAdmin.id, admin.id, teacher.id, accountant.id, student.id, guardian.id] } },
+    data: { passwordChangedAt: null, mustChangePassword: false, isActive: true },
+  });
 
   const subject = await prisma.subject.findFirst();
   if (!subject) throw new Error('Missing subject');
@@ -255,17 +272,20 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
       },
     });
 
-  // Ensure a fee payment exists
-  const payment = await prisma.feePayment.findFirst({ where: { studentId: student.id } }) ||
-    await prisma.feePayment.create({
+  // Find existing modern payment for receipt endpoints
+  const modernPayment = await prisma.payment.findFirst({ where: { studentId: student.id } }) ||
+    await prisma.payment.findFirst();
+  const paymentId = modernPayment ? modernPayment.id : 'dummy-payment-id';
+
+  const targetUser = await prisma.user.findFirst({ where: { email: 'matrix-target@test.local' } }) ||
+    await prisma.user.create({
       data: {
-        student: { connect: { id: student.id } },
-        branch: { connect: { id: branchId } },
-        amount: new (require('@prisma/client').Prisma.Decimal)('50.00'),
-        method: 'CASH',
-        receiptNumber: `MAT-26-${Date.now().toString().slice(-6)}`,
-        receivedAt: new Date(),
-        period: '2026-11',
+        email: 'matrix-target@test.local',
+        name: 'Matrix Target User',
+        role: Role.STUDENT,
+        password: '$2b$10$abcdefghijklmnopqrstuvwxyz123456',
+        branchId,
+        isActive: true,
       },
     });
 
@@ -291,7 +311,8 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
       testId: test.id,
       reportPeriodId: reportPeriod.id,
       chargeId: charge.id,
-      paymentId: payment.id,
+      paymentId,
+      targetUserId: targetUser.id,
     },
     tokens,
   };
@@ -552,7 +573,127 @@ const ENDPOINTS: EndpointSpec[] = [
   },
 ];
 
+function discoverAllAuthorizedRoutes(): { endpoints: EndpointSpec[]; untestable: Array<{ endpoint: string; reason: string }> } {
+  const routesDir = path.resolve(__dirname, '../src/routes');
+  const indexFile = path.resolve(__dirname, '../src/index.ts');
+  const indexContent = fs.readFileSync(indexFile, 'utf8');
+
+  const mountRegex = /app\.use\(\s*['"]([^'"]+)['"](?:\s*,\s*[a-zA-Z0-9_().]+)*\s*,\s*([a-zA-Z0-9_]+)\s*\)/g;
+  const mounts: Array<{ prefix: string; routerVar: string }> = [];
+  let m;
+  while ((m = mountRegex.exec(indexContent)) !== null) {
+    mounts.push({ prefix: m[1], routerVar: m[2] });
+  }
+
+  const importRegex = /import\s+([a-zA-Z0-9_]+)\s+from\s+['"]\.\/routes\/([^'"]+)['"]/g;
+  const importMap = new Map<string, string>();
+  while ((m = importRegex.exec(indexContent)) !== null) {
+    importMap.set(m[1], m[2]);
+  }
+
+  const result: EndpointSpec[] = [];
+  const untestable: Array<{ endpoint: string; reason: string }> = [];
+  const seen = new Set<string>();
+
+  for (const ep of ENDPOINTS) {
+    seen.add(ep.name);
+    result.push(ep);
+  }
+
+  for (const mount of mounts) {
+    const fileName = importMap.get(mount.routerVar);
+    if (!fileName) continue;
+    const filePath = path.join(routesDir, `${fileName}.ts`);
+    if (!fs.existsSync(filePath)) continue;
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    const regex = /router\.(get|post|patch|put|delete)\(\s*(?:\[([^\]]+)\]|['"]([^'"]+)['"])[^;]+?authorize\(([^)]*)\)/gs;
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      const method = match[1].toUpperCase() as 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+      const pathsStr = match[2] || match[3];
+      const paths = pathsStr.split(',').map((p) => p.trim().replace(/['"]/g, '')).filter(Boolean);
+      const rolesStr = match[4];
+
+      const baseAllowedRoles: Role[] = [Role.SUPER_ADMIN];
+      const roleMatches = rolesStr.match(/Role\.([A-Z_]+)/g) || [];
+      for (const rm of roleMatches) {
+        const roleName = rm.replace('Role.', '') as Role;
+        if (Object.values(Role).includes(roleName) && !baseAllowedRoles.includes(roleName)) {
+          baseAllowedRoles.push(roleName);
+        }
+      }
+
+      for (const p of paths) {
+        const fullPattern = `${mount.prefix}${p === '/' ? '' : p}`.replace(/\/+/g, '/');
+        const key = `${method} ${fullPattern}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const allowedRoles = [...baseAllowedRoles];
+        const isControllerGuardianOnly = fullPattern.includes('/fees/guardian/students/') || fullPattern.startsWith('/api/guardians/students/');
+        const isControllerStudentOnly = fullPattern.includes('/practice-sessions') || fullPattern.includes('my-scores') || fullPattern.includes('my-attendance') || fullPattern.includes('student-view');
+        if (isControllerGuardianOnly || isControllerStudentOnly) {
+          const superAdminIdx = allowedRoles.indexOf(Role.SUPER_ADMIN);
+          if (superAdminIdx !== -1) allowedRoles.splice(superAdminIdx, 1);
+        }
+
+        if (fullPattern.includes('/upload') || fullPattern.includes('/import') || fullPattern.includes('/export')) {
+          untestable.push({ endpoint: key, reason: 'Requires multipart form-data file payload or streaming export' });
+          continue;
+        }
+
+        result.push({
+          name: key,
+          method,
+          path: (f: Fixtures) => {
+            let replaced = fullPattern;
+            replaced = replaced.replace(/:batchId\b/g, f.batchId);
+            replaced = replaced.replace(/:studentId\b/g, f.studentId);
+            replaced = replaced.replace(/:teacherId\b/g, f.teacherId);
+            replaced = replaced.replace(/:subjectId\b/g, f.subjectId);
+            replaced = replaced.replace(/:lectureId\b/g, f.lectureId);
+            replaced = replaced.replace(/:assignmentId\b/g, f.assignmentId);
+            replaced = replaced.replace(/:submissionId\b/g, f.submissionId);
+            replaced = replaced.replace(/:testId\b/g, f.testId);
+            replaced = replaced.replace(/:branchId\b/g, f.branchId);
+            replaced = replaced.replace(/:reportPeriodId\b/g, f.reportPeriodId);
+            replaced = replaced.replace(/:chargeId\b/g, f.chargeId);
+            replaced = replaced.replace(/:paymentId\b/g, f.paymentId);
+            replaced = replaced.replace(/:userId\b/g, f.targetUserId);
+            replaced = replaced.replace(/:periodId\b/g, f.reportPeriodId);
+            if (fullPattern.includes('/batches/:id')) replaced = replaced.replace(':id', f.batchId);
+            else if (fullPattern.includes('/branches/:id')) replaced = replaced.replace(':id', f.branchId);
+            else if (fullPattern.includes('/students/:id')) replaced = replaced.replace(':id', f.studentId);
+            else if (fullPattern.includes('/users/:id')) replaced = replaced.replace(':id', f.targetUserId);
+            else if (fullPattern.includes('/tests/:id')) replaced = replaced.replace(':id', f.testId);
+            else if (fullPattern.includes('/lectures/:id')) replaced = replaced.replace(':id', f.lectureId);
+            else if (fullPattern.includes('/assignments/:id')) replaced = replaced.replace(':id', f.assignmentId);
+            else if (fullPattern.includes('/report-periods/:id')) replaced = replaced.replace(':id', f.reportPeriodId);
+            else if (fullPattern.includes('/fees/charges/:id')) replaced = replaced.replace(':id', f.chargeId);
+            else if (fullPattern.includes('/fees/payments/:id')) replaced = replaced.replace(':id', f.paymentId);
+            else if (fullPattern.includes('/subjects/:id')) replaced = replaced.replace(':id', f.subjectId);
+            else replaced = replaced.replace(/:id\b/g, f.studentId);
+            replaced = replaced.replace(/:[a-zA-Z0-9_]+/g, 'dummy-id-test');
+            return replaced;
+          },
+          body: (f: Fixtures) => {
+            if (method === 'POST' || method === 'PATCH' || method === 'PUT') {
+              return { name: 'Test', status: 'ACTIVE', branchId: f.branchId, studentId: f.studentId, batchId: f.batchId };
+            }
+            return undefined;
+          },
+          allowedRoles,
+        });
+      }
+    }
+  }
+
+  return { endpoints: result, untestable };
+}
+
 async function runRoleMatrix() {
+  const { default: app } = await import('../src/index');
   console.log('Setting up fixtures for role authorization matrix...');
   const { fixtures, tokens } = await setupFixtures();
   const mismatches: Mismatch[] = [];
@@ -653,9 +794,17 @@ async function runRoleMatrix() {
     }
   }
 
-  console.log(`Auditing ${ENDPOINTS.length} endpoints across Anonymous and 6 Roles...\n`);
+  const { endpoints: allEndpoints, untestable } = discoverAllAuthorizedRoutes();
+  console.log(`Discovered ${allEndpoints.length} endpoints declaring authorize() roles.`);
+  console.log(`Auditing ${allEndpoints.length} endpoints across Anonymous and 6 Roles...\n`);
 
-  for (const ep of ENDPOINTS) {
+  for (const ep of allEndpoints) {
+    // Keep test users active and without passwordChangedAt
+    await prisma.user.updateMany({
+      where: { id: { in: [fixtures.studentId, fixtures.teacherId] } },
+      data: { passwordChangedAt: null, isActive: true },
+    });
+
     const epPath = ep.path(fixtures);
     const url = `${baseUrl}${epPath}`;
     console.log(`[Testing] ${ep.method} ${ep.name}`);
@@ -751,9 +900,19 @@ async function runRoleMatrix() {
   console.log('='.repeat(88));
   console.log('                       ROLE AUTHORIZATION MATRIX REPORT                         ');
   console.log('='.repeat(88));
+  console.log(`Routes introspected: ${introspectedRoutes.length}`);
+  console.log(`Routes tested anonymously: ${allEndpoints.length}`);
+  console.log(`Routes tested per role: ${allEndpoints.length} across 6 roles (${allEndpoints.length * 6} role-checks)`);
+
+  if (untestable.length > 0) {
+    console.log(`\nRoutes not testable via automated role-matrix (${untestable.length}):`);
+    for (const u of untestable) {
+      console.log(`  - ${u.endpoint}: ${u.reason}`);
+    }
+  }
 
   if (mismatches.length === 0) {
-    console.log(`\nAll ${ENDPOINTS.length} endpoints strictly match documented role allowances across all 7 caller contexts (Anonymous + 6 Roles).`);
+    console.log(`\nAll ${allEndpoints.length} endpoints strictly match declared role allowances across all 7 caller contexts (Anonymous + 6 Roles).`);
     console.log('0 MISMATCHES DETECTED.\n');
     console.log('='.repeat(88));
     process.exit(0);

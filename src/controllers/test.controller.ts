@@ -158,12 +158,16 @@ export async function getTestsByBatch(req: Request, res: Response) {
       orderBy: { testDate: 'asc' },
     });
 
+    const isStudent = req.user.role === Role.STUDENT;
     const data = tests.map((t: any) => {
       const { results, ...rest } = t;
-      return {
-        ...rest,
-        isSubmitted: results ? results.length > 0 : undefined,
-      };
+      if (isStudent) {
+        return {
+          ...rest,
+          isSubmitted: Boolean(results && results.length > 0),
+        };
+      }
+      return rest;
     });
 
     return res.status(200).json({

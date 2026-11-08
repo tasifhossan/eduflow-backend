@@ -427,13 +427,20 @@ export async function getTestResults(req: Request, res: Response) {
 
     const test = await prisma.test.findUnique({
       where: { id: testId },
-      include: { batch: { select: { branchId: true } } },
+      include: { batch: { select: { branchId: true, teacherId: true } } },
     });
 
     if (!test || test.batch.branchId !== branchId) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    if (req.user.role === Role.TEACHER && test.batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view results for their assigned batches',
       });
     }
 
@@ -506,13 +513,20 @@ export async function saveBatchManualResults(req: Request, res: Response) {
 
     const test = await prisma.test.findUnique({
       where: { id: testId },
-      include: { batch: { select: { branchId: true } } },
+      include: { batch: { select: { branchId: true, teacherId: true } } },
     });
 
     if (!test || test.batch.branchId !== branchId) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    if (req.user.role === Role.TEACHER && test.batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view results for their assigned batches',
       });
     }
 

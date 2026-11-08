@@ -206,6 +206,13 @@ export async function getStudentsByBatch(req: Request, res: Response) {
       });
     }
 
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view students in their assigned batches',
+      });
+    }
+
     const enrollments = await prisma.enrollment.findMany({
       where: {
         batchId,

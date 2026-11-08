@@ -52,6 +52,15 @@ export async function updateSettings(req: Request, res: Response) {
       });
     }
 
+    if (Object.keys(parseResult.data).length === 0) {
+      const currentSettings = await getCenterSettings();
+      return res.status(200).json({
+        success: true,
+        message: 'Center settings unchanged',
+        data: currentSettings,
+      });
+    }
+
     const currentSettings = await getCenterSettings();
     const updateData: Record<string, unknown> = { ...parseResult.data };
 

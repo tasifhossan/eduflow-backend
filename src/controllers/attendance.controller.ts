@@ -381,6 +381,13 @@ export async function getAttendanceByBatchAndDate(req: Request, res: Response) {
       });
     }
 
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view attendance for their assigned batches',
+      });
+    }
+
     const records = await prisma.attendance.findMany({
       where: {
         batchId,

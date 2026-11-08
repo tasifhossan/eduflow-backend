@@ -218,6 +218,9 @@ export async function getBatchById(req: Request, res: Response) {
     if (req.effectiveBranchId) {
       whereClause.branchId = req.effectiveBranchId;
     }
+    if (req.user.role === Role.TEACHER) {
+      whereClause.teacherId = req.user.userId;
+    }
 
     const batch = await prisma.batch.findFirst({
       where: whereClause,

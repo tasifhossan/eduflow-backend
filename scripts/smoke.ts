@@ -4801,6 +4801,165 @@ async function runSmokeTests() {
       }
     }
 
+    // Check 65: Intra-branch non-assigned teacher & unenrolled student isolation regression
+    if (shouldRun('65', 'Intra-branch teacher & student scoping regression', false)) {
+      const c65UserIds: string[] = [];
+      const c65BatchIds: string[] = [];
+      const c65TestIds: string[] = [];
+      const c65AttendanceIds: string[] = [];
+      const ts = Date.now();
+      const pwdHash = await bcrypt.hash('SmokeTest123!', 10);
+
+      try {
+        const teacher1 = await prisma.user.create({
+          data: {
+            name: `SMOKE-Teacher1-${ts}`,
+            email: `smoke.t1.${ts}@example.com`,
+            role: Role.TEACHER,
+            branchId: demoAdmin.branchId,
+            password: pwdHash,
+            isActive: true,
+          },
+        });
+        c65UserIds.push(teacher1.id);
+
+        const teacher2 = await prisma.user.create({
+          data: {
+            name: `SMOKE-Teacher2-${ts}`,
+            email: `smoke.t2.${ts}@example.com`,
+            role: Role.TEACHER,
+            branchId: demoAdmin.branchId,
+            password: pwdHash,
+            isActive: true,
+          },
+        });
+        c65UserIds.push(teacher2.id);
+
+        const student1 = await prisma.user.create({
+          data: {
+            name: `SMOKE-Student1-${ts}`,
+            email: `smoke.s1.${ts}@example.com`,
+            role: Role.STUDENT,
+            branchId: demoAdmin.branchId,
+            password: pwdHash,
+            isActive: true,
+          },
+        });
+        c65UserIds.push(student1.id);
+
+        const student2 = await prisma.user.create({
+          data: {
+            name: `SMOKE-Student2-${ts}`,
+            email: `smoke.s2.${ts}@example.com`,
+            role: Role.STUDENT,
+            branchId: demoAdmin.branchId,
+            password: pwdHash,
+            isActive: true,
+          },
+        });
+        c65UserIds.push(student2.id);
+
+        const batch1 = await prisma.batch.create({
+          data: {
+            name: `SMOKE-Batch1-${ts}`,
+            type: 'ACADEMIC',
+            branchId: demoAdmin.branchId,
+            subjectId: smokeSubject!.id,
+            teacherId: teacher1.id,
+            feeAmount: 500,
+            feeBilling: 'MONTHLY',
+          },
+        });
+        c65BatchIds.push(batch1.id);
+
+        await prisma.enrollment.create({
+          data: {
+            batchId: batch1.id,
+            studentId: student1.id,
+            status: 'ACTIVE',
+          },
+        });
+
+        const test1 = await prisma.test.create({
+          data: {
+            batch: { connect: { id: batch1.id } },
+            createdBy: { connect: { id: teacher1.id } },
+            title: `SMOKE-Test1-${ts}`,
+            type: 'OFFLINE',
+            totalMarks: 50,
+            testDate: new Date(Date.now() + 86400000),
+          },
+        });
+        c65TestIds.push(test1.id);
+
+        const att1 = await prisma.attendance.create({
+          data: {
+            batch: { connect: { id: batch1.id } },
+            student: { connect: { id: student1.id } },
+            markedBy: { connect: { id: teacher1.id } },
+            date: new Date('2026-11-01T00:00:00.000Z'),
+            status: 'PRESENT',
+          },
+        });
+        c65AttendanceIds.push(att1.id);
+
+        const teacher2Cookie = `token=${jwt.sign({ userId: teacher2.id, email: teacher2.email, role: teacher2.role, branchId: teacher2.branchId }, env.JWT_SECRET, { expiresIn: '1h' })}`;
+        const student2Cookie = `token=${jwt.sign({ userId: student2.id, email: student2.email, role: student2.role, branchId: student2.branchId }, env.JWT_SECRET, { expiresIn: '1h' })}`;
+
+        // 1. Teacher 2 cannot view batch 1 details
+        const b1Res = await req(`/api/batches/${batch1.id}`, { headers: { Cookie: teacher2Cookie } });
+        assert(b1Res.status === 404, `Teacher2 must receive 404 for unassigned batch, got ${b1Res.status}`);
+
+        // 2. Teacher 2 cannot view batch 1 student roster
+        const rosterRes = await req(`/api/batches/${batch1.id}/students`, { headers: { Cookie: teacher2Cookie } });
+        assert(rosterRes.status === 403, `Teacher2 must receive 403 for unassigned batch roster, got ${rosterRes.status}`);
+
+        // 3. Teacher 2 cannot view batch 1 attendance
+        const attRes = await req(`/api/batches/${batch1.id}/attendance?date=2026-11-01`, { headers: { Cookie: teacher2Cookie } });
+        assert(attRes.status === 403, `Teacher2 must receive 403 for unassigned batch attendance, got ${attRes.status}`);
+
+        // 4. Teacher 2 cannot view batch 1 test details
+        const t1Res = await req(`/api/tests/${test1.id}`, { headers: { Cookie: teacher2Cookie } });
+        assert(t1Res.status === 403, `Teacher2 must receive 403 for unassigned batch test, got ${t1Res.status}`);
+
+        // 5. Teacher 2 cannot view batch 1 test attempts
+        const attmRes = await req(`/api/tests/${test1.id}/attempts`, { headers: { Cookie: teacher2Cookie } });
+        assert(attmRes.status === 403, `Teacher2 must receive 403 for unassigned batch attempts, got ${attmRes.status}`);
+
+        // 6. Teacher 2 cannot view batch 1 test results
+        const resRes = await req(`/api/tests/${test1.id}/results`, { headers: { Cookie: teacher2Cookie } });
+        assert(resRes.status === 403, `Teacher2 must receive 403 for unassigned batch results, got ${resRes.status}`);
+
+        // 7. Student 2 cannot view batch 1 without active enrollment
+        const s2BatchRes = await req(`/api/batches/${batch1.id}`, { headers: { Cookie: student2Cookie } });
+        assert(s2BatchRes.status === 403, `Student2 must receive 403 for unenrolled batch, got ${s2BatchRes.status}`);
+
+        // 8. PATCH /api/settings with {} is a no-op
+        const patchSettingsRes = await req('/api/settings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie || adminCookie },
+          body: JSON.stringify({}),
+        });
+        assert(patchSettingsRes.status === 200, `Empty PATCH /api/settings must return 200, got ${patchSettingsRes.status}`);
+
+        recordCheck('65', 'Intra-branch teacher & student scoping regression', true, 'All 8 isolation assertions verified (batch, roster, attendance, tests, attempts, results, settings no-op)');
+      } finally {
+        if (c65AttendanceIds.length > 0) {
+          await prisma.attendance.deleteMany({ where: { id: { in: c65AttendanceIds } } });
+        }
+        if (c65TestIds.length > 0) {
+          await prisma.test.deleteMany({ where: { id: { in: c65TestIds } } });
+        }
+        if (c65BatchIds.length > 0) {
+          await prisma.enrollment.deleteMany({ where: { batchId: { in: c65BatchIds } } });
+          await prisma.batch.deleteMany({ where: { id: { in: c65BatchIds } } });
+        }
+        if (c65UserIds.length > 0) {
+          await prisma.user.deleteMany({ where: { id: { in: c65UserIds } } });
+        }
+      }
+    }
+
     // BRUTE FORCE RATE LIMIT (Check 29) & GLOBAL PASSWORD KEY (Check 9)
     // ─────────────────────────────────────────────────────────────────────────
 

@@ -8,7 +8,6 @@ import {
   updateUserBranch,
   adminResetPassword,
   updateUserStatus,
-  deleteUser,
   importUsers,
 } from '../controllers/user.controller';
 
@@ -25,9 +24,6 @@ router.post('/:id/reset-password', authenticate, authorize(Role.ADMIN), noCache,
 
 // Activate/Deactivate user
 router.patch('/:id/status', authenticate, authorize(Role.ADMIN), updateUserStatus);
-
-// Delete user (blocked if related records exist)
-router.delete('/:id', authenticate, authorize(Role.ADMIN), deleteUser);
 
 // Bulk CSV import
 router.post('/import', authenticate, authorize(Role.ADMIN), noCache, importUsers);

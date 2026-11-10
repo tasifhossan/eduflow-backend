@@ -154,9 +154,11 @@ export async function markAttendance(req: Request, res: Response) {
           entityId: existing.id,
           branchId: batch.branchId,
           metadata: {
+            attendanceId: existing.id,
             studentId: record.studentId,
             batchId,
             date: normalizedDate.toISOString(),
+            changedFields: ['status'],
             oldStatus: existing.status,
             newStatus: record.status,
           },

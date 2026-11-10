@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Role } from '@prisma/client';
 import { createRoutineSlotSchema } from '../validators/routine.validator';
 import prisma from '../utils/prisma';
+import { createAuditLog } from '../utils/audit';
 
 export async function createRoutineSlot(req: Request, res: Response) {
   try {
@@ -48,6 +49,23 @@ export async function createRoutineSlot(req: Request, res: Response) {
         startTime,
         endTime,
       },
+    });
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'CREATE_ROUTINE_SLOT',
+      entityType: 'RoutineSlot',
+      entityId: newSlot.id,
+      branchId,
+      metadata: {
+        routineSlotId: newSlot.id,
+        batchId,
+        dayOfWeek,
+        startTime,
+        endTime,
+        changedFields: ['batchId', 'dayOfWeek', 'startTime', 'endTime'],
+      },
+      ip: req.ip || null,
     });
 
     return res.status(201).json({
@@ -168,6 +186,20 @@ export async function deleteRoutineSlot(req: Request, res: Response) {
 
     await prisma.routineSlot.delete({
       where: { id },
+    });
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'DELETE_ROUTINE_SLOT',
+      entityType: 'RoutineSlot',
+      entityId: id,
+      branchId,
+      metadata: {
+        routineSlotId: id,
+        batchId: slot.batchId,
+        changedFields: ['deleted'],
+      },
+      ip: req.ip || null,
     });
 
     return res.status(200).json({

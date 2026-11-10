@@ -6,6 +6,7 @@ import { getNotificationRecipients } from '../utils/notification-recipients';
 import { escapeHtml } from '../utils/escapeHtml';
 import { moneyToNumber } from '../utils/money';
 import prisma from '../utils/prisma';
+import { createAuditLog } from '../utils/audit';
 import {
   updateBatchFeeSchema,
   setStudentFeeSchema,
@@ -74,6 +75,30 @@ export async function updateBatchFee(req: Request, res: Response) {
     const updatedBatch = await prisma.batch.update({
       where: { id },
       data: dataToUpdate,
+    });
+
+    const oldFeeStr = existingBatch.feeAmount !== null && existingBatch.feeAmount !== undefined
+      ? Number(existingBatch.feeAmount).toFixed(2)
+      : null;
+    const newFeeStr = updatedBatch.feeAmount !== null && updatedBatch.feeAmount !== undefined
+      ? Number(updatedBatch.feeAmount).toFixed(2)
+      : null;
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'BATCH_FEE_UPDATED',
+      entityType: 'Batch',
+      entityId: id,
+      branchId,
+      metadata: {
+        batchId: id,
+        changedFields: Object.keys(dataToUpdate),
+        oldFeeAmount: oldFeeStr,
+        newFeeAmount: newFeeStr,
+        oldFeeBilling: existingBatch.feeBilling,
+        newFeeBilling: updatedBatch.feeBilling,
+      },
+      ip: req.ip || null,
     });
 
     return res.status(200).json({
@@ -152,6 +177,42 @@ export async function setStudentFee(req: Request, res: Response) {
           select: { id: true, name: true, email: true },
         },
       },
+    });
+
+    const oldCustomFeeStr = enrollment.customFeeAmount !== null && enrollment.customFeeAmount !== undefined
+      ? Number(enrollment.customFeeAmount).toFixed(2)
+      : null;
+    const newCustomFeeStr = updatedEnrollment.customFeeAmount !== null && updatedEnrollment.customFeeAmount !== undefined
+      ? Number(updatedEnrollment.customFeeAmount).toFixed(2)
+      : null;
+    const oldDiscountValStr = enrollment.discountValue !== null && enrollment.discountValue !== undefined
+      ? Number(enrollment.discountValue).toFixed(2)
+      : null;
+    const newDiscountValStr = updatedEnrollment.discountValue !== null && updatedEnrollment.discountValue !== undefined
+      ? Number(updatedEnrollment.discountValue).toFixed(2)
+      : null;
+
+    const changedFeeFields = Object.keys(parseResult.data).filter((k) => k !== 'discountReason');
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'ENROLLMENT_FEE_UPDATED',
+      entityType: 'Enrollment',
+      entityId: id,
+      branchId,
+      metadata: {
+        enrollmentId: id,
+        studentId: enrollment.studentId,
+        batchId: enrollment.batchId,
+        changedFields: changedFeeFields,
+        oldCustomFeeAmount: oldCustomFeeStr,
+        newCustomFeeAmount: newCustomFeeStr,
+        oldDiscountType: enrollment.discountType,
+        newDiscountType: updatedEnrollment.discountType,
+        oldDiscountValue: oldDiscountValStr,
+        newDiscountValue: newDiscountValStr,
+      },
+      ip: req.ip || null,
     });
 
     return res.status(200).json({

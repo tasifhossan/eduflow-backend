@@ -67,6 +67,23 @@ export async function createBatch(req: Request, res: Response) {
       },
     });
 
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'CREATE_BATCH',
+      entityType: 'Batch',
+      entityId: batch.id,
+      branchId,
+      metadata: {
+        batchId: batch.id,
+        name: batch.name,
+        type: batch.type,
+        subjectId: batch.subjectId,
+        teacherId: batch.teacherId,
+        changedFields: ['name', 'type', 'subjectId', ...(classLevel ? ['classLevel'] : []), ...(teacherId ? ['teacherId'] : [])],
+      },
+      ip: req.ip || null,
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Batch created successfully',
@@ -350,6 +367,23 @@ export async function updateBatch(req: Request, res: Response) {
       },
     });
 
+    const changedBatchFields = Object.keys(parseResult.data).filter(
+      (k) => (parseResult.data as any)[k] !== undefined
+    );
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'UPDATE_BATCH',
+      entityType: 'Batch',
+      entityId: id,
+      branchId: existingBatch.branchId,
+      metadata: {
+        batchId: id,
+        changedFields: changedBatchFields,
+      },
+      ip: req.ip || null,
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Batch updated successfully',
@@ -426,6 +460,8 @@ export async function deleteBatch(req: Request, res: Response) {
         entityId: id,
         branchId,
         metadata: {
+          batchId: id,
+          changedFields: ['archivedAt'],
           enrollmentCount,
           testCount,
           attendanceCount,
@@ -453,7 +489,7 @@ export async function deleteBatch(req: Request, res: Response) {
       entityType: 'Batch',
       entityId: id,
       branchId,
-      metadata: { hardDeleted: true },
+      metadata: { batchId: id, changedFields: ['deleted'], hardDeleted: true },
       ip: req.ip,
     });
 
@@ -512,7 +548,7 @@ export async function restoreBatch(req: Request, res: Response) {
       entityType: 'Batch',
       entityId: id,
       branchId,
-      metadata: { restored: true },
+      metadata: { batchId: id, changedFields: ['archivedAt'], restored: true },
       ip: req.ip,
     });
 

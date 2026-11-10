@@ -290,6 +290,7 @@ async function runSmokeTests() {
   const createdNotificationIds: string[] = [];
   const createdBranchIds: string[] = [];
   const createdChapterIds: string[] = [];
+  const createdSubjectIds: string[] = [];
   const createdFaqIds: string[] = [];
   let originalSettingsBeforeSmoke: any = null;
   let mainServerChild: any = null;
@@ -1545,6 +1546,22 @@ async function runSmokeTests() {
         'Account deactivation immediate rejection',
         c34Passed,
         `Deactivated: ${c34Deactivate.status}, Login: ${c34Login.status}, Token: ${c34Token.status}`
+      );
+    }
+
+    // Check 34b: DELETE /api/users/:id removed and returns 404
+    if (shouldRun('34b', 'Hard delete DELETE /api/users/:id returns 404', false)) {
+      const targetUserId = c30User?.id || demoStudent?.id || 'non-existent-user-id';
+      const c34bRes = await req(`/api/users/${targetUserId}`, {
+        method: 'DELETE',
+        headers: { Cookie: adminCookie },
+      });
+      const c34bPassed = c34bRes.status === 404;
+      recordCheck(
+        '34b',
+        'DELETE /api/users/:id endpoint removed (returns 404)',
+        c34bPassed,
+        `Status: ${c34bRes.status}`
       );
     }
 
@@ -6402,6 +6419,266 @@ async function runSmokeTests() {
         'Idempotent starts; deterministic seed shuffle; autosave resume; extra time audit; competition ties (1, 1, 3); zero read writes; 409 EXAM_LOCKED protection; lazy & bulk finalize; soft archive & restore for tests and batches'
       );
     }
+
+    // Check 66: Configuration change audit logging for fee and academic entities
+    if (shouldRun('66', 'Configuration change audit logging for fee and academic entities', true)) {
+      // 1. Subject create & update
+      const subjRes = await req('/api/subjects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `SMOKE-Subj-${Date.now()}` }),
+      });
+      assert(subjRes.status === 201, `Create subject failed: ${subjRes.status}`);
+      const testSubj = subjRes.body.data;
+      createdSubjectIds.push(testSubj.id);
+
+      const subjUpdateRes = await req(`/api/subjects/${testSubj.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `${testSubj.name}-Updated` }),
+      });
+      assert(subjUpdateRes.status === 200, `Update subject failed: ${subjUpdateRes.status}`);
+
+      // Read back Subject audit logs
+      const createSubjLog = await prisma.auditLog.findFirst({
+        where: { action: 'CREATE_SUBJECT', entityId: testSubj.id },
+      });
+      assert(Boolean(createSubjLog), 'CREATE_SUBJECT audit log missing');
+      assert(createSubjLog?.actorId === demoAdmin.id, 'CREATE_SUBJECT actorId mismatch');
+      assert(Array.isArray((createSubjLog?.metadata as any)?.changedFields), 'CREATE_SUBJECT changedFields missing');
+
+      const updateSubjLog = await prisma.auditLog.findFirst({
+        where: { action: 'UPDATE_SUBJECT', entityId: testSubj.id },
+      });
+      assert(Boolean(updateSubjLog), 'UPDATE_SUBJECT audit log missing');
+      assert((updateSubjLog?.metadata as any)?.oldName === testSubj.name, 'UPDATE_SUBJECT oldName mismatch');
+
+      // 2. Chapter create & update
+      const chapRes = await req('/api/chapters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `SMOKE-Chap-${Date.now()}`, subjectId: testSubj.id }),
+      });
+      assert(chapRes.status === 201, `Create chapter failed: ${chapRes.status}`);
+      const testChap = chapRes.body.data;
+      createdChapterIds.push(testChap.id);
+
+      const chapUpdateRes = await req(`/api/chapters/${testChap.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `${testChap.name}-Updated` }),
+      });
+      assert(chapUpdateRes.status === 200, `Update chapter failed: ${chapUpdateRes.status}`);
+
+      // Read back Chapter audit logs
+      const createChapLog = await prisma.auditLog.findFirst({
+        where: { action: 'CREATE_CHAPTER', entityId: testChap.id },
+      });
+      assert(Boolean(createChapLog), 'CREATE_CHAPTER audit log missing');
+      const updateChapLog = await prisma.auditLog.findFirst({
+        where: { action: 'UPDATE_CHAPTER', entityId: testChap.id },
+      });
+      assert(Boolean(updateChapLog), 'UPDATE_CHAPTER audit log missing');
+
+      // 3. Batch create, update, fee update
+      const batchRes = await req('/api/batches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          name: `SMOKE-ConfigBatch-${Date.now()}`,
+          type: 'ACADEMIC',
+          subjectId: testSubj.id,
+        }),
+      });
+      assert(batchRes.status === 201, `Create batch failed: ${batchRes.status}`);
+      const testBatch = batchRes.body.data;
+      createdBatchIds.push(testBatch.id);
+
+      const batchUpdateRes = await req(`/api/batches/${testBatch.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `${testBatch.name}-Updated` }),
+      });
+      assert(batchUpdateRes.status === 200, `Update batch failed: ${batchUpdateRes.status}`);
+
+      const batchFeeRes = await req(`/api/batches/${testBatch.id}/fee`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ feeBilling: 'MONTHLY', feeAmount: 1500 }),
+      });
+      assert(batchFeeRes.status === 200, `Update batch fee failed: ${batchFeeRes.status}`);
+
+      // Read back Batch audit logs
+      const createBatchLog = await prisma.auditLog.findFirst({
+        where: { action: 'CREATE_BATCH', entityId: testBatch.id },
+      });
+      assert(Boolean(createBatchLog), 'CREATE_BATCH audit log missing');
+      assert(Array.isArray((createBatchLog?.metadata as any)?.changedFields), 'CREATE_BATCH changedFields missing');
+
+      const updateBatchLog = await prisma.auditLog.findFirst({
+        where: { action: 'UPDATE_BATCH', entityId: testBatch.id },
+      });
+      assert(Boolean(updateBatchLog), 'UPDATE_BATCH audit log missing');
+
+      const batchFeeLog = await prisma.auditLog.findFirst({
+        where: { action: 'BATCH_FEE_UPDATED', entityId: testBatch.id },
+      });
+      assert(Boolean(batchFeeLog), 'BATCH_FEE_UPDATED audit log missing');
+      assert(typeof (batchFeeLog?.metadata as any)?.newFeeAmount === 'string', 'newFeeAmount must be string');
+      assert((batchFeeLog?.metadata as any)?.newFeeAmount === '1500.00', 'newFeeAmount format mismatch');
+
+      // 4. Routine slot create & delete
+      const routineRes = await req('/api/routines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          batchId: testBatch.id,
+          dayOfWeek: 'MONDAY',
+          startTime: '10:00',
+          endTime: '11:30',
+        }),
+      });
+      assert(routineRes.status === 201, `Create routine slot failed: ${routineRes.status}`);
+      const testSlot = routineRes.body.data;
+
+      const delRoutineRes = await req(`/api/routines/${testSlot.id}`, {
+        method: 'DELETE',
+        headers: { Cookie: adminCookie },
+      });
+      assert(delRoutineRes.status === 200, `Delete routine slot failed: ${delRoutineRes.status}`);
+
+      const createSlotLog = await prisma.auditLog.findFirst({
+        where: { action: 'CREATE_ROUTINE_SLOT', entityId: testSlot.id },
+      });
+      assert(Boolean(createSlotLog), 'CREATE_ROUTINE_SLOT audit log missing');
+
+      const delSlotLog = await prisma.auditLog.findFirst({
+        where: { action: 'DELETE_ROUTINE_SLOT', entityId: testSlot.id },
+      });
+      assert(Boolean(delSlotLog), 'DELETE_ROUTINE_SLOT audit log missing');
+
+      // 5. Enrollment create, fee update, unenroll & restore
+      const enrollRes = await req('/api/enrollments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          studentId: demoStudent.id,
+          batchId: testBatch.id,
+        }),
+      });
+      assert(enrollRes.status === 201, `Enroll student failed: ${enrollRes.status}`);
+      const testEnrollment = enrollRes.body.data;
+
+      const enrollFeeRes = await req(`/api/enrollments/${testEnrollment.id}/fee`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          customFeeAmount: 1200,
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          discountReason: 'Scholarship merit',
+        }),
+      });
+      assert(enrollFeeRes.status === 200, `Set enrollment fee failed: ${enrollFeeRes.status}`);
+
+      const unenrollRes = await req(`/api/enrollments/${testEnrollment.id}/unenroll`, {
+        method: 'PATCH',
+        headers: { Cookie: adminCookie },
+      });
+      assert(unenrollRes.status === 200, `Unenroll failed: ${unenrollRes.status}`);
+
+      const restoreEnrollRes = await req(`/api/enrollments/${testEnrollment.id}/restore`, {
+        method: 'PATCH',
+        headers: { Cookie: adminCookie },
+      });
+      assert(restoreEnrollRes.status === 200, `Restore enrollment failed: ${restoreEnrollRes.status}`);
+
+      // Read back enrollment audit logs
+      const createEnrollLog = await prisma.auditLog.findFirst({
+        where: { action: 'CREATE_ENROLLMENT', entityId: testEnrollment.id },
+      });
+      assert(Boolean(createEnrollLog), 'CREATE_ENROLLMENT audit log missing');
+
+      const enrollFeeLog = await prisma.auditLog.findFirst({
+        where: { action: 'ENROLLMENT_FEE_UPDATED', entityId: testEnrollment.id },
+      });
+      assert(Boolean(enrollFeeLog), 'ENROLLMENT_FEE_UPDATED audit log missing');
+      assert((enrollFeeLog?.metadata as any)?.newCustomFeeAmount === '1200.00', 'newCustomFeeAmount must be string with 2 decimals');
+      assert((enrollFeeLog?.metadata as any)?.newDiscountValue === '10.00', 'newDiscountValue must be string with 2 decimals');
+      assert(!JSON.stringify(enrollFeeLog?.metadata || {}).includes('Scholarship merit'), 'discountReason free-text note must not be in audit log');
+
+      const unenrollLog = await prisma.auditLog.findFirst({
+        where: { action: 'UNENROLL_STUDENT', entityId: testEnrollment.id },
+      });
+      assert(Boolean(unenrollLog), 'UNENROLL_STUDENT audit log missing');
+
+      const restoreEnrollLog = await prisma.auditLog.findFirst({
+        where: { action: 'RESTORE_ENROLLMENT', entityId: testEnrollment.id },
+      });
+      assert(Boolean(restoreEnrollLog), 'RESTORE_ENROLLMENT audit log missing');
+
+      // 6. Attendance edit audit log
+      const attDate = new Date();
+      attDate.setHours(0, 0, 0, 0);
+      // Mark initial attendance
+      await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          batchId: testBatch.id,
+          date: attDate.toISOString(),
+          records: [{ studentId: demoStudent.id, status: 'PRESENT' }],
+        }),
+      });
+      // Edit attendance
+      await req('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({
+          batchId: testBatch.id,
+          date: attDate.toISOString(),
+          records: [{ studentId: demoStudent.id, status: 'LATE' }],
+        }),
+      });
+      const attLogs = await prisma.auditLog.findMany({
+        where: { action: 'ATTENDANCE_UPDATED' },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      });
+      const attLog = attLogs.find((l) => (l.metadata as any)?.batchId === testBatch.id);
+      assert(Boolean(attLog), 'ATTENDANCE_UPDATED audit log missing');
+      assert((attLog?.metadata as any)?.oldStatus === 'PRESENT' && (attLog?.metadata as any)?.newStatus === 'LATE', 'ATTENDANCE_UPDATED status mismatch');
+
+      // 7. Batch archive & restore audit logs
+      const archiveBatchRes = await req(`/api/batches/${testBatch.id}`, {
+        method: 'DELETE',
+        headers: { Cookie: adminCookie },
+      });
+      assert(archiveBatchRes.status === 200, `Archive batch failed: ${archiveBatchRes.status}`);
+
+      const restoreBatchRes = await req(`/api/batches/${testBatch.id}/restore`, {
+        method: 'POST',
+        headers: { Cookie: adminCookie },
+      });
+      assert(restoreBatchRes.status === 200, `Restore batch failed: ${restoreBatchRes.status}`);
+
+      const archiveBatchLog = await prisma.auditLog.findFirst({
+        where: { action: 'ARCHIVE_BATCH', entityId: testBatch.id },
+      });
+      assert(Boolean(archiveBatchLog), 'ARCHIVE_BATCH audit log missing');
+
+      const restoreBatchLog = await prisma.auditLog.findFirst({
+        where: { action: 'RESTORE_BATCH', entityId: testBatch.id },
+      });
+      assert(Boolean(restoreBatchLog), 'RESTORE_BATCH audit log missing');
+
+      recordCheck(
+        '66',
+        'Configuration change audit logging for fee and academic entities',
+        true,
+        'Audit logs verified for batch fee (2 decimals), enrollment fee (2 decimals, no notes), batch CRUD/archive/restore, enrollment CRUD/unenroll/restore, subject/chapter CRUD, routine slots, and attendance edits'
+      );
+    }
   } finally {
     // ─────────────────────────────────────────────────────────────────────────
     // FIXTURE CLEANUP
@@ -6515,12 +6792,13 @@ async function runSmokeTests() {
           ],
         },
       });
+      const validBatchIds = createdBatchIds.filter((id) => Boolean(id));
       await prisma.feeCharge.deleteMany({
         where: {
           OR: [
             { student: { name: { startsWith: 'SMOKE-' } } },
             { branch: { name: { startsWith: 'SMOKE-' } } },
-            { batchId: { in: createdBatchIds } },
+            { batchId: { in: validBatchIds } },
           ],
         },
       });
@@ -6528,13 +6806,13 @@ async function runSmokeTests() {
         where: { branch: { name: { startsWith: 'SMOKE-' } } },
       });
 
-      if (createdBatchIds.length > 0) {
-        await prisma.enrollment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
-        await prisma.routineSlot.deleteMany({ where: { batchId: { in: createdBatchIds } } });
-        await prisma.review.deleteMany({ where: { batchId: { in: createdBatchIds } } });
-        await prisma.attendance.deleteMany({ where: { batchId: { in: createdBatchIds } } });
-        await prisma.feePayment.deleteMany({ where: { batchId: { in: createdBatchIds } } });
-        await prisma.batch.deleteMany({ where: { id: { in: createdBatchIds } } });
+      if (validBatchIds.length > 0) {
+        await prisma.enrollment.deleteMany({ where: { batchId: { in: validBatchIds } } });
+        await prisma.routineSlot.deleteMany({ where: { batchId: { in: validBatchIds } } });
+        await prisma.review.deleteMany({ where: { batchId: { in: validBatchIds } } });
+        await prisma.attendance.deleteMany({ where: { batchId: { in: validBatchIds } } });
+        await prisma.feePayment.deleteMany({ where: { batchId: { in: validBatchIds } } });
+        await prisma.batch.deleteMany({ where: { id: { in: validBatchIds } } });
       }
 
       await prisma.enrollment.deleteMany({ where: { batch: { name: { startsWith: 'SMOKE-' } } } });
@@ -6553,6 +6831,11 @@ async function runSmokeTests() {
         await prisma.chapter.deleteMany({ where: { id: { in: createdChapterIds } } });
       }
       await prisma.chapter.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
+
+      if (createdSubjectIds.length > 0) {
+        await prisma.subject.deleteMany({ where: { id: { in: createdSubjectIds } } });
+      }
+      await prisma.subject.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
 
       if (createdUserIds.length > 0) {
         await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });

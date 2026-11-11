@@ -1403,6 +1403,20 @@ export async function generateDues(req: Request, res: Response) {
     const branchId = resolveBranchScope(req);
     const settings = await getCenterSettings();
 
+    // Verify batchId belongs to branch if explicitly specified
+    if (batchId) {
+      const targetBatch = await prisma.batch.findUnique({
+        where: { id: batchId },
+        select: { branchId: true },
+      });
+      if (!targetBatch) {
+        return res.status(404).json({ success: false, message: 'Batch not found' });
+      }
+      if (branchId && targetBatch.branchId !== branchId) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Batch belongs to another branch' });
+      }
+    }
+
     // Due date = centerSettings.feeDueDay of the given month in center timezone
     const [yearStr, monthStr] = month.split('-');
     const dueYear = parseInt(yearStr, 10);

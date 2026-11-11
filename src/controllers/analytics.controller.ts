@@ -17,6 +17,9 @@ export async function getBatchAnalytics(req: Request, res: Response) {
     if (req.effectiveBranchId) {
       batchWhere.branchId = req.effectiveBranchId;
     }
+    if (req.user.role === Role.TEACHER) {
+      batchWhere.teacherId = req.user.userId;
+    }
 
     const batch = await prisma.batch.findFirst({
       where: batchWhere,
@@ -117,6 +120,9 @@ export async function getStudentTrend(req: Request, res: Response) {
     const batchWhere: any = { id: batchId, archivedAt: null };
     if (req.effectiveBranchId) {
       batchWhere.branchId = req.effectiveBranchId;
+    }
+    if (req.user.role === Role.TEACHER) {
+      batchWhere.teacherId = req.user.userId;
     }
 
     const batch = await prisma.batch.findFirst({

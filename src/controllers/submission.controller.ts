@@ -278,7 +278,7 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
         question: {
           include: {
             test: {
-              include: { batch: { select: { branchId: true } } },
+              include: { batch: { select: { branchId: true, teacherId: true } } },
             },
           },
         },
@@ -289,6 +289,17 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Student answer not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      studentAnswer.question.test.batch.teacherId !== req.user.userId &&
+      studentAnswer.question.test.createdById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot grade answers for a batch you do not teach',
       });
     }
 

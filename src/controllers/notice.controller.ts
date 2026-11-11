@@ -34,6 +34,12 @@ export async function createNotice(req: Request, res: Response) {
           message: 'Batch not found or access denied',
         });
       }
+      if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Teachers can only post notices to their assigned batches',
+        });
+      }
     }
 
     const notice = await prisma.notice.create({

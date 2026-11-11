@@ -417,6 +417,16 @@ export async function importUsers(req: Request, res: Response) {
     const isSuperAdmin = req.user.role === Role.SUPER_ADMIN;
     const callerBranchId = req.user.branchId;
 
+    if (!isSuperAdmin) {
+      const hasForeignBranch = rows.some((r: any) => r.branchId && r.branchId !== callerBranchId);
+      if (hasForeignBranch) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You cannot import users into other branches',
+        });
+      }
+    }
+
     const results: Array<{
       row: number;
       status: 'CREATED' | 'SKIPPED';

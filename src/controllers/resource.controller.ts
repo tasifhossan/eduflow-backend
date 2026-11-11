@@ -36,6 +36,13 @@ export async function createResource(req: Request, res: Response) {
       });
     }
 
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You can only upload resources to your assigned batches',
+      });
+    }
+
     if (chapterId) {
       const chapter = await prisma.chapter.findUnique({
         where: { id: chapterId },
@@ -111,6 +118,13 @@ export async function getResourcesByBatch(req: Request, res: Response) {
       });
     }
 
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You can only upload resources to your assigned batches',
+      });
+    }
+
     // If user is STUDENT, check enrollment
     if (req.user.role === Role.STUDENT) {
       const enrollment = await prisma.enrollment.findUnique({
@@ -183,6 +197,7 @@ export async function deleteResource(req: Request, res: Response) {
         batch: {
           select: {
             branchId: true,
+            teacherId: true,
           },
         },
       },
@@ -192,6 +207,17 @@ export async function deleteResource(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Resource not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      resource.batch.teacherId !== req.user.userId &&
+      resource.uploadedById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot delete resources for a batch you do not teach',
       });
     }
 

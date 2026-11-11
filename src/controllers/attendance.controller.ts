@@ -154,9 +154,11 @@ export async function markAttendance(req: Request, res: Response) {
           entityId: existing.id,
           branchId: batch.branchId,
           metadata: {
+            attendanceId: existing.id,
             studentId: record.studentId,
             batchId,
             date: normalizedDate.toISOString(),
+            changedFields: ['status'],
             oldStatus: existing.status,
             newStatus: record.status,
           },
@@ -378,6 +380,13 @@ export async function getAttendanceByBatchAndDate(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Batch not found or access denied',
+      });
+    }
+
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view attendance for their assigned batches',
       });
     }
 

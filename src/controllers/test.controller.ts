@@ -199,7 +199,7 @@ export async function getTestById(req: Request, res: Response) {
     const test = await prisma.test.findUnique({
       where: { id },
       include: {
-        batch: { select: { branchId: true, archivedAt: true } },
+        batch: { select: { branchId: true, archivedAt: true, teacherId: true } },
         questions: {
           orderBy: { order: 'asc' },
           include: {
@@ -215,6 +215,13 @@ export async function getTestById(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    if (req.user.role === Role.TEACHER && test.batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view tests for their assigned batches',
       });
     }
 

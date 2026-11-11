@@ -4,6 +4,7 @@ import bcrypt from 'bcrypt';
 import { createStudentSchema, enrollStudentSchema } from '../validators/enrollment.validator';
 import prisma from '../utils/prisma';
 import { moneyToNumber } from '../utils/money';
+import { createAuditLog } from '../utils/audit';
 
 export async function createStudent(req: Request, res: Response) {
   try {
@@ -152,6 +153,24 @@ export async function enrollStudent(req: Request, res: Response) {
           where: { id: existingEnrollment.id },
           data: { status: 'ACTIVE' },
         });
+
+        await createAuditLog({
+          actorId: req.user.userId,
+          action: 'RESTORE_ENROLLMENT',
+          entityType: 'Enrollment',
+          entityId: existingEnrollment.id,
+          branchId,
+          metadata: {
+            enrollmentId: existingEnrollment.id,
+            studentId,
+            batchId,
+            changedFields: ['status'],
+            oldStatus: existingEnrollment.status,
+            newStatus: 'ACTIVE',
+          },
+          ip: req.ip || null,
+        });
+
         return res.status(200).json({
           success: true,
           message: 'Student enrollment reactivated successfully',
@@ -167,6 +186,21 @@ export async function enrollStudent(req: Request, res: Response) {
         batchId,
         status: 'ACTIVE',
       },
+    });
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'CREATE_ENROLLMENT',
+      entityType: 'Enrollment',
+      entityId: enrollment.id,
+      branchId,
+      metadata: {
+        enrollmentId: enrollment.id,
+        studentId,
+        batchId,
+        changedFields: ['studentId', 'batchId', 'status'],
+      },
+      ip: req.ip || null,
     });
 
     return res.status(201).json({
@@ -203,6 +237,13 @@ export async function getStudentsByBatch(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Batch not found or access denied',
+      });
+    }
+
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Teachers can only view students in their assigned batches',
       });
     }
 
@@ -382,6 +423,23 @@ export async function unenrollStudent(req: Request, res: Response) {
       },
     });
 
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'UNENROLL_STUDENT',
+      entityType: 'Enrollment',
+      entityId: id,
+      branchId: enrollment.batch.branchId,
+      metadata: {
+        enrollmentId: id,
+        studentId: enrollment.studentId,
+        batchId: enrollment.batchId,
+        changedFields: ['status'],
+        oldStatus: enrollment.status,
+        newStatus: 'INACTIVE',
+      },
+      ip: req.ip || null,
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Student unenrolled successfully',
@@ -389,6 +447,77 @@ export async function unenrollStudent(req: Request, res: Response) {
     });
   } catch (error) {
     console.error('Unenroll student error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
+export async function restoreEnrollment(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const id = req.params.id as string;
+    const branchId = req.user.branchId;
+
+    const enrollment = await prisma.enrollment.findUnique({
+      where: { id },
+      include: {
+        batch: true,
+      },
+    });
+
+    if (!enrollment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Enrollment record not found',
+      });
+    }
+
+    if (enrollment.batch.branchId !== branchId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Access denied to this enrollment record',
+      });
+    }
+
+    const updated = await prisma.enrollment.update({
+      where: { id },
+      data: {
+        status: 'ACTIVE',
+      },
+    });
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'RESTORE_ENROLLMENT',
+      entityType: 'Enrollment',
+      entityId: id,
+      branchId: enrollment.batch.branchId,
+      metadata: {
+        enrollmentId: id,
+        studentId: enrollment.studentId,
+        batchId: enrollment.batchId,
+        changedFields: ['status'],
+        oldStatus: enrollment.status,
+        newStatus: 'ACTIVE',
+      },
+      ip: req.ip || null,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Student enrollment restored successfully',
+      data: updated,
+    });
+  } catch (error) {
+    console.error('Restore enrollment error:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error',

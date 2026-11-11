@@ -133,6 +133,17 @@ interface DatabaseSnapshot {
   attendance: TableSnapshot;
   tests: TableSnapshot;
   lectures: TableSnapshot;
+  centerSettings: TableSnapshot;
+  enquiries: TableSnapshot;
+  enquiryNotes: TableSnapshot;
+  notifications: { count: number };
+  auditLogs: { count: number };
+  reportPeriods: TableSnapshot;
+  reportRemarks: TableSnapshot;
+  assignments: TableSnapshot;
+  submissions: TableSnapshot;
+  attachments: TableSnapshot;
+  notices: TableSnapshot;
 }
 
 function hashRows(rows: Array<{ id: string; [key: string]: any }>): TableSnapshot {
@@ -205,6 +216,83 @@ async function takeDatabaseSnapshot(): Promise<DatabaseSnapshot> {
     select: { id: true, title: true, status: true, updatedAt: true, createdAt: true },
   });
 
+  const centerSettings = await prisma.centerSettings.findUnique({ where: { key: 'center' } });
+  const centerSnapshot: TableSnapshot = {
+    count: centerSettings ? 1 : 0,
+    checksum: centerSettings ? crypto.createHash('sha256').update(JSON.stringify(centerSettings)).digest('hex') : 'none',
+  };
+
+  const enquiries = await prisma.contactMessage.findMany({
+    where: { NOT: [{ name: { startsWith: 'MATRIX-' } }, { email: { startsWith: 'matrix' } }] },
+    select: { id: true, name: true, email: true, status: true, createdAt: true },
+  });
+
+  const enquiryNotes = await prisma.enquiryNote.findMany({
+    where: {
+      enquiry: { NOT: [{ name: { startsWith: 'MATRIX-' } }, { email: { startsWith: 'matrix' } }] },
+    },
+    select: { id: true, enquiryId: true, authorId: true, body: true, createdAt: true },
+  });
+
+  const nonMatrixBranches = await prisma.branch.findMany({
+    where: { NOT: { name: { startsWith: 'MATRIX-' } } },
+    select: { id: true },
+  });
+  const nonMatrixBranchIds = nonMatrixBranches.map((b) => b.id);
+
+  const notificationsCount = await prisma.notification.count({
+    where: {
+      user: {
+        NOT: [
+          { email: { startsWith: 'matrix.' } },
+          { name: { startsWith: 'MATRIX-' } },
+        ],
+      },
+    },
+  });
+  const auditLogsCount = await prisma.auditLog.count({
+    where: {
+      OR: [
+        { branchId: { in: nonMatrixBranchIds } },
+        { branchId: null },
+      ],
+    },
+  });
+
+  const reportPeriods = await prisma.reportPeriod.findMany({
+    where: { NOT: { label: { startsWith: 'MATRIX-' } } },
+    select: { id: true, label: true, batchId: true, publishedAt: true, createdAt: true },
+  });
+
+  const reportRemarks = await prisma.reportRemark.findMany({
+    where: {
+      period: { NOT: { label: { startsWith: 'MATRIX-' } } },
+    },
+    select: { id: true, periodId: true, studentId: true, remark: true, updatedAt: true },
+  });
+
+  const assignments = await prisma.assignment.findMany({
+    where: { NOT: { title: { startsWith: 'MATRIX-' } } },
+    select: { id: true, title: true, batchId: true, maxMarks: true, dueAt: true, createdAt: true },
+  });
+
+  const submissions = await prisma.assignmentSubmission.findMany({
+    where: {
+      assignment: { NOT: { title: { startsWith: 'MATRIX-' } } },
+    },
+    select: { id: true, assignmentId: true, studentId: true, status: true, submittedAt: true },
+  });
+
+  const attachments = await prisma.attachment.findMany({
+    where: { NOT: { title: { startsWith: 'MATRIX-' } } },
+    select: { id: true, title: true, kind: true, url: true, createdAt: true },
+  });
+
+  const notices = await prisma.notice.findMany({
+    where: { NOT: { title: { startsWith: 'MATRIX-' } } },
+    select: { id: true, title: true, branchId: true, createdAt: true },
+  });
+
   return {
     users: hashRows(users),
     batches: hashRows(batches),
@@ -215,11 +303,59 @@ async function takeDatabaseSnapshot(): Promise<DatabaseSnapshot> {
     attendance: hashRows(attendance),
     tests: hashRows(tests),
     lectures: hashRows(lectures),
+    centerSettings: centerSnapshot,
+    enquiries: hashRows(enquiries),
+    enquiryNotes: hashRows(enquiryNotes),
+    notifications: { count: notificationsCount },
+    auditLogs: { count: auditLogsCount },
+    reportPeriods: hashRows(reportPeriods),
+    reportRemarks: hashRows(reportRemarks),
+    assignments: hashRows(assignments),
+    submissions: hashRows(submissions),
+    attachments: hashRows(attachments),
+    notices: hashRows(notices),
   };
 }
 
 async function cleanMatrixFixtures() {
   try {
+    // 0. Audit logs & notifications created for MATRIX actors or entities
+    const matrixUsers = await prisma.user.findMany({
+      where: {
+        OR: [
+          { email: { startsWith: 'matrix.' } },
+          { name: { startsWith: 'MATRIX-' } },
+        ],
+      },
+      select: { id: true },
+    });
+    const matrixBranches = await prisma.branch.findMany({
+      where: { name: { startsWith: 'MATRIX-' } },
+      select: { id: true },
+    });
+    const mUserIds = matrixUsers.map((u) => u.id);
+    const mBranchIds = matrixBranches.map((b) => b.id);
+
+    if (mUserIds.length > 0 || mBranchIds.length > 0) {
+      await prisma.auditLog.deleteMany({
+        where: {
+          OR: [
+            ...(mUserIds.length > 0 ? [{ actorId: { in: mUserIds } }] : []),
+            ...(mBranchIds.length > 0 ? [{ branchId: { in: mBranchIds } }] : []),
+          ],
+        },
+      });
+    }
+
+    await prisma.notification.deleteMany({
+      where: {
+        OR: [
+          { title: { startsWith: 'MATRIX-' } },
+          { user: { email: { startsWith: 'matrix.' } } },
+        ],
+      },
+    });
+
     // 1. Payment reversals
     await prisma.paymentReversal.deleteMany({
       where: {
@@ -383,6 +519,27 @@ async function cleanMatrixFixtures() {
     // 16. Subjects
     await prisma.subject.deleteMany({
       where: { name: { startsWith: 'MATRIX-' } },
+    });
+
+    // 16. Notices & Enquiries
+    await prisma.notice.deleteMany({
+      where: { title: { startsWith: 'MATRIX-' } },
+    });
+    await prisma.enquiryNote.deleteMany({
+      where: {
+        OR: [
+          { enquiry: { name: { startsWith: 'MATRIX-' } } },
+          { enquiry: { email: { startsWith: 'matrix.' } } },
+        ],
+      },
+    });
+    await prisma.contactMessage.deleteMany({
+      where: {
+        OR: [
+          { name: { startsWith: 'MATRIX-' } },
+          { email: { startsWith: 'matrix.' } },
+        ],
+      },
     });
 
     // 16.5 Receipt Sequences for MATRIX branches
@@ -686,6 +843,13 @@ const ENDPOINTS: EndpointSpec[] = [
     name: 'GET /api/settings',
     method: 'GET',
     path: () => '/api/settings',
+    allowedRoles: [Role.SUPER_ADMIN],
+  },
+  {
+    name: 'PATCH /api/settings',
+    method: 'PATCH',
+    path: () => '/api/settings',
+    body: () => ({}),
     allowedRoles: [Role.SUPER_ADMIN],
   },
   {
@@ -1277,16 +1441,40 @@ async function runRoleMatrix() {
   const tables = Object.keys(beforeSnapshot) as Array<keyof DatabaseSnapshot>;
   const snapshotMismatches: string[] = [];
 
+  console.log('='.repeat(88));
+  console.log('         INTENTIONALLY INVALID & NO-OP PROBE SPECIFICATIONS              ');
+  console.log('='.repeat(88));
+  console.log('PROBE                             | BODY SPECIFICATION | RATIONALE / SAFETY MECHANISM');
+  console.log('-'.repeat(88));
+  console.log('PATCH /api/settings               | {} (empty object)  | No-op empty payload verifies SUPER_ADMIN access without mutating center config');
+  console.log('POST /api/fees/charges/generate   | { dryRun: true }   | Dry-run flag evaluates fee billing generation logic with zero ledger writes');
+  console.log('Dynamic Fallback Probes           | { name: MATRIX...} | Triggers 400 validation error; confirms auth gate passed without modifying DB');
+  console.log('='.repeat(88) + '\n');
+
   for (const t of tables) {
-    if (beforeSnapshot[t].count !== afterSnapshot[t].count) {
+    if (t === 'notifications' || t === 'auditLogs') {
+      if (beforeSnapshot[t].count !== afterSnapshot[t].count) {
+        snapshotMismatches.push(
+          `Table '${t}': row count changed from ${beforeSnapshot[t].count} to ${afterSnapshot[t].count} (diff: ${afterSnapshot[t].count - beforeSnapshot[t].count})`
+        );
+      }
+      continue;
+    }
+    const b = beforeSnapshot[t] as TableSnapshot;
+    const a = afterSnapshot[t] as TableSnapshot;
+    if (b.count !== a.count) {
       snapshotMismatches.push(
-        `Table '${t}': row count changed from ${beforeSnapshot[t].count} to ${afterSnapshot[t].count} (diff: ${afterSnapshot[t].count - beforeSnapshot[t].count})`
+        `Table '${t}': row count changed from ${b.count} to ${a.count} (diff: ${a.count - b.count})`
       );
     }
-    if (beforeSnapshot[t].checksum !== afterSnapshot[t].checksum) {
-      snapshotMismatches.push(
-        `Table '${t}': checksum modified (before: ${beforeSnapshot[t].checksum.slice(0, 16)}..., after: ${afterSnapshot[t].checksum.slice(0, 16)}...)`
-      );
+    if (b.checksum !== a.checksum) {
+      if (t === 'centerSettings') {
+        snapshotMismatches.push(`CenterSettings modified! Field values changed during matrix execution.`);
+      } else {
+        snapshotMismatches.push(
+          `Table '${t}': checksum modified (before: ${b.checksum.slice(0, 16)}..., after: ${a.checksum.slice(0, 16)}...)`
+        );
+      }
     }
   }
 
@@ -1298,7 +1486,7 @@ async function runRoleMatrix() {
     console.error('!'.repeat(88) + '\n');
     process.exit(1);
   } else {
-    console.log('✓ Database immutability verified: 0 non-fixture rows changed across all 9 models.');
+    console.log(`✓ Database immutability verified: 0 non-fixture rows changed across all ${tables.length} models.`);
   }
 
   // Run fee reconciliation

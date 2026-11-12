@@ -150,6 +150,7 @@ export async function getDashboardSummary(req: Request, res: Response) {
 
     // ─── ADMIN / TEACHER / SUPER_ADMIN path ──────────────────────────────────
     const effectiveBranchId = req.effectiveBranchId;
+    const isTeacher = role === Role.TEACHER;
 
     const [
       totalActiveStudents,
@@ -164,6 +165,9 @@ export async function getDashboardSummary(req: Request, res: Response) {
         where: {
           ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
           role: Role.STUDENT,
+          ...(isTeacher
+            ? { enrollments: { some: { status: 'ACTIVE', batch: { teacherId: userId } } } }
+            : {}),
         },
       }),
 
@@ -172,6 +176,7 @@ export async function getDashboardSummary(req: Request, res: Response) {
         where: {
           archivedAt: null,
           ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(isTeacher ? { teacherId: userId } : {}),
         },
       }),
 
@@ -188,6 +193,7 @@ export async function getDashboardSummary(req: Request, res: Response) {
         where: {
           archivedAt: null,
           ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(isTeacher ? { teacherId: userId } : {}),
         },
         select: {
           id: true,
@@ -209,6 +215,7 @@ export async function getDashboardSummary(req: Request, res: Response) {
           batch: {
             archivedAt: null,
             ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+            ...(isTeacher ? { teacherId: userId } : {}),
           },
           testDate: {
             gte: todayNormalized,
@@ -231,7 +238,12 @@ export async function getDashboardSummary(req: Request, res: Response) {
       // Count results submitted in the last 7 days (recent activity)
       prisma.result.count({
         where: {
-          ...(effectiveBranchId ? { test: { batch: { branchId: effectiveBranchId } } } : {}),
+          test: {
+            batch: {
+              ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+              ...(isTeacher ? { teacherId: userId } : {}),
+            },
+          },
           submittedAt: { gte: sevenDaysAgo },
         },
       }),

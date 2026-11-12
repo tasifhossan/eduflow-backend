@@ -305,7 +305,7 @@ async function runSmokeTests() {
     const cliPath = path.resolve('node_modules/tsx/dist/cli.mjs');
     mainServerChild = spawn(process.execPath, [cliPath, 'src/index.ts'], {
       cwd: process.cwd(),
-      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true', NODE_ENV: 'test', ALLOW_RELAXED_RATE_LIMIT: 'true' },
+      env: { ...process.env, PORT: '5000', DEMO_MODE: 'true', LLM_STUB: 'true', MAIL_STUB: 'true', NODE_ENV: 'test', ALLOW_RELAXED_RATE_LIMIT: 'true', LOG_TX_METRICS: 'true' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     mainServerChild.stdout?.on('data', (d: Buffer) => {
@@ -5092,14 +5092,84 @@ async function runSmokeTests() {
         const sylForeignRes = await req(`/api/batches/${batch1.id}/syllabus-progress`, { headers: { Cookie: `token=${foreignTeacherToken}` } });
         assert(sylForeignRes.status === 403, `Foreign teacher must receive 403 for cross-branch batch syllabus progress, got ${sylForeignRes.status}`);
 
+        // 15. Unassigned Teacher 2 cannot see Batch 1's student1 in table/summary/user lists
+        for (const listUrl of [
+          '/api/tables/students',
+          '/api/tables/attendance',
+          '/api/tables/enrollments',
+          '/api/students/summary',
+          '/api/users',
+        ]) {
+          const lr = await req(listUrl, { headers: { Cookie: teacher2Cookie } });
+          assert(lr.status === 200 && !JSON.stringify(lr.body).includes(student1.id), `Teacher2 must not see unassigned student1 in ${listUrl}`);
+        }
+
+        // 16. Cross-branch export ignores foreign branchId query
+        const expForeignRes = await req(`/api/exports/students?branchId=${batch1.branchId}`, {
+          headers: { Cookie: `token=${foreignAdminToken}` },
+        });
+        assert(
+          expForeignRes.status === 200 && !String(expForeignRes.rawText || JSON.stringify(expForeignRes.body)).includes(student1.email),
+          `Foreign admin export must not expose Batch 1 branch student`
+        );
+
+        // 17. Accountant cannot access lectures or assignments lists
+        const accUser = await prisma.user.create({
+          data: {
+            name: `SMOKE-Acc65-${ts}`,
+            email: `smoke.acc65.${ts}@example.com`,
+            role: Role.ACCOUNTANT,
+            branchId: demoAdmin.branchId,
+            password: pwdHash,
+            isActive: true,
+          },
+        });
+        c65UserIds.push(accUser.id);
+        const accToken = jwt.sign({ userId: accUser.id, role: Role.ACCOUNTANT, branchId: demoAdmin.branchId }, env.JWT_SECRET, { expiresIn: '1h' });
+        const accLecRes = await req('/api/lectures', { headers: { Cookie: `token=${accToken}` } });
+        assert(accLecRes.status === 403, `Accountant must receive 403 on GET /api/lectures, got ${accLecRes.status}`);
+        const accAsgRes = await req('/api/assignments', { headers: { Cookie: `token=${accToken}` } });
+        assert(accAsgRes.status === 403, `Accountant must receive 403 on GET /api/assignments, got ${accAsgRes.status}`);
+
+        // 18. Unassigned teacher cannot see unassigned batch payments via /api/tables/payments or unassigned students via /api/users;
+        //     foreign accountant cannot see Batch 1 results via /api/tables/results
+        const tPayRes = await req(`/api/tables/payments?batchId=${batch1.id}`, { headers: { Cookie: teacher2Cookie } });
+        assert(
+          tPayRes.status === 200 && Array.isArray(tPayRes.body?.data?.items) && tPayRes.body.data.items.length === 0,
+          `Unassigned teacher must get 0 items on GET /api/tables/payments?batchId=batch1.id, got ${tPayRes.status} count=${tPayRes.body?.data?.items?.length}`
+        );
+        const tUsersRes = await req('/api/users', { headers: { Cookie: teacher2Cookie } });
+        assert(
+          tUsersRes.status === 200 && !JSON.stringify(tUsersRes.body).includes(student1.email),
+          `Unassigned teacher must not see Batch 1 student in GET /api/users (including guardianLinks)`
+        );
+        const foreignAcc = await prisma.user.create({
+          data: {
+            name: `SMOKE-ForeignAcc65-${ts}`,
+            email: `smoke.foreignacc65.${ts}@example.com`,
+            role: Role.ACCOUNTANT,
+            branchId: foreignBranch.id,
+            password: pwdHash,
+            isActive: true,
+          },
+        });
+        c65UserIds.push(foreignAcc.id);
+        const foreignAccToken = jwt.sign({ userId: foreignAcc.id, role: Role.ACCOUNTANT, branchId: foreignBranch.id }, env.JWT_SECRET, { expiresIn: '1h' });
+        const fAccResultsRes = await req(`/api/tables/results?batchId=${batch1.id}`, { headers: { Cookie: `token=${foreignAccToken}` } });
+        assert(
+          fAccResultsRes.status === 200 && Array.isArray(fAccResultsRes.body?.data?.items) && fAccResultsRes.body.data.items.length === 0,
+          `Foreign accountant must get 0 items on GET /api/tables/results?batchId=batch1.id, got ${fAccResultsRes.status} count=${fAccResultsRes.body?.data?.items?.length}`
+        );
+
         // Clean up c65 regression rows
         await prisma.studentAnswer.deleteMany({ where: { id: c65Ans.id } });
         await prisma.question.deleteMany({ where: { id: c65Q.id } });
         await prisma.resource.deleteMany({ where: { id: c65Res.id } });
-        await prisma.user.deleteMany({ where: { id: { in: [foreignAdmin.id, foreignTeacher.id] } } });
+        await prisma.auditLog.deleteMany({ where: { actorId: foreignAdmin.id } });
+        await prisma.user.deleteMany({ where: { id: { in: [foreignAdmin.id, foreignTeacher.id, foreignAcc.id, accUser.id] } } });
         await prisma.branch.deleteMany({ where: { id: foreignBranch.id } });
 
-        recordCheck('65', 'Intra-branch teacher & student scoping regression', true, 'All 14 isolation assertions verified (batch, roster, attendance, tests, attempts, results, settings no-op, resource delete 403, answer grading 403, foreign dues generate 403, foreign import 403, unassigned notice 403, syllabus progress 403)');
+        recordCheck('65', 'Intra-branch teacher & student scoping regression', true, 'All 18 isolation assertions verified (including teacher payments/users, foreign accountant results, export branchId immunity & accountant 403)');
       } finally {
         if (c65AttendanceIds.length > 0) {
           await prisma.attendance.deleteMany({ where: { id: { in: c65AttendanceIds } } });
@@ -7130,6 +7200,38 @@ async function runSmokeTests() {
 
   console.log(`TOTAL CHECKS: ${totalChecks} | PASSED: ${passedChecks} | FAILED: ${failedChecks}`);
   console.log(`TOTAL ASSERTIONS: ${totalAssertions} | TOTAL RUNTIME: ${totalDuration}s\n`);
+
+  // Print Transaction Duration Summary (median & p95 for Check 11 and Check 30 operations)
+  const txRegex = /\[TX:([a-zA-Z0-9_.-]+)\]\s+([\d.]+)ms/g;
+  const txMap = new Map<string, number[]>();
+  let txMatch;
+  while ((txMatch = txRegex.exec(serverCapturedStdout)) !== null) {
+    const label = txMatch[1];
+    const ms = Number(txMatch[2]);
+    const list = txMap.get(label) || [];
+    list.push(ms);
+    txMap.set(label, list);
+  }
+  if (txMap.size > 0) {
+    console.log('='.repeat(80));
+    console.log('TRANSACTION TIMINGS SUMMARY (ms):');
+    console.log(`${'Label'.padEnd(28)} | ${'Count'.padStart(5)} | ${'Median (ms)'.padStart(11)} | ${'p95 (ms)'.padStart(10)} | ${'Max (ms)'.padStart(10)}`);
+    console.log('-'.repeat(80));
+    for (const [label, vals] of Array.from(txMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+      const sorted = [...vals].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      const median = sorted.length % 2 === 0
+        ? (sorted[mid - 1] + sorted[mid]) / 2
+        : sorted[mid];
+      const p95Idx = Math.max(0, Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1));
+      const p95 = sorted[p95Idx];
+      const max = sorted[sorted.length - 1];
+      console.log(
+        `${label.padEnd(28)} | ${String(sorted.length).padStart(5)} | ${median.toFixed(2).padStart(11)} | ${p95.toFixed(2).padStart(10)} | ${max.toFixed(2).padStart(10)}`
+      );
+    }
+    console.log('='.repeat(80) + '\n');
+  }
 
   if (skippedChecks.length > 0) {
     console.log('='.repeat(80));

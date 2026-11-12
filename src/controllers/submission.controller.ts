@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Role, QuestionType, AttemptStatus } from '@prisma/client';
-import prisma from '../utils/prisma';
+import prisma, { runTimedTransaction } from '../utils/prisma';
 import { submitAnswersSchema, gradeWrittenAnswerSchema } from '../validators/submission.validator';
 import { sendEmail } from '../utils/mailer';
 import { getNotificationRecipients } from '../utils/notification-recipients';
@@ -134,7 +134,7 @@ export async function submitTest(req: Request, res: Response) {
     }
 
     // Run scoring & creation inside a transaction
-    const finalResult = await prisma.$transaction(async (tx) => {
+    const finalResult = await runTimedTransaction('exam.submit', async (tx) => {
       // Concurrency / double-submit guard
       const existingResult = await tx.result.findUnique({
         where: {
@@ -150,7 +150,13 @@ export async function submitTest(req: Request, res: Response) {
       }
 
       let totalScore = 0;
-      const createdAnswers = [];
+      const answersToCreate: Array<{
+        studentId: string;
+        questionId: string;
+        selectedOptionId: string | null;
+        writtenAnswerText: string | null;
+        marksAwarded: number | null;
+      }> = [];
 
       for (const question of test.questions) {
         const studentAns = mergedAnswerMap.get(question.id);
@@ -176,17 +182,19 @@ export async function submitTest(req: Request, res: Response) {
           marksAwarded = null; // Stays null until graded
         }
 
-        const savedAnswer = await tx.studentAnswer.create({
-          data: {
-            studentId,
-            questionId: question.id,
-            selectedOptionId,
-            writtenAnswerText,
-            marksAwarded,
-          },
+        answersToCreate.push({
+          studentId,
+          questionId: question.id,
+          selectedOptionId,
+          writtenAnswerText,
+          marksAwarded,
         });
-        createdAnswers.push(savedAnswer);
       }
+
+      const createdAnswers =
+        answersToCreate.length > 0
+          ? await tx.studentAnswer.createManyAndReturn({ data: answersToCreate })
+          : [];
 
       // Create test result record
       const resultRecord = await tx.result.create({
@@ -314,7 +322,7 @@ export async function gradeWrittenAnswer(req: Request, res: Response) {
     const studentId = studentAnswer.studentId;
 
     // Run grading and result score updates in a transaction
-    const updatedResult = await prisma.$transaction(async (tx) => {
+    const updatedResult = await runTimedTransaction('exam.gradeAnswer', async (tx) => {
       await tx.studentAnswer.update({
         where: { id: studentAnswerId },
         data: { marksAwarded },
@@ -542,33 +550,37 @@ export async function saveBatchManualResults(req: Request, res: Response) {
     }
 
     // Upsert each result and recompute ranks in a single transaction
-    await prisma.$transaction(async (tx) => {
-      const now = new Date();
-      for (const item of results) {
-        if (typeof item.studentId === 'string' && typeof item.marksObtained === 'number') {
-          await tx.result.upsert({
-            where: {
-              studentId_testId: {
+    await runTimedTransaction(
+      'exam.bulkManualResults',
+      async (tx) => {
+        const now = new Date();
+        for (const item of results) {
+          if (typeof item.studentId === 'string' && typeof item.marksObtained === 'number') {
+            await tx.result.upsert({
+              where: {
+                studentId_testId: {
+                  studentId: item.studentId,
+                  testId,
+                },
+              },
+              update: {
+                totalMarksObtained: item.marksObtained,
+                submittedAt: now,
+              },
+              create: {
                 studentId: item.studentId,
                 testId,
+                totalMarksObtained: item.marksObtained,
+                submittedAt: now,
               },
-            },
-            update: {
-              totalMarksObtained: item.marksObtained,
-              submittedAt: now,
-            },
-            create: {
-              studentId: item.studentId,
-              testId,
-              totalMarksObtained: item.marksObtained,
-              submittedAt: now,
-            },
-          });
+            });
+          }
         }
-      }
 
-      await recomputeRanks(testId, tx);
-    });
+        await recomputeRanks(testId, tx);
+      },
+      { timeout: 30000, maxWait: 10000 }
+    );
 
     // Fire notifications asynchronously
     const testWithBatch = await prisma.test.findUnique({

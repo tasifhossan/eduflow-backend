@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
-import prisma from '../utils/prisma';
+import prisma, { runTimedTransaction } from '../utils/prisma';
 import { generateTemporaryPassword } from '../utils/temp-password';
 import { generateStudentCode } from '../utils/student-code';
 import { normalizePhone } from '../utils/phone';
@@ -47,6 +47,39 @@ export async function getUsers(req: Request, res: Response) {
     if (effectiveBranchId) {
       where.branchId = effectiveBranchId;
     }
+    if (req.user.role === Role.TEACHER) {
+      where.AND = [
+        {
+          OR: [
+            { role: { notIn: [Role.STUDENT, Role.GUARDIAN] } },
+            {
+              role: Role.STUDENT,
+              enrollments: {
+                some: {
+                  status: 'ACTIVE',
+                  batch: { teacherId: req.user.userId },
+                },
+              },
+            },
+            {
+              role: Role.GUARDIAN,
+              guardianLinks: {
+                some: {
+                  student: {
+                    enrollments: {
+                      some: {
+                        status: 'ACTIVE',
+                        batch: { teacherId: req.user.userId },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ];
+    }
 
     const users = await prisma.user.findMany({
       where,
@@ -63,6 +96,20 @@ export async function getUsers(req: Request, res: Response) {
         lastLoginAt: true,
         createdAt: true,
         guardianLinks: {
+          ...(req.user.role === Role.TEACHER
+            ? {
+                where: {
+                  student: {
+                    enrollments: {
+                      some: {
+                        status: 'ACTIVE',
+                        batch: { teacherId: req.user.userId },
+                      },
+                    },
+                  },
+                },
+              }
+            : {}),
           select: {
             student: {
               select: {
@@ -510,7 +557,9 @@ export async function importUsers(req: Request, res: Response) {
         const tempPassword = generateTemporaryPassword(14);
         const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
-        const created = await prisma.$transaction(async (tx) => {
+        const created = await runTimedTransaction(
+          'user.importUsers',
+          async (tx) => {
           let studentCode: string | null = null;
           if (role === Role.STUDENT) {
             studentCode = await generateStudentCode(tx, branchId);
@@ -577,20 +626,20 @@ export async function importUsers(req: Request, res: Response) {
 
           // Handle batch enrollments if given
           if (Array.isArray(row.batchIds) && row.batchIds.length > 0 && role === Role.STUDENT) {
-            for (const batchId of row.batchIds) {
-              const batch = await tx.batch.findUnique({
-                where: { id: batchId },
-                select: { id: true, branchId: true },
+            const batches = await tx.batch.findMany({
+              where: { id: { in: row.batchIds } },
+              select: { id: true, branchId: true },
+            });
+            const allowedBatches = batches.filter((b) => isSuperAdmin || b.branchId === branchId);
+            if (allowedBatches.length > 0) {
+              await tx.enrollment.createMany({
+                data: allowedBatches.map((b) => ({
+                  studentId: newUser.id,
+                  batchId: b.id,
+                  status: 'ACTIVE' as const,
+                })),
+                skipDuplicates: true,
               });
-              if (batch && (isSuperAdmin || batch.branchId === branchId)) {
-                await tx.enrollment.create({
-                  data: {
-                    studentId: newUser.id,
-                    batchId: batch.id,
-                    status: 'ACTIVE',
-                  },
-                });
-              }
             }
           }
 
@@ -608,7 +657,9 @@ export async function importUsers(req: Request, res: Response) {
           );
 
           return newUser;
-        });
+        },
+        { timeout: 30000, maxWait: 10000 }
+      );
 
         const identifier = created.studentCode || created.phone || created.email || created.id;
         results.push({

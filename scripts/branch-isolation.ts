@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
+process.env.ALLOW_RELAXED_RATE_LIMIT = 'true';
 
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
@@ -21,7 +22,10 @@ interface FixturesA {
   batch2Id: string;
   batch2Name: string;
   student1Id: string;
+  student1Name: string;
   student1Email: string;
+  student1Phone: string;
+  student1Code: string;
   student2Id: string;
   guardian1Id: string;
   guardian2Id: string;
@@ -44,6 +48,7 @@ interface FixturesA {
   chargeId: string;
   paymentId: string;
   enquiryId: string;
+  enquiryName: string;
   enquiryNoteId: string;
   reportPeriodId: string;
   reportRemarkId: string;
@@ -459,8 +464,10 @@ async function setupIsolationFixtures(): Promise<{
   });
   const studentA1 = await prisma.user.create({
     data: {
-      name: 'MATRIX-Student-A1',
-      email: `matrix.student.a1.${ts}@test.local`,
+      name: `MATRIX-CANARY-A1-${ts}`,
+      email: `matrix.canary.a1.${ts}@test.local`,
+      phone: '01999771122',
+      studentCode: `MTX-CANARY-${ts}`,
       role: Role.STUDENT,
       branchId: branchA.id,
       password: pwdHash,
@@ -568,7 +575,7 @@ async function setupIsolationFixtures(): Promise<{
       branchId: branchA.id,
       subjectId: subjectA.id,
       teacherId: teacherA1.id,
-      feeAmount: 500,
+      feeAmount: 88442,
       feeBilling: 'MONTHLY',
     },
   });
@@ -714,7 +721,7 @@ async function setupIsolationFixtures(): Promise<{
       branchId: branchA.id,
       studentId: studentA1.id,
       batchId: batch1.id,
-      amount: 100,
+      amount: 77331,
       dueDate: new Date(),
       description: `MATRIX-Charge-A-${ts}`,
       kind: 'TUITION',
@@ -727,7 +734,7 @@ async function setupIsolationFixtures(): Promise<{
   const payment = await prisma.payment.create({
     data: {
       studentId: studentA1.id,
-      amount: 100,
+      amount: 77331,
       method: 'CASH',
       receiptNumber: `MATRIX-RCP-${ts}`,
       note: `MATRIX-Payment-A-${ts}`,
@@ -738,7 +745,7 @@ async function setupIsolationFixtures(): Promise<{
       allocations: {
         create: {
           chargeId: charge.id,
-          amount: 100,
+          amount: 77331,
           branchId: branchA.id,
         },
       },
@@ -748,9 +755,9 @@ async function setupIsolationFixtures(): Promise<{
   // Enquiry & EnquiryNote
   const enquiry = await prisma.contactMessage.create({
     data: {
-      name: `MATRIX-Enquiry-A-${ts}`,
+      name: `MATRIX-CANARY-ENQ-${ts}`,
       email: `matrix.enquiry.${ts}@test.local`,
-      phone: '01711999888',
+      phone: '01999883344',
       branchId: branchA.id,
       status: 'NEW',
     },
@@ -899,7 +906,10 @@ async function setupIsolationFixtures(): Promise<{
     batch2Id: batch2.id,
     batch2Name: batch2.name,
     student1Id: studentA1.id,
+    student1Name: studentA1.name,
     student1Email: studentA1.email,
+    student1Phone: studentA1.phone || '01999771122',
+    student1Code: studentA1.studentCode || '',
     student2Id: studentA2.id,
     guardian1Id: guardianA1.id,
     guardian2Id: guardianA2.id,
@@ -922,6 +932,7 @@ async function setupIsolationFixtures(): Promise<{
     chargeId: charge.id,
     paymentId: payment.id,
     enquiryId: enquiry.id,
+    enquiryName: enquiry.name,
     enquiryNoteId: enquiryNote.id,
     reportPeriodId: reportPeriod.id,
     reportRemarkId: reportRemark.id,
@@ -1784,21 +1795,107 @@ export async function runBranchIsolationTests(): Promise<{
 
     ];
 
-    // 2. List & Search Endpoints (should never leak Branch A fixture IDs to Branch B principals)
-    const listEndpoints: Array<{
+    // 2. List, Aggregate, Chart, and Export Endpoints Matrix
+    const listAggregateEndpoints: Array<{
       path: string;
-      principals: Array<keyof Tokens>;
+      baseParams?: (f: FixturesA) => string;
+      checkAggregateBaseline?: (body: any, principal: keyof Tokens, filterName: string) => string | null;
+      skipBranchIdMatchForSameBranchTeacher?: boolean;
     }> = [
-      { path: '/api/batches', principals: ['ADMIN_B', 'TEACHER_B', 'ACCOUNTANT_B', 'STUDENT_B', 'GUARDIAN_B'] },
-      { path: '/api/users', principals: ['ADMIN_B', 'TEACHER_B'] },
-      { path: '/api/fees/dues', principals: ['ADMIN_B', 'ACCOUNTANT_B'] },
-      { path: '/api/fees/students/search?q=MATRIX', principals: ['ADMIN_B', 'ACCOUNTANT_B'] },
-      { path: '/api/enquiries', principals: ['ADMIN_B'] },
-      { path: '/api/notices', principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'GUARDIAN_B'] },
-      { path: '/api/attendance/low', principals: ['ADMIN_B', 'TEACHER_B'] },
+      { path: '/api/tables/users' },
+      { path: '/api/tables/students' },
+      { path: '/api/tables/payments' },
+      { path: '/api/tables/attendance' },
+      { path: '/api/tables/results' },
+      { path: '/api/tables/enrollments' },
+      {
+        path: '/api/charts/revenue-monthly',
+        checkAggregateBaseline: (body) => {
+          const rev = body?.data?.totalRevenue;
+          if (typeof rev === 'number' && rev >= 77331) return `totalRevenue=${rev} includes Branch A 77331`;
+          return null;
+        },
+      },
+      { path: '/api/charts/attendance-trend' },
+      {
+        path: '/api/charts/enrollments-by-batch',
+        checkAggregateBaseline: (body) => {
+          const batches = body?.data?.batches || [];
+          const hasA = batches.some((b: any) => String(b.batchName || b.name || '').includes('MATRIX-Batch-A'));
+          return hasA ? 'Includes Branch A batch in enrollments-by-batch' : null;
+        },
+      },
+      { path: '/api/charts/score-distribution' },
+      {
+        path: '/api/charts/fee-status',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Fee status chart includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/charts/my-scores' },
+      { path: '/api/charts/my-attendance' },
+      {
+        path: '/api/charts/overview',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Overview chart includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/exports/students' },
+      {
+        path: '/api/exports/batch-results',
+        baseParams: (f) => `batchId=${f.batch1Id}&periodId=${f.reportPeriodId}`,
+      },
+      { path: '/api/fees/dues' },
+      { path: '/api/fees/payments' },
+      {
+        path: '/api/fees/reports/collection',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Collection report includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/fees/students/search', baseParams: () => 'q=MATRIX-CANARY' },
+      { path: '/api/lectures' },
+      { path: '/api/assignments' },
+      { path: '/api/enquiries' },
+      {
+        path: '/api/enquiries/summary',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('MATRIX-CANARY-ENQ')) return 'Enquiries summary includes Branch A canary';
+          return null;
+        },
+      },
+      { path: '/api/enquiries/duplicates' },
+      { path: '/api/notifications' },
+      { path: '/api/audit-logs' },
+      { path: '/api/attendance/low' },
+      { path: '/api/attendance/today-summary' },
+      { path: '/api/my/attendance/summary' },
+      {
+        path: '/api/dashboard/summary',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Dashboard summary includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/dashboard/academic-summary' },
+      { path: '/api/students/summary' },
+      { path: '/api/batches', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/users', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/branches', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/notices', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/my/report-cards' },
+      { path: '/api/contact' },
     ];
 
-    routesCovered = idEndpoints.length + listEndpoints.length;
+    routesCovered = idEndpoints.length + listAggregateEndpoints.length;
 
     // Execute ID Endpoint Probes
     console.log(`Executing ${idEndpoints.length} ID-bearing route isolation checks...`);
@@ -1858,8 +1955,43 @@ export async function runBranchIsolationTests(): Promise<{
       }
     }
 
-    // Execute List Endpoint Probes
-    console.log(`Executing ${listEndpoints.length} List/Search route isolation checks...`);
+    // Execute List, Aggregate, Chart, and Export Matrix Probes
+    const matrixPrincipals: Array<keyof Tokens> = [
+      'ADMIN_B',
+      'TEACHER_B',
+      'ACCOUNTANT_B',
+      'STUDENT_B',
+      'GUARDIAN_B',
+      'TEACHER_A2',
+    ];
+
+    const filterVariants: Array<{ name: string; buildQuery: (f: FixturesA) => string }> = [
+      { name: 'none', buildQuery: () => '' },
+      { name: 'batchId=A', buildQuery: (f) => `batchId=${f.batch1Id}` },
+      { name: 'studentId=A', buildQuery: (f) => `studentId=${f.student1Id}` },
+      { name: 'branchId=A', buildQuery: (f) => `branchId=${f.branchId}` },
+      { name: 'teacherId=A', buildQuery: (f) => `teacherId=${f.teacher1Id}` },
+      { name: 'subjectId=A', buildQuery: (f) => `subjectId=${f.subjectId}` },
+      { name: 'enrollmentId=A', buildQuery: (f) => `enrollmentId=${f.enrollment1Id}` },
+    ];
+
+    const branchACanaries = [
+      fixturesA.student1Name,
+      fixturesA.student1Email,
+      fixturesA.student1Phone,
+      fixturesA.student1Code,
+      fixturesA.batch1Name,
+      fixturesA.assignmentTitle,
+      fixturesA.testTitle,
+      fixturesA.enquiryName,
+      fixturesA.pubLectureTitle,
+      fixturesA.noticeTitle,
+      '01999883344',
+      '77331',
+      '88442',
+      'Matrix enquiry follow-up note',
+    ].filter(Boolean);
+
     const branchAIds = [
       fixturesA.branchId,
       fixturesA.batch1Id,
@@ -1872,43 +2004,232 @@ export async function runBranchIsolationTests(): Promise<{
       fixturesA.noticeId,
       fixturesA.assignmentId,
       fixturesA.testId,
+      fixturesA.pubLectureId,
+      fixturesA.paymentId,
+      fixturesA.chargeId,
+      fixturesA.enrollment1Id,
+      fixturesA.reportPeriodId,
     ];
 
-    for (const lep of listEndpoints) {
-      for (const p of lep.principals) {
-        totalCallsMade++;
-        process.stdout.write('.');
-        const token = tokens[p];
-        let bodyText = '';
-        let status = 0;
+    const matrixTableRows: Array<{
+      route: string;
+      principal: string;
+      filter: string;
+      status: number;
+      verdict: string;
+    }> = [];
 
-        try {
-          const res = await fetch(`${BASE_URL}${lep.path}`, {
-            method: 'GET',
-            headers: { Cookie: `token=${token}` },
-            signal: AbortSignal.timeout(8000),
-          });
-          status = res.status;
-          bodyText = await res.text();
-        } catch (err: any) {
-          status = -1;
-          bodyText = err.message;
-        }
+    console.log(
+      `\nExecuting ${listAggregateEndpoints.length} List/Aggregate/Chart/Export routes x ${matrixPrincipals.length} principals x ${filterVariants.length} filter modes...`
+    );
 
-        if (status === 200) {
-          const leakedId = branchAIds.find(id => bodyText.includes(id));
-          if (leakedId) {
-            leaks.push({
-              route: `GET ${lep.path}`,
-              method: 'GET',
+    for (const ep of listAggregateEndpoints) {
+      for (const fv of filterVariants) {
+        const baseQs = ep.baseParams ? ep.baseParams(fixturesA) : '';
+        const filterQs = fv.buildQuery(fixturesA);
+        const combinedQs = [baseQs, filterQs].filter(Boolean).join('&');
+        const targetUrl = combinedQs ? `${ep.path}?${combinedQs}` : ep.path;
+
+        // Run all 6 principals in parallel for this route+filter to keep runtime fast
+        await Promise.all(
+          matrixPrincipals.map(async (p) => {
+            totalCallsMade++;
+            const token = tokens[p];
+            let status = 0;
+            let bodyText = '';
+
+            try {
+              const res = await fetch(`${BASE_URL}${targetUrl}`, {
+                method: 'GET',
+                headers: { Cookie: `token=${token}` },
+                signal: AbortSignal.timeout(10000),
+              });
+              status = res.status;
+              bodyText = await res.text();
+            } catch (err: any) {
+              status = -1;
+              bodyText = err.message;
+            }
+
+            let verdict = 'OK';
+            if (status === 200) {
+              // Check canary strings (applies to ALL principals including TEACHER_A2 for batch1 student/fee data)
+              const leakedCanary = branchACanaries.find((c) => {
+                // TEACHER_A2 is in Branch A, so branch-level /api/batches or /api/notices without batch1 filter may list batch1 name or noticeTitle
+                if (
+                  p === 'TEACHER_A2' &&
+                  ep.skipBranchIdMatchForSameBranchTeacher &&
+                  (c === fixturesA.batch1Name || c === fixturesA.noticeTitle)
+                ) {
+                  return false;
+                }
+                return bodyText.includes(c);
+              });
+
+              const leakedId =
+                p === 'TEACHER_A2' && ep.skipBranchIdMatchForSameBranchTeacher
+                  ? null
+                  : p === 'TEACHER_A2'
+                    ? [
+                        fixturesA.student1Id,
+                        fixturesA.assignmentId,
+                        fixturesA.testId,
+                        fixturesA.pubLectureId,
+                        fixturesA.paymentId,
+                        fixturesA.chargeId,
+                        fixturesA.enquiryId,
+                      ].find((id) => bodyText.includes(id))
+                    : branchAIds.find((id) => bodyText.includes(id));
+
+              let aggErr: string | null = null;
+              if (ep.checkAggregateBaseline && p !== 'TEACHER_A2') {
+                try {
+                  const parsed = JSON.parse(bodyText);
+                  aggErr = ep.checkAggregateBaseline(parsed, p, fv.name);
+                } catch {
+                  // non-JSON
+                }
+              }
+
+              if (leakedCanary || leakedId || aggErr) {
+                verdict = 'LEAK';
+                const detail = leakedCanary
+                  ? `Canary "${leakedCanary}" leaked`
+                  : leakedId
+                    ? `Branch A ID "${leakedId}" leaked`
+                    : `Aggregate baseline mismatch: ${aggErr}`;
+                leaks.push({
+                  route: `GET ${targetUrl}`,
+                  method: 'GET',
+                  principal: p,
+                  status,
+                  evidence: `${detail} | body: ${bodyText.slice(0, 100)}`,
+                });
+              } else {
+                verdict = '200 CLEAN';
+              }
+            } else if (status === 403 || status === 404 || status === 400) {
+              verdict = `${status} DENIED`;
+            } else {
+              verdict = `HTTP ${status}`;
+              if (status >= 500 || status === -1) {
+                leaks.push({
+                  route: `GET ${targetUrl}`,
+                  method: 'GET',
+                  principal: p,
+                  status,
+                  evidence: `Unexpected server/network error: ${bodyText.slice(0, 100)}`,
+                });
+              }
+            }
+
+            matrixTableRows.push({
+              route: ep.path,
               principal: p,
+              filter: fv.name,
               status,
-              evidence: `Leaked Branch A fixture ID (${leakedId}) in list response: ${bodyText.slice(0, 120)}`,
+              verdict,
             });
+          })
+        );
+        process.stdout.write('.');
+      }
+    }
+
+    // 3. Explicit PII Export & AuditLog Verification (branch-B ADMIN with branchId=A)
+    console.log('\nVerifying PII Export isolation & AuditLog entries...');
+    const exportStudentsRes = await fetch(
+      `${BASE_URL}/api/exports/students?branchId=${fixturesA.branchId}&format=csv`,
+      { headers: { Cookie: `token=${tokens.ADMIN_B}` }, signal: AbortSignal.timeout(10000) }
+    );
+    const exportStudentsCsv = await exportStudentsRes.text();
+    totalCallsMade++;
+    const leakedExportStudent = branchACanaries.find((c) => exportStudentsCsv.includes(c)) ||
+      branchAIds.find((id) => exportStudentsCsv.includes(id));
+    if ((exportStudentsRes.status !== 200 && exportStudentsRes.status !== 403) || leakedExportStudent) {
+      leaks.push({
+        route: `GET /api/exports/students?branchId=${fixturesA.branchId}`,
+        method: 'GET',
+        principal: 'ADMIN_B',
+        status: exportStudentsRes.status,
+        evidence: leakedExportStudent
+          ? `CSV leaked Branch A data (${leakedExportStudent})`
+          : `Expected 200 or 403, got ${exportStudentsRes.status}`,
+      });
+    }
+
+    const exportBatchRes = await fetch(
+      `${BASE_URL}/api/exports/batch-results?batchId=${fixturesA.batch1Id}&periodId=${fixturesA.reportPeriodId}&branchId=${fixturesA.branchId}&format=csv`,
+      { headers: { Cookie: `token=${tokens.ADMIN_B}` }, signal: AbortSignal.timeout(10000) }
+    );
+    const exportBatchCsv = await exportBatchRes.text();
+    totalCallsMade++;
+    const leakedExportBatch = branchACanaries.find((c) => exportBatchCsv.includes(c)) ||
+      branchAIds.find((id) => exportBatchCsv.includes(id));
+    if (exportBatchRes.status !== 403 || leakedExportBatch) {
+      leaks.push({
+        route: `GET /api/exports/batch-results?batchId=${fixturesA.batch1Id}&branchId=${fixturesA.branchId}`,
+        method: 'GET',
+        principal: 'ADMIN_B',
+        status: exportBatchRes.status,
+        evidence: leakedExportBatch
+          ? `CSV leaked Branch A data (${leakedExportBatch})`
+          : `Expected 403, got ${exportBatchRes.status}`,
+      });
+    }
+
+    const exportAuditLogs = await prisma.auditLog.findMany({
+      where: {
+        actorId: fixturesB.adminId,
+        action: 'REPORT_EXPORTED',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (exportAuditLogs.length === 0) {
+      leaks.push({
+        route: 'AUDIT_LOG /api/exports/students',
+        method: 'AUDIT',
+        principal: 'ADMIN_B',
+        status: 500,
+        evidence: 'Missing REPORT_EXPORTED AuditLog entry for ADMIN_B export',
+      });
+    } else {
+      for (const al of exportAuditLogs) {
+        const metaStr = JSON.stringify(al.metadata || {});
+        if (branchACanaries.some((c) => metaStr.includes(c)) || metaStr.includes('csv')) {
+          leaks.push({
+            route: 'AUDIT_LOG /api/exports',
+            method: 'AUDIT',
+            principal: 'ADMIN_B',
+            status: 500,
+            evidence: `Export AuditLog metadata leaked row/CSV data: ${metaStr.slice(0, 100)}`,
+          });
+        }
+      }
+    }
+
+    // Print Route x Principal x Filter summary table
+    console.log('\n' + '='.repeat(96));
+    console.log('                 LIST / AGGREGATE / CHART / EXPORT MATRIX (ROUTE x PRINCIPAL x FILTER)       ');
+    console.log('='.repeat(96));
+    console.log(`${'ROUTE'.padEnd(34)} | ${'PRINCIPAL'.padEnd(12)} | ${'FILTER'.padEnd(15)} | ${'STATUS'.padEnd(6)} | VERDICT`);
+    console.log('-'.repeat(96));
+    for (const ep of listAggregateEndpoints) {
+      for (const fv of filterVariants) {
+        const rowGroup = matrixTableRows.filter((r) => r.route === ep.path && r.filter === fv.name);
+        const anyLeak = rowGroup.some((r) => r.verdict === 'LEAK');
+        if (anyLeak || fv.name === 'none' || fv.name === 'branchId=A') {
+          for (const r of rowGroup) {
+            if (anyLeak ? r.verdict === 'LEAK' : true) {
+              console.log(
+                `${r.route.padEnd(34)} | ${r.principal.padEnd(12)} | ${r.filter.padEnd(15)} | ${String(r.status).padEnd(6)} | ${r.verdict}`
+              );
+            }
           }
         }
       }
     }
+    console.log(`(Total matrix evaluations printed/checked: ${matrixTableRows.length} across ${listAggregateEndpoints.length} routes x ${matrixPrincipals.length} principals x ${filterVariants.length} filters)\n`);
 
     // Verify Fixture Immutability Checksum
     console.log('Recording post-test SHA-256 fixture state checksum for Branch A...');

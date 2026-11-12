@@ -431,6 +431,12 @@ export async function getAssignments(req: Request, res: Response) {
     const now = new Date();
 
     // Scoping
+    if (req.user.role === Role.ACCOUNTANT) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Accountants cannot access assignments',
+      });
+    }
     if (req.user.role === Role.ADMIN) {
       where.batch = { branchId: req.user.branchId };
     } else if (req.user.role === Role.TEACHER) {

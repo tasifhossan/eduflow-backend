@@ -29,6 +29,9 @@ export async function getRevenueMonthlyChart(req: Request, res: Response) {
       reversal: null,
       receivedAt: { gte: twelveMonthsAgo },
       ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+      ...(req.user.role === Role.TEACHER
+        ? { allocations: { some: { charge: { batch: { teacherId: req.user.userId } } } } }
+        : {}),
     };
 
     const payments = await prisma.payment.findMany({
@@ -195,7 +198,10 @@ export async function getEnrollmentsByBatchChart(req: Request, res: Response) {
     const effectiveBranchId = req.effectiveBranchId;
 
     const batches = await prisma.batch.findMany({
-      where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
+      where: {
+        ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+        ...(req.user.role === Role.TEACHER ? { teacherId: req.user.userId } : {}),
+      },
       select: {
         id: true,
         name: true,
@@ -357,6 +363,7 @@ export async function getFeeStatusChart(req: Request, res: Response) {
       where: {
         status: 'ACTIVE',
         ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+        ...(req.user.role === Role.TEACHER ? { batch: { teacherId: req.user.userId } } : {}),
       },
       include: {
         adjustments: true,
@@ -680,6 +687,7 @@ export async function getOverviewChart(req: Request, res: Response) {
 
     // ─── ADMIN / TEACHER / SUPER_ADMIN Overview ─────────────────────────────
     const effectiveBranchId = req.effectiveBranchId;
+    const isTeacherRole = role === Role.TEACHER;
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const today = new Date(now.toISOString().split('T')[0] + 'T00:00:00.000Z');
     const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
@@ -696,6 +704,9 @@ export async function getOverviewChart(req: Request, res: Response) {
         where: {
           role: Role.STUDENT,
           ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(isTeacherRole
+            ? { enrollments: { some: { status: 'ACTIVE', batch: { teacherId: userId } } } }
+            : {}),
         },
       }),
       prisma.user.count({
@@ -705,20 +716,29 @@ export async function getOverviewChart(req: Request, res: Response) {
         },
       }),
       prisma.batch.count({
-        where: effectiveBranchId ? { branchId: effectiveBranchId } : {},
+        where: {
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(isTeacherRole ? { teacherId: userId } : {}),
+        },
       }),
       prisma.payment.aggregate({
         where: {
           reversal: null,
           receivedAt: { gte: startOfMonth },
           ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(isTeacherRole
+            ? { allocations: { some: { charge: { batch: { teacherId: userId } } } } }
+            : {}),
         },
         _sum: { amount: true },
       }),
       prisma.attendance.groupBy({
         by: ['status'],
         where: {
-          ...(effectiveBranchId ? { batch: { branchId: effectiveBranchId } } : {}),
+          batch: {
+            ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+            ...(isTeacherRole ? { teacherId: userId } : {}),
+          },
           date: { gte: today, lt: tomorrow },
         },
         _count: { _all: true },
@@ -727,6 +747,7 @@ export async function getOverviewChart(req: Request, res: Response) {
         where: {
           status: 'ACTIVE',
           ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(isTeacherRole ? { batch: { teacherId: userId } } : {}),
         },
         include: {
           adjustments: true,

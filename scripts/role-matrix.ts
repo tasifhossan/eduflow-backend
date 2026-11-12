@@ -217,9 +217,10 @@ async function takeDatabaseSnapshot(): Promise<DatabaseSnapshot> {
   });
 
   const centerSettings = await prisma.centerSettings.findUnique({ where: { key: 'center' } });
+  const centerFields = centerSettings ? (({ updatedAt: _u, ...rest }) => rest)(centerSettings) : null;
   const centerSnapshot: TableSnapshot = {
     count: centerSettings ? 1 : 0,
-    checksum: centerSettings ? crypto.createHash('sha256').update(JSON.stringify(centerSettings)).digest('hex') : 'none',
+    checksum: centerFields ? crypto.createHash('sha256').update(JSON.stringify(centerFields)).digest('hex') : 'none',
   };
 
   const enquiries = await prisma.contactMessage.findMany({
@@ -1208,10 +1209,80 @@ const PUBLIC_ALLOWLIST_PREFIXES = [
   '/api/ai/chat',
 ];
 
+function compareSnapshots(beforeSnapshot: DatabaseSnapshot, afterSnapshot: DatabaseSnapshot): string[] {
+  const tables = Object.keys(beforeSnapshot) as Array<keyof DatabaseSnapshot>;
+  const snapshotMismatches: string[] = [];
+
+  for (const t of tables) {
+    if (t === 'notifications' || t === 'auditLogs') {
+      if (beforeSnapshot[t].count !== afterSnapshot[t].count) {
+        snapshotMismatches.push(
+          `Table '${t}': row count changed from ${beforeSnapshot[t].count} to ${afterSnapshot[t].count} (diff: ${afterSnapshot[t].count - beforeSnapshot[t].count})`
+        );
+      }
+      continue;
+    }
+    const b = beforeSnapshot[t] as TableSnapshot;
+    const a = afterSnapshot[t] as TableSnapshot;
+    if (b.count !== a.count) {
+      snapshotMismatches.push(
+        `Table '${t}': row count changed from ${b.count} to ${a.count} (diff: ${a.count - b.count})`
+      );
+    }
+    if (b.checksum !== a.checksum) {
+      if (t === 'centerSettings') {
+        snapshotMismatches.push(`CenterSettings modified! Checksum changed (before: ${b.checksum.slice(0, 16)}..., after: ${a.checksum.slice(0, 16)}...)`);
+      } else {
+        snapshotMismatches.push(
+          `Table '${t}': checksum modified (before: ${b.checksum.slice(0, 16)}..., after: ${a.checksum.slice(0, 16)}...)`
+        );
+      }
+    }
+  }
+  return snapshotMismatches;
+}
+
 async function runRoleMatrix() {
+  const isSelfTest = process.argv.includes('--self-test');
   console.log('Taking database baseline snapshot before role-matrix...');
+  const originalCenterSettings = await prisma.centerSettings.findUnique({ where: { key: 'center' } });
   const beforeSnapshot = await takeDatabaseSnapshot();
-  console.log('Baseline snapshot recorded across all 9 target models.');
+  console.log(`Baseline snapshot recorded across all ${Object.keys(beforeSnapshot).length} target models.`);
+
+  if (isSelfTest) {
+    console.log('\n[SELF-TEST] Deliberately modifying non-fixture CenterSettings.tagline...');
+    const originalTagline = originalCenterSettings?.tagline ?? null;
+    try {
+      await prisma.centerSettings.update({
+        where: { key: 'center' },
+        data: { tagline: 'MATRIX-SELFTEST-MUTATION' },
+      });
+      const selfTestAfter = await takeDatabaseSnapshot();
+      const diffs = compareSnapshots(beforeSnapshot, selfTestAfter);
+      console.log(`[SELF-TEST] Diffs detected (${diffs.length}):`);
+      diffs.forEach((d) => console.log(`  - ${d}`));
+      if (diffs.length === 0) {
+        console.error('[SELF-TEST] FAIL: Matrix guard did NOT detect the deliberate non-fixture mutation!');
+        process.exit(1);
+      }
+      console.log('[SELF-TEST] Guard correctly failed on non-fixture diff; now reverting...');
+    } finally {
+      if (originalCenterSettings) {
+        await prisma.centerSettings.update({
+          where: { key: 'center' },
+          data: { tagline: originalTagline },
+        });
+      }
+    }
+    const postRevertSnapshot = await takeDatabaseSnapshot();
+    const postRevertDiffs = compareSnapshots(beforeSnapshot, postRevertSnapshot);
+    if (postRevertDiffs.length > 0) {
+      console.error('[SELF-TEST] FAIL: Revert did not restore original state:', postRevertDiffs);
+      process.exit(1);
+    }
+    console.log('✓ [SELF-TEST] PASSED: Matrix guard detected diff, triggered failure, and cleanly restored original row.');
+    process.exit(0);
+  }
 
   let runError: any = null;
   const mismatches: Mismatch[] = [];
@@ -1435,11 +1506,11 @@ async function runRoleMatrix() {
     throw runError;
   }
 
-  // Database Immutability Verification
+  // Database Immutability Verification: Compare snapshot FIRST, print every diff, fail on any diff, and only THEN revert
   console.log('\nTaking post-run database snapshot to verify immutability...');
   const afterSnapshot = await takeDatabaseSnapshot();
   const tables = Object.keys(beforeSnapshot) as Array<keyof DatabaseSnapshot>;
-  const snapshotMismatches: string[] = [];
+  const snapshotMismatches = compareSnapshots(beforeSnapshot, afterSnapshot);
 
   console.log('='.repeat(88));
   console.log('         INTENTIONALLY INVALID & NO-OP PROBE SPECIFICATIONS              ');
@@ -1451,39 +1522,23 @@ async function runRoleMatrix() {
   console.log('Dynamic Fallback Probes           | { name: MATRIX...} | Triggers 400 validation error; confirms auth gate passed without modifying DB');
   console.log('='.repeat(88) + '\n');
 
-  for (const t of tables) {
-    if (t === 'notifications' || t === 'auditLogs') {
-      if (beforeSnapshot[t].count !== afterSnapshot[t].count) {
-        snapshotMismatches.push(
-          `Table '${t}': row count changed from ${beforeSnapshot[t].count} to ${afterSnapshot[t].count} (diff: ${afterSnapshot[t].count - beforeSnapshot[t].count})`
-        );
-      }
-      continue;
-    }
-    const b = beforeSnapshot[t] as TableSnapshot;
-    const a = afterSnapshot[t] as TableSnapshot;
-    if (b.count !== a.count) {
-      snapshotMismatches.push(
-        `Table '${t}': row count changed from ${b.count} to ${a.count} (diff: ${a.count - b.count})`
-      );
-    }
-    if (b.checksum !== a.checksum) {
-      if (t === 'centerSettings') {
-        snapshotMismatches.push(`CenterSettings modified! Field values changed during matrix execution.`);
-      } else {
-        snapshotMismatches.push(
-          `Table '${t}': checksum modified (before: ${b.checksum.slice(0, 16)}..., after: ${a.checksum.slice(0, 16)}...)`
-        );
-      }
-    }
-  }
-
   if (snapshotMismatches.length > 0) {
     console.error('\n' + '!'.repeat(88));
     console.error('FATAL: Database state changed during role-matrix execution!');
     console.error('Non-fixture rows were modified, added, or deleted:');
     snapshotMismatches.forEach((m) => console.error(`  - ${m}`));
     console.error('!'.repeat(88) + '\n');
+
+    // Only revert accidental non-fixture mutations AFTER comparing and printing every diff
+    if (originalCenterSettings) {
+      console.log('Reverting any accidental CenterSettings mutations...');
+      const { id: _id, key: _key, updatedAt: _u, ...restoreFields } = originalCenterSettings;
+      await prisma.centerSettings.update({
+        where: { key: 'center' },
+        data: restoreFields as any,
+      });
+    }
+
     process.exit(1);
   } else {
     console.log(`✓ Database immutability verified: 0 non-fixture rows changed across all ${tables.length} models.`);

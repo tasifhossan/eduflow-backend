@@ -8,6 +8,7 @@
     "test:smoke": "tsx scripts/smoke.ts",
     "test:isolation": "tsx scripts/branch-isolation.ts",
     "role-matrix": "tsx scripts/role-matrix.ts",
+    "db:latency": "tsx scripts/db-latency.ts",
     "build": "tsc",
     "start": "node dist/src/index.js",
     "dev": "tsx src/index.ts",

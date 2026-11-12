@@ -1063,6 +1063,12 @@ export async function getLectures(req: Request, res: Response) {
     const where: Prisma.LectureWhereInput = {};
 
     // Branch scoping
+    if (req.user.role === Role.ACCOUNTANT) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Accountants cannot access lectures',
+      });
+    }
     if (req.user.role === Role.ADMIN) {
       where.batch = { branchId: req.user.branchId };
     } else if (req.user.role === Role.TEACHER) {

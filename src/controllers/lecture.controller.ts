@@ -1063,6 +1063,12 @@ export async function getLectures(req: Request, res: Response) {
     const where: Prisma.LectureWhereInput = {};
 
     // Branch scoping
+    if (req.user.role === Role.ACCOUNTANT) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Accountants cannot access lectures',
+      });
+    }
     if (req.user.role === Role.ADMIN) {
       where.batch = { branchId: req.user.branchId };
     } else if (req.user.role === Role.TEACHER) {
@@ -1454,11 +1460,26 @@ export async function getSyllabusProgress(req: Request, res: Response) {
     const user = req.user;
     const isStaff = user.role === Role.SUPER_ADMIN || user.role === Role.ADMIN || user.role === Role.TEACHER;
 
-    if (user.role === Role.ADMIN && batch.branchId !== user.branchId) {
+    if ((user.role === Role.ADMIN || user.role === Role.ACCOUNTANT) && batch.branchId !== user.branchId) {
       return res.status(403).json({
         success: false,
         message: 'Forbidden: Access denied to another branch batch',
       });
+    }
+
+    if (user.role === Role.TEACHER) {
+      if (batch.branchId !== user.branchId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Access denied to another branch batch',
+        });
+      }
+      if (batch.teacherId !== user.userId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You are not assigned as teacher of this batch',
+        });
+      }
     }
 
     if (user.role === Role.STUDENT) {

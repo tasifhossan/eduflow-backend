@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
+process.env.ALLOW_RELAXED_RATE_LIMIT = 'true';
 
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
@@ -21,7 +22,10 @@ interface FixturesA {
   batch2Id: string;
   batch2Name: string;
   student1Id: string;
+  student1Name: string;
   student1Email: string;
+  student1Phone: string;
+  student1Code: string;
   student2Id: string;
   guardian1Id: string;
   guardian2Id: string;
@@ -44,6 +48,7 @@ interface FixturesA {
   chargeId: string;
   paymentId: string;
   enquiryId: string;
+  enquiryName: string;
   enquiryNoteId: string;
   reportPeriodId: string;
   reportRemarkId: string;
@@ -51,6 +56,14 @@ interface FixturesA {
   noticeTitle: string;
   attachmentId: string;
   notificationId: string;
+  routineSlotId: string;
+  resourceId: string;
+  adjustmentId: string;
+  writtenQuestionId: string;
+  studentAnswerId: string;
+  practiceSessionId: string;
+  guardianLinkId: string;
+  reviewId: string;
 }
 
 interface FixturesB {
@@ -72,6 +85,7 @@ interface Tokens {
   GUARDIAN_B: string;
   // Branch A intra-branch negative probe tokens
   STUDENT_A1: string;
+  STUDENT_A2: string;  // enrolled in Batch A2 (NOT Batch A1)
   GUARDIAN_A2: string; // unlinked to Student A1
   TEACHER_A2: string;  // non-assigned to Batch A1
 }
@@ -131,7 +145,13 @@ export async function cleanAllMatrixFixtures() {
     });
 
     await prisma.feeAdjustment.deleteMany({
-      where: { charge: { description: { startsWith: 'MATRIX-' } } },
+      where: {
+        OR: [
+          { reason: { startsWith: 'MATRIX-' } },
+          { charge: { description: { startsWith: 'MATRIX-' } } },
+          { branch: { name: { startsWith: 'MATRIX-' } } },
+        ],
+      },
     });
 
     await prisma.feeCharge.deleteMany({
@@ -139,6 +159,43 @@ export async function cleanAllMatrixFixtures() {
         OR: [
           { description: { startsWith: 'MATRIX-' } },
           { student: { email: { startsWith: 'matrix.' } } },
+        ],
+      },
+    });
+
+    // Practice sessions & Reviews & Student answers
+    await prisma.practiceSession.deleteMany({
+      where: {
+        OR: [
+          { student: { email: { startsWith: 'matrix.' } } },
+          { batch: { name: { startsWith: 'MATRIX-' } } },
+        ],
+      },
+    });
+
+    await prisma.review.deleteMany({
+      where: {
+        OR: [
+          { student: { email: { startsWith: 'matrix.' } } },
+          { batch: { name: { startsWith: 'MATRIX-' } } },
+        ],
+      },
+    });
+
+    await prisma.studentAnswer.deleteMany({
+      where: {
+        OR: [
+          { student: { email: { startsWith: 'matrix.' } } },
+          { question: { test: { title: { startsWith: 'MATRIX-' } } } },
+        ],
+      },
+    });
+
+    await prisma.resource.deleteMany({
+      where: {
+        OR: [
+          { title: { startsWith: 'MATRIX-' } },
+          { batch: { name: { startsWith: 'MATRIX-' } } },
         ],
       },
     });
@@ -284,8 +341,11 @@ export async function cleanAllMatrixFixtures() {
       },
     });
 
-    // 11. Routine slots
+    // 11. Routine slots & Reviews
     await prisma.routineSlot.deleteMany({
+      where: { batch: { name: { startsWith: 'MATRIX-' } } },
+    });
+    await prisma.review.deleteMany({
       where: { batch: { name: { startsWith: 'MATRIX-' } } },
     });
 
@@ -320,6 +380,7 @@ export async function cleanAllMatrixFixtures() {
         OR: [
           { email: { startsWith: 'matrix.' } },
           { name: { startsWith: 'MATRIX-' } },
+          { branch: { name: { startsWith: 'MATRIX-' } } },
         ],
       },
     });
@@ -403,8 +464,10 @@ async function setupIsolationFixtures(): Promise<{
   });
   const studentA1 = await prisma.user.create({
     data: {
-      name: 'MATRIX-Student-A1',
-      email: `matrix.student.a1.${ts}@test.local`,
+      name: `MATRIX-CANARY-A1-${ts}`,
+      email: `matrix.canary.a1.${ts}@test.local`,
+      phone: '01999771122',
+      studentCode: `MTX-CANARY-${ts}`,
       role: Role.STUDENT,
       branchId: branchA.id,
       password: pwdHash,
@@ -443,7 +506,7 @@ async function setupIsolationFixtures(): Promise<{
   });
 
   // Link Guardian A1 to Student A1 (Guardian A2 remains unlinked)
-  await prisma.guardianLink.create({
+  const guardianLink1 = await prisma.guardianLink.create({
     data: { guardianId: guardianA1.id, studentId: studentA1.id },
   });
 
@@ -512,7 +575,7 @@ async function setupIsolationFixtures(): Promise<{
       branchId: branchA.id,
       subjectId: subjectA.id,
       teacherId: teacherA1.id,
-      feeAmount: 500,
+      feeAmount: 88442,
       feeBilling: 'MONTHLY',
     },
   });
@@ -535,6 +598,14 @@ async function setupIsolationFixtures(): Promise<{
       teacherId: teacherA2.id,
       feeAmount: 500,
       feeBilling: 'MONTHLY',
+    },
+  });
+
+  const enrollment2 = await prisma.enrollment.create({
+    data: {
+      batchId: batch2.id,
+      studentId: studentA2.id,
+      status: 'ACTIVE',
     },
   });
 
@@ -650,7 +721,7 @@ async function setupIsolationFixtures(): Promise<{
       branchId: branchA.id,
       studentId: studentA1.id,
       batchId: batch1.id,
-      amount: 100,
+      amount: 77331,
       dueDate: new Date(),
       description: `MATRIX-Charge-A-${ts}`,
       kind: 'TUITION',
@@ -663,7 +734,7 @@ async function setupIsolationFixtures(): Promise<{
   const payment = await prisma.payment.create({
     data: {
       studentId: studentA1.id,
-      amount: 100,
+      amount: 77331,
       method: 'CASH',
       receiptNumber: `MATRIX-RCP-${ts}`,
       note: `MATRIX-Payment-A-${ts}`,
@@ -674,7 +745,7 @@ async function setupIsolationFixtures(): Promise<{
       allocations: {
         create: {
           chargeId: charge.id,
-          amount: 100,
+          amount: 77331,
           branchId: branchA.id,
         },
       },
@@ -684,9 +755,9 @@ async function setupIsolationFixtures(): Promise<{
   // Enquiry & EnquiryNote
   const enquiry = await prisma.contactMessage.create({
     data: {
-      name: `MATRIX-Enquiry-A-${ts}`,
+      name: `MATRIX-CANARY-ENQ-${ts}`,
       email: `matrix.enquiry.${ts}@test.local`,
-      phone: '01711999888',
+      phone: '01999883344',
       branchId: branchA.id,
       status: 'NEW',
     },
@@ -753,6 +824,79 @@ async function setupIsolationFixtures(): Promise<{
     },
   });
 
+  // Routine slot in Batch 1
+  const routineSlot = await prisma.routineSlot.create({
+    data: {
+      batchId: batch1.id,
+      dayOfWeek: 'MONDAY',
+      startTime: '10:00',
+      endTime: '11:00',
+    },
+  });
+
+  // Resource in Batch 1
+  const resource = await prisma.resource.create({
+    data: {
+      title: `MATRIX-Resource-A-${ts}`,
+      fileUrl: 'https://example.com/matrix-res.pdf',
+      fileType: 'PDF',
+      batch: { connect: { id: batch1.id } },
+      uploadedBy: { connect: { id: teacherA1.id } },
+    },
+  });
+
+  // Fee Adjustment in Batch 1
+  const adjustment = await prisma.feeAdjustment.create({
+    data: {
+      chargeId: charge.id,
+      branchId: branchA.id,
+      type: 'DISCOUNT',
+      amount: 10,
+      reason: `MATRIX-Adjustment-A-${ts}`,
+      createdById: adminA.id,
+    },
+  });
+
+  // Written Question and Student Answer
+  const writtenQuestion = await prisma.question.create({
+    data: {
+      testId: test.id,
+      text: 'Matrix Written Question 1',
+      marks: 10,
+      order: 2,
+      type: 'WRITTEN',
+    },
+  });
+
+  const studentAnswer = await prisma.studentAnswer.create({
+    data: {
+      student: { connect: { id: studentA1.id } },
+      question: { connect: { id: writtenQuestion.id } },
+      writtenAnswerText: 'Matrix written answer text',
+    },
+  });
+
+  // Practice session for Student A1
+  const practiceSession = await prisma.practiceSession.create({
+    data: {
+      studentId: studentA1.id,
+      batchId: batch1.id,
+      chapterIds: [],
+      questionIds: [question.id],
+      totalQuestions: 1,
+    },
+  });
+
+  // Review in Batch 1 by Student A1
+  const review = await prisma.review.create({
+    data: {
+      batchId: batch1.id,
+      studentId: studentA1.id,
+      rating: 5,
+      comment: 'Matrix batch review',
+    },
+  });
+
   const fixturesA: FixturesA = {
     branchId: branchA.id,
     branchName: branchA.name,
@@ -762,7 +906,10 @@ async function setupIsolationFixtures(): Promise<{
     batch2Id: batch2.id,
     batch2Name: batch2.name,
     student1Id: studentA1.id,
+    student1Name: studentA1.name,
     student1Email: studentA1.email,
+    student1Phone: studentA1.phone || '01999771122',
+    student1Code: studentA1.studentCode || '',
     student2Id: studentA2.id,
     guardian1Id: guardianA1.id,
     guardian2Id: guardianA2.id,
@@ -785,6 +932,7 @@ async function setupIsolationFixtures(): Promise<{
     chargeId: charge.id,
     paymentId: payment.id,
     enquiryId: enquiry.id,
+    enquiryName: enquiry.name,
     enquiryNoteId: enquiryNote.id,
     reportPeriodId: reportPeriod.id,
     reportRemarkId: reportRemark.id,
@@ -792,6 +940,14 @@ async function setupIsolationFixtures(): Promise<{
     noticeTitle: notice.title,
     attachmentId: attachment.id,
     notificationId: notification.id,
+    routineSlotId: routineSlot.id,
+    resourceId: resource.id,
+    adjustmentId: adjustment.id,
+    writtenQuestionId: writtenQuestion.id,
+    studentAnswerId: studentAnswer.id,
+    practiceSessionId: practiceSession.id,
+    guardianLinkId: guardianLink1.id,
+    reviewId: review.id,
   };
 
   const fixturesB: FixturesB = {
@@ -811,6 +967,7 @@ async function setupIsolationFixtures(): Promise<{
     STUDENT_B: makeToken(studentB),
     GUARDIAN_B: makeToken(guardianB),
     STUDENT_A1: makeToken(studentA1),
+    STUDENT_A2: makeToken(studentA2),
     GUARDIAN_A2: makeToken(guardianA2),
     TEACHER_A2: makeToken(teacherA2),
   };
@@ -834,6 +991,10 @@ async function computeFixturesChecksum(f: FixturesA): Promise<string> {
   const notices = await prisma.notice.findMany({ where: { branchId: f.branchId }, orderBy: { id: 'asc' } });
   const attachments = await prisma.attachment.findMany({ where: { branchId: f.branchId }, orderBy: { id: 'asc' } });
   const enquiries = await prisma.contactMessage.findMany({ where: { branchId: f.branchId }, orderBy: { id: 'asc' } });
+  const routineSlots = await prisma.routineSlot.findMany({ where: { batch: { branchId: f.branchId } }, orderBy: { id: 'asc' } });
+  const resources = await prisma.resource.findMany({ where: { batch: { branchId: f.branchId } }, orderBy: { id: 'asc' } });
+  const adjustments = await prisma.feeAdjustment.findMany({ where: { branchId: f.branchId }, orderBy: { id: 'asc' } });
+  const practiceSessions = await prisma.practiceSession.findMany({ where: { batch: { branchId: f.branchId } }, orderBy: { id: 'asc' } });
 
   hash.update(JSON.stringify({
     users: users.map(u => ({ id: u.id, role: u.role, branchId: u.branchId, isActive: u.isActive })),
@@ -848,6 +1009,10 @@ async function computeFixturesChecksum(f: FixturesA): Promise<string> {
     notices: notices.map(n => ({ id: n.id, title: n.title })),
     attachments: attachments.map(at => ({ id: at.id, title: at.title })),
     enquiries: enquiries.map(eq => ({ id: eq.id, name: eq.name, status: eq.status })),
+    routineSlots: routineSlots.map(rs => ({ id: rs.id, dayOfWeek: rs.dayOfWeek, startTime: rs.startTime })),
+    resources: resources.map(res => ({ id: res.id, title: res.title })),
+    adjustments: adjustments.map(adj => ({ id: adj.id, amount: String(adj.amount), status: adj.status })),
+    practiceSessions: practiceSessions.map(ps => ({ id: ps.id, totalQuestions: ps.totalQuestions })),
   }));
 
   return hash.digest('hex');
@@ -1103,23 +1268,634 @@ export async function runBranchIsolationTests(): Promise<{
         description: 'Get notice',
         principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B'],
       },
+
+      // Additional Cross-Branch & Isolation Probes for Reachable ID Routes:
+      // 1. Batches & Branches
+      {
+        method: 'GET',
+        path: (f) => `/api/branches/${f.branchId}`,
+        description: 'Branch details by ID',
+        principals: ['ADMIN_B', 'TEACHER_B'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/student-view`,
+        description: 'Batch student view (foreign/non-enrolled student)',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/batches/${f.batch1Id}/restore`,
+        description: 'Restore foreign branch batch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/analytics`,
+        description: 'Batch analytics (foreign branch or unassigned teacher)',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/students/${f.student1Id}/trend`,
+        description: 'Student trend in batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'STUDENT_A2', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/batches/${f.batch1Id}/reviews`,
+        body: () => ({ rating: 5, comment: 'Matrix review probe' }),
+        description: 'Batch review by non-enrolled or foreign student',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/routine`,
+        description: 'Get batch routine',
+        principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/report-periods`,
+        description: 'Get batch report periods',
+        principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'STUDENT_A2'],
+      },
+
+      // 2. Enrollments & Routine Slots
+      {
+        method: 'POST',
+        path: () => '/api/enrollments',
+        body: (f) => ({ batchId: f.batch1Id, studentId: f.student1Id }),
+        description: 'Enroll student into foreign batch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/enrollments/${f.enrollment1Id}/restore`,
+        description: 'Restore foreign branch enrollment',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'POST',
+        path: () => '/api/routines',
+        body: (f) => ({ batchId: f.batch1Id, dayOfWeek: 'TUESDAY', startTime: '11:00', endTime: '12:00' }),
+        description: 'Create routine slot in foreign batch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/routines/${f.routineSlotId}`,
+        description: 'Delete routine slot of foreign branch',
+        principals: ['ADMIN_B'],
+      },
+
+      // 3. Attendance
+      {
+        method: 'POST',
+        path: () => '/api/attendance',
+        body: (f) => ({ batchId: f.batch1Id, date: '2026-11-11', records: [] }),
+        description: 'Mark attendance for foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+
+      // 4. Users & Students
+      {
+        method: 'POST',
+        path: (f) => `/api/users/${f.student1Id}/reset-password`,
+        description: 'Reset password of foreign branch user',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/users/${f.student1Id}/status`,
+        body: () => ({ isActive: false }),
+        description: 'Update status of foreign branch user',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'POST',
+        path: () => '/api/users/import',
+        body: (f) => ({ rows: [{ name: 'Probe Import User', role: 'STUDENT', branchId: f.branchId }] }),
+        description: 'Import users targeting foreign branch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/students/${f.student1Id}/guardian-log`,
+        description: 'Get guardian change log of foreign student',
+        principals: ['ADMIN_B'],
+      },
+
+      // 5. Tests, Questions & Submissions
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/tests`,
+        description: 'Get tests for batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/restore`,
+        description: 'Restore foreign branch test',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/start`,
+        description: 'Start test attempt (foreign/non-enrolled student)',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/tests/${f.testId}/attempt`,
+        description: 'Get student attempt for foreign test',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'PUT',
+        path: (f) => `/api/tests/${f.testId}/attempt/answers`,
+        body: () => ({ answers: [] }),
+        description: 'Save answers for foreign test attempt',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/attempts/${f.attemptId}/extend`,
+        body: () => ({ minutes: 10, reason: 'Probe extension' }),
+        description: 'Extend test attempt',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/finalize`,
+        description: 'Finalize test attempts',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/questions`,
+        body: () => ({ text: 'Probe Question', type: 'MCQ', marks: 5, order: 9, options: [{ text: 'A', isCorrect: true }] }),
+        description: 'Add question to foreign test',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/questions/bulk`,
+        body: () => ({ questions: [{ text: 'Probe Q Bulk', type: 'MCQ', marks: 5, order: 10, options: [{ text: 'A', isCorrect: true }] }] }),
+        description: 'Add questions bulk to foreign test',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/questions/${f.questionId}`,
+        body: () => ({ text: 'Mutated Question Text' }),
+        description: 'Update question in foreign test',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/questions/${f.questionId}`,
+        description: 'Delete question in foreign test',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/submit`,
+        body: () => ({ answers: [] }),
+        description: 'Submit foreign/non-enrolled test',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/answers/${f.studentAnswerId}/grade`,
+        body: () => ({ marksAwarded: 5 }),
+        description: 'Grade student written answer',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/tests/${f.testId}/manual-results`,
+        body: (f) => ({ results: [{ studentId: f.student1Id, marksObtained: 8 }] }),
+        description: 'Save manual test results',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/tests/${f.testId}/my-result`,
+        description: 'Get my result for test',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+
+      // 6. Fees
+      {
+        method: 'POST',
+        path: () => '/api/fees/payments',
+        body: (f) => ({ studentId: f.student1Id, batchId: f.batch1Id, amountPaid: 50, method: 'CASH', dueDate: '2026-12-01', period: '2026-11' }),
+        description: 'Record fee payment for foreign student',
+        principals: ['ADMIN_B', 'ACCOUNTANT_B'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/fees/receipts/${f.paymentId}`,
+        description: 'Get fee receipt',
+        principals: ['ADMIN_B', 'ACCOUNTANT_B', 'STUDENT_B', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/fees/charges/${f.chargeId}/void`,
+        body: () => ({ reason: 'Probe void charge' }),
+        description: 'Void fee charge of foreign branch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'POST',
+        path: () => '/api/fees/charges/generate',
+        body: (f) => ({ batchId: f.batch1Id, month: '2026-11' }),
+        description: 'Generate dues for foreign batch',
+        principals: ['ADMIN_B', 'ACCOUNTANT_B'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/fees/adjustments/${f.adjustmentId}/void`,
+        body: () => ({ reason: 'Probe void adjustment' }),
+        description: 'Void fee adjustment of foreign branch',
+        principals: ['ADMIN_B'],
+      },
+
+      // 7. Resources & Guardians
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/resources`,
+        description: 'Get batch resources',
+        principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/resources/${f.resourceId}`,
+        description: 'Delete resource of foreign branch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/guardians/link/${f.guardianLinkId}`,
+        description: 'Unlink guardian of foreign branch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/guardians/students/${f.student1Id}/attendance`,
+        description: 'Guardian view student attendance',
+        principals: ['GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/guardians/students/${f.student1Id}/results`,
+        description: 'Guardian view student results',
+        principals: ['GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/guardians/students/${f.student1Id}/payments`,
+        description: 'Guardian view student payments',
+        principals: ['GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+
+      // 8. Practice Sessions
+      {
+        method: 'POST',
+        path: (f) => `/api/students/${f.student1Id}/practice-sessions`,
+        body: (f) => ({ batchId: f.batch1Id, chapterIds: [] }),
+        description: 'Create practice session for another student',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/students/${f.student1Id}/practice-sessions/${f.practiceSessionId}`,
+        description: 'Get practice session of another student',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/students/${f.student1Id}/practice-sessions/${f.practiceSessionId}/submit`,
+        body: () => ({ answers: [] }),
+        description: 'Submit practice session of another student',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+
+      // 9. Assignments & Enquiries
+      {
+        method: 'POST',
+        path: () => '/api/assignments',
+        body: (f) => ({ batchId: f.batch1Id, subjectId: f.subjectId, title: 'Probe Assignment', dueAt: new Date(Date.now() + 86400000).toISOString(), maxMarks: 50, mode: 'ONLINE' }),
+        description: 'Create assignment in foreign batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/enquiries/${f.enquiryId}/notes`,
+        body: () => ({ kind: 'CALL', body: 'Probe note' }),
+        description: 'Add note to foreign enquiry',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/enquiries/${f.enquiryId}/convert`,
+        body: (f) => ({ name: 'Probe Converted', phone: '01712999777', batchId: f.batch1Id }),
+        description: 'Convert foreign enquiry',
+        principals: ['ADMIN_B'],
+      },
+
+      // 10. Report Periods & Remarks
+      {
+        method: 'POST',
+        path: () => '/api/report-periods',
+        body: (f) => ({ batchId: f.batch1Id, label: 'Probe Period', from: '2026-01-01', to: '2026-06-30' }),
+        description: 'Create report period in foreign batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/report-periods/${f.reportPeriodId}`,
+        body: () => ({ label: 'Mutated Label' }),
+        description: 'Update report period',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/report-periods/${f.reportPeriodId}/publish`,
+        description: 'Publish foreign report period',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/report-periods/${f.reportPeriodId}/unpublish`,
+        description: 'Unpublish foreign report period',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'PUT',
+        path: (f) => `/api/report-periods/${f.reportPeriodId}/remarks/${f.student1Id}`,
+        body: () => ({ remark: 'Probe remark' }),
+        description: 'Update report remark for foreign student',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/report-periods/${f.reportPeriodId}/cards/${f.student1Id}`,
+        description: 'Get foreign student report card',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/exports/batch-results?batchId=${f.batch1Id}&periodId=${f.reportPeriodId}`,
+        description: 'Export batch results of foreign batch',
+        principals: ['ADMIN_B'],
+      },
+
+      // 11. Complete remaining reachable non-super-admin ID routes
+      {
+        method: 'PATCH',
+        path: (f) => `/api/reviews/${f.reviewId}`,
+        body: () => ({ rating: 1, comment: 'Mutated review' }),
+        description: 'Update review owned by another student',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/reviews/${f.reviewId}`,
+        description: 'Delete review owned by another student',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/students/${f.student1Id}`,
+        body: () => ({ name: 'MATRIX-Mutated-Student' }),
+        description: 'Update student in foreign branch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/tests/${f.testId}`,
+        body: () => ({ title: 'MATRIX-Mutated-Test' }),
+        description: 'Update test of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/tests/${f.testId}`,
+        description: 'Delete test of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: () => '/api/notices',
+        body: (f) => ({ title: 'MATRIX-Probe-Notice', content: 'Probe content', batchId: f.batch1Id }),
+        description: 'Create notice targeting foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/notices/${f.noticeId}`,
+        description: 'Delete notice of foreign branch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/lectures/${f.pubLectureId}/complete`,
+        body: () => ({}),
+        description: 'Complete lecture of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/lectures/${f.pubLectureId}/cancel`,
+        body: () => ({ reason: 'Probe cancel' }),
+        description: 'Cancel lecture of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/batches/${f.batch1Id}/lectures/generate`,
+        body: () => ({ fromDate: '2026-11-10', toDate: '2026-11-17' }),
+        description: 'Generate lectures for foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/syllabus-progress`,
+        description: 'Get syllabus progress of foreign/unassigned/unenrolled batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/assignments/${f.assignmentId}`,
+        body: () => ({ title: 'MATRIX-Mutated-Assignment' }),
+        description: 'Update assignment of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/assignments/${f.assignmentId}`,
+        description: 'Delete assignment of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/assignments/${f.assignmentId}/submit`,
+        body: () => ({ answerText: 'Probe answer' }),
+        description: 'Submit assignment of foreign/unenrolled batch',
+        principals: ['STUDENT_B', 'STUDENT_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/assignments/${f.assignmentId}/marks`,
+        body: (f) => ({ marks: [{ studentId: f.student1Id, marksObtained: 10 }] }),
+        description: 'Enter offline marks for assignment of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/submissions/${f.submissionId}/grade`,
+        body: () => ({ marksObtained: 10 }),
+        description: 'Grade assignment submission of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: () => '/api/attachments',
+        body: (f) => ({ lectureId: f.pubLectureId, kind: 'LINK', title: 'Probe Attachment', url: 'https://example.com' }),
+        description: 'Create attachment on lecture of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/attachments/${f.attachmentId}/download`,
+        description: 'Download attachment of foreign/unassigned/unenrolled batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/attachments/${f.attachmentId}`,
+        description: 'Delete attachment of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/enquiries/${f.enquiryId}`,
+        body: () => ({ status: 'LOST', lostReason: 'Probe lost' }),
+        description: 'Update enquiry of foreign branch',
+        principals: ['ADMIN_B'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/my/report-cards/${f.reportPeriodId}`,
+        description: 'Get report card by period for foreign/unenrolled/unlinked user',
+        principals: ['STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+
     ];
 
-    // 2. List & Search Endpoints (should never leak Branch A fixture IDs to Branch B principals)
-    const listEndpoints: Array<{
+    // 2. List, Aggregate, Chart, and Export Endpoints Matrix
+    const listAggregateEndpoints: Array<{
       path: string;
-      principals: Array<keyof Tokens>;
+      baseParams?: (f: FixturesA) => string;
+      checkAggregateBaseline?: (body: any, principal: keyof Tokens, filterName: string) => string | null;
+      skipBranchIdMatchForSameBranchTeacher?: boolean;
     }> = [
-      { path: '/api/batches', principals: ['ADMIN_B', 'TEACHER_B', 'ACCOUNTANT_B', 'STUDENT_B', 'GUARDIAN_B'] },
-      { path: '/api/users', principals: ['ADMIN_B', 'TEACHER_B'] },
-      { path: '/api/fees/dues', principals: ['ADMIN_B', 'ACCOUNTANT_B'] },
-      { path: '/api/fees/students/search?q=MATRIX', principals: ['ADMIN_B', 'ACCOUNTANT_B'] },
-      { path: '/api/enquiries', principals: ['ADMIN_B'] },
-      { path: '/api/notices', principals: ['ADMIN_B', 'TEACHER_B', 'STUDENT_B', 'GUARDIAN_B'] },
-      { path: '/api/attendance/low', principals: ['ADMIN_B', 'TEACHER_B'] },
+      { path: '/api/tables/users' },
+      { path: '/api/tables/students' },
+      { path: '/api/tables/payments' },
+      { path: '/api/tables/attendance' },
+      { path: '/api/tables/results' },
+      { path: '/api/tables/enrollments' },
+      {
+        path: '/api/charts/revenue-monthly',
+        checkAggregateBaseline: (body) => {
+          const rev = body?.data?.totalRevenue;
+          if (typeof rev === 'number' && rev >= 77331) return `totalRevenue=${rev} includes Branch A 77331`;
+          return null;
+        },
+      },
+      { path: '/api/charts/attendance-trend' },
+      {
+        path: '/api/charts/enrollments-by-batch',
+        checkAggregateBaseline: (body) => {
+          const batches = body?.data?.batches || [];
+          const hasA = batches.some((b: any) => String(b.batchName || b.name || '').includes('MATRIX-Batch-A'));
+          return hasA ? 'Includes Branch A batch in enrollments-by-batch' : null;
+        },
+      },
+      { path: '/api/charts/score-distribution' },
+      {
+        path: '/api/charts/fee-status',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Fee status chart includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/charts/my-scores' },
+      { path: '/api/charts/my-attendance' },
+      {
+        path: '/api/charts/overview',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Overview chart includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/exports/students' },
+      {
+        path: '/api/exports/batch-results',
+        baseParams: (f) => `batchId=${f.batch1Id}&periodId=${f.reportPeriodId}`,
+      },
+      { path: '/api/fees/dues' },
+      { path: '/api/fees/payments' },
+      {
+        path: '/api/fees/reports/collection',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Collection report includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/fees/students/search', baseParams: () => 'q=MATRIX-CANARY' },
+      { path: '/api/lectures' },
+      { path: '/api/assignments' },
+      { path: '/api/enquiries' },
+      {
+        path: '/api/enquiries/summary',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('MATRIX-CANARY-ENQ')) return 'Enquiries summary includes Branch A canary';
+          return null;
+        },
+      },
+      { path: '/api/enquiries/duplicates' },
+      { path: '/api/notifications' },
+      { path: '/api/audit-logs' },
+      { path: '/api/attendance/low' },
+      { path: '/api/attendance/today-summary' },
+      { path: '/api/my/attendance/summary' },
+      {
+        path: '/api/dashboard/summary',
+        checkAggregateBaseline: (body) => {
+          const raw = JSON.stringify(body?.data || {});
+          if (raw.includes('77331')) return 'Dashboard summary includes Branch A 77331';
+          return null;
+        },
+      },
+      { path: '/api/dashboard/academic-summary' },
+      { path: '/api/students/summary' },
+      { path: '/api/batches', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/users', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/branches', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/notices', skipBranchIdMatchForSameBranchTeacher: true },
+      { path: '/api/my/report-cards' },
+      { path: '/api/contact' },
     ];
 
-    routesCovered = idEndpoints.length + listEndpoints.length;
+    routesCovered = idEndpoints.length + listAggregateEndpoints.length;
 
     // Execute ID Endpoint Probes
     console.log(`Executing ${idEndpoints.length} ID-bearing route isolation checks...`);
@@ -1179,8 +1955,43 @@ export async function runBranchIsolationTests(): Promise<{
       }
     }
 
-    // Execute List Endpoint Probes
-    console.log(`Executing ${listEndpoints.length} List/Search route isolation checks...`);
+    // Execute List, Aggregate, Chart, and Export Matrix Probes
+    const matrixPrincipals: Array<keyof Tokens> = [
+      'ADMIN_B',
+      'TEACHER_B',
+      'ACCOUNTANT_B',
+      'STUDENT_B',
+      'GUARDIAN_B',
+      'TEACHER_A2',
+    ];
+
+    const filterVariants: Array<{ name: string; buildQuery: (f: FixturesA) => string }> = [
+      { name: 'none', buildQuery: () => '' },
+      { name: 'batchId=A', buildQuery: (f) => `batchId=${f.batch1Id}` },
+      { name: 'studentId=A', buildQuery: (f) => `studentId=${f.student1Id}` },
+      { name: 'branchId=A', buildQuery: (f) => `branchId=${f.branchId}` },
+      { name: 'teacherId=A', buildQuery: (f) => `teacherId=${f.teacher1Id}` },
+      { name: 'subjectId=A', buildQuery: (f) => `subjectId=${f.subjectId}` },
+      { name: 'enrollmentId=A', buildQuery: (f) => `enrollmentId=${f.enrollment1Id}` },
+    ];
+
+    const branchACanaries = [
+      fixturesA.student1Name,
+      fixturesA.student1Email,
+      fixturesA.student1Phone,
+      fixturesA.student1Code,
+      fixturesA.batch1Name,
+      fixturesA.assignmentTitle,
+      fixturesA.testTitle,
+      fixturesA.enquiryName,
+      fixturesA.pubLectureTitle,
+      fixturesA.noticeTitle,
+      '01999883344',
+      '77331',
+      '88442',
+      'Matrix enquiry follow-up note',
+    ].filter(Boolean);
+
     const branchAIds = [
       fixturesA.branchId,
       fixturesA.batch1Id,
@@ -1193,43 +2004,232 @@ export async function runBranchIsolationTests(): Promise<{
       fixturesA.noticeId,
       fixturesA.assignmentId,
       fixturesA.testId,
+      fixturesA.pubLectureId,
+      fixturesA.paymentId,
+      fixturesA.chargeId,
+      fixturesA.enrollment1Id,
+      fixturesA.reportPeriodId,
     ];
 
-    for (const lep of listEndpoints) {
-      for (const p of lep.principals) {
-        totalCallsMade++;
-        process.stdout.write('.');
-        const token = tokens[p];
-        let bodyText = '';
-        let status = 0;
+    const matrixTableRows: Array<{
+      route: string;
+      principal: string;
+      filter: string;
+      status: number;
+      verdict: string;
+    }> = [];
 
-        try {
-          const res = await fetch(`${BASE_URL}${lep.path}`, {
-            method: 'GET',
-            headers: { Cookie: `token=${token}` },
-            signal: AbortSignal.timeout(8000),
-          });
-          status = res.status;
-          bodyText = await res.text();
-        } catch (err: any) {
-          status = -1;
-          bodyText = err.message;
-        }
+    console.log(
+      `\nExecuting ${listAggregateEndpoints.length} List/Aggregate/Chart/Export routes x ${matrixPrincipals.length} principals x ${filterVariants.length} filter modes...`
+    );
 
-        if (status === 200) {
-          const leakedId = branchAIds.find(id => bodyText.includes(id));
-          if (leakedId) {
-            leaks.push({
-              route: `GET ${lep.path}`,
-              method: 'GET',
+    for (const ep of listAggregateEndpoints) {
+      for (const fv of filterVariants) {
+        const baseQs = ep.baseParams ? ep.baseParams(fixturesA) : '';
+        const filterQs = fv.buildQuery(fixturesA);
+        const combinedQs = [baseQs, filterQs].filter(Boolean).join('&');
+        const targetUrl = combinedQs ? `${ep.path}?${combinedQs}` : ep.path;
+
+        // Run all 6 principals in parallel for this route+filter to keep runtime fast
+        await Promise.all(
+          matrixPrincipals.map(async (p) => {
+            totalCallsMade++;
+            const token = tokens[p];
+            let status = 0;
+            let bodyText = '';
+
+            try {
+              const res = await fetch(`${BASE_URL}${targetUrl}`, {
+                method: 'GET',
+                headers: { Cookie: `token=${token}` },
+                signal: AbortSignal.timeout(10000),
+              });
+              status = res.status;
+              bodyText = await res.text();
+            } catch (err: any) {
+              status = -1;
+              bodyText = err.message;
+            }
+
+            let verdict = 'OK';
+            if (status === 200) {
+              // Check canary strings (applies to ALL principals including TEACHER_A2 for batch1 student/fee data)
+              const leakedCanary = branchACanaries.find((c) => {
+                // TEACHER_A2 is in Branch A, so branch-level /api/batches or /api/notices without batch1 filter may list batch1 name or noticeTitle
+                if (
+                  p === 'TEACHER_A2' &&
+                  ep.skipBranchIdMatchForSameBranchTeacher &&
+                  (c === fixturesA.batch1Name || c === fixturesA.noticeTitle)
+                ) {
+                  return false;
+                }
+                return bodyText.includes(c);
+              });
+
+              const leakedId =
+                p === 'TEACHER_A2' && ep.skipBranchIdMatchForSameBranchTeacher
+                  ? null
+                  : p === 'TEACHER_A2'
+                    ? [
+                        fixturesA.student1Id,
+                        fixturesA.assignmentId,
+                        fixturesA.testId,
+                        fixturesA.pubLectureId,
+                        fixturesA.paymentId,
+                        fixturesA.chargeId,
+                        fixturesA.enquiryId,
+                      ].find((id) => bodyText.includes(id))
+                    : branchAIds.find((id) => bodyText.includes(id));
+
+              let aggErr: string | null = null;
+              if (ep.checkAggregateBaseline && p !== 'TEACHER_A2') {
+                try {
+                  const parsed = JSON.parse(bodyText);
+                  aggErr = ep.checkAggregateBaseline(parsed, p, fv.name);
+                } catch {
+                  // non-JSON
+                }
+              }
+
+              if (leakedCanary || leakedId || aggErr) {
+                verdict = 'LEAK';
+                const detail = leakedCanary
+                  ? `Canary "${leakedCanary}" leaked`
+                  : leakedId
+                    ? `Branch A ID "${leakedId}" leaked`
+                    : `Aggregate baseline mismatch: ${aggErr}`;
+                leaks.push({
+                  route: `GET ${targetUrl}`,
+                  method: 'GET',
+                  principal: p,
+                  status,
+                  evidence: `${detail} | body: ${bodyText.slice(0, 100)}`,
+                });
+              } else {
+                verdict = '200 CLEAN';
+              }
+            } else if (status === 403 || status === 404 || status === 400) {
+              verdict = `${status} DENIED`;
+            } else {
+              verdict = `HTTP ${status}`;
+              if (status >= 500 || status === -1) {
+                leaks.push({
+                  route: `GET ${targetUrl}`,
+                  method: 'GET',
+                  principal: p,
+                  status,
+                  evidence: `Unexpected server/network error: ${bodyText.slice(0, 100)}`,
+                });
+              }
+            }
+
+            matrixTableRows.push({
+              route: ep.path,
               principal: p,
+              filter: fv.name,
               status,
-              evidence: `Leaked Branch A fixture ID (${leakedId}) in list response: ${bodyText.slice(0, 120)}`,
+              verdict,
             });
+          })
+        );
+        process.stdout.write('.');
+      }
+    }
+
+    // 3. Explicit PII Export & AuditLog Verification (branch-B ADMIN with branchId=A)
+    console.log('\nVerifying PII Export isolation & AuditLog entries...');
+    const exportStudentsRes = await fetch(
+      `${BASE_URL}/api/exports/students?branchId=${fixturesA.branchId}&format=csv`,
+      { headers: { Cookie: `token=${tokens.ADMIN_B}` }, signal: AbortSignal.timeout(10000) }
+    );
+    const exportStudentsCsv = await exportStudentsRes.text();
+    totalCallsMade++;
+    const leakedExportStudent = branchACanaries.find((c) => exportStudentsCsv.includes(c)) ||
+      branchAIds.find((id) => exportStudentsCsv.includes(id));
+    if ((exportStudentsRes.status !== 200 && exportStudentsRes.status !== 403) || leakedExportStudent) {
+      leaks.push({
+        route: `GET /api/exports/students?branchId=${fixturesA.branchId}`,
+        method: 'GET',
+        principal: 'ADMIN_B',
+        status: exportStudentsRes.status,
+        evidence: leakedExportStudent
+          ? `CSV leaked Branch A data (${leakedExportStudent})`
+          : `Expected 200 or 403, got ${exportStudentsRes.status}`,
+      });
+    }
+
+    const exportBatchRes = await fetch(
+      `${BASE_URL}/api/exports/batch-results?batchId=${fixturesA.batch1Id}&periodId=${fixturesA.reportPeriodId}&branchId=${fixturesA.branchId}&format=csv`,
+      { headers: { Cookie: `token=${tokens.ADMIN_B}` }, signal: AbortSignal.timeout(10000) }
+    );
+    const exportBatchCsv = await exportBatchRes.text();
+    totalCallsMade++;
+    const leakedExportBatch = branchACanaries.find((c) => exportBatchCsv.includes(c)) ||
+      branchAIds.find((id) => exportBatchCsv.includes(id));
+    if (exportBatchRes.status !== 403 || leakedExportBatch) {
+      leaks.push({
+        route: `GET /api/exports/batch-results?batchId=${fixturesA.batch1Id}&branchId=${fixturesA.branchId}`,
+        method: 'GET',
+        principal: 'ADMIN_B',
+        status: exportBatchRes.status,
+        evidence: leakedExportBatch
+          ? `CSV leaked Branch A data (${leakedExportBatch})`
+          : `Expected 403, got ${exportBatchRes.status}`,
+      });
+    }
+
+    const exportAuditLogs = await prisma.auditLog.findMany({
+      where: {
+        actorId: fixturesB.adminId,
+        action: 'REPORT_EXPORTED',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (exportAuditLogs.length === 0) {
+      leaks.push({
+        route: 'AUDIT_LOG /api/exports/students',
+        method: 'AUDIT',
+        principal: 'ADMIN_B',
+        status: 500,
+        evidence: 'Missing REPORT_EXPORTED AuditLog entry for ADMIN_B export',
+      });
+    } else {
+      for (const al of exportAuditLogs) {
+        const metaStr = JSON.stringify(al.metadata || {});
+        if (branchACanaries.some((c) => metaStr.includes(c)) || metaStr.includes('csv')) {
+          leaks.push({
+            route: 'AUDIT_LOG /api/exports',
+            method: 'AUDIT',
+            principal: 'ADMIN_B',
+            status: 500,
+            evidence: `Export AuditLog metadata leaked row/CSV data: ${metaStr.slice(0, 100)}`,
+          });
+        }
+      }
+    }
+
+    // Print Route x Principal x Filter summary table
+    console.log('\n' + '='.repeat(96));
+    console.log('                 LIST / AGGREGATE / CHART / EXPORT MATRIX (ROUTE x PRINCIPAL x FILTER)       ');
+    console.log('='.repeat(96));
+    console.log(`${'ROUTE'.padEnd(34)} | ${'PRINCIPAL'.padEnd(12)} | ${'FILTER'.padEnd(15)} | ${'STATUS'.padEnd(6)} | VERDICT`);
+    console.log('-'.repeat(96));
+    for (const ep of listAggregateEndpoints) {
+      for (const fv of filterVariants) {
+        const rowGroup = matrixTableRows.filter((r) => r.route === ep.path && r.filter === fv.name);
+        const anyLeak = rowGroup.some((r) => r.verdict === 'LEAK');
+        if (anyLeak || fv.name === 'none' || fv.name === 'branchId=A') {
+          for (const r of rowGroup) {
+            if (anyLeak ? r.verdict === 'LEAK' : true) {
+              console.log(
+                `${r.route.padEnd(34)} | ${r.principal.padEnd(12)} | ${r.filter.padEnd(15)} | ${String(r.status).padEnd(6)} | ${r.verdict}`
+              );
+            }
           }
         }
       }
     }
+    console.log(`(Total matrix evaluations printed/checked: ${matrixTableRows.length} across ${listAggregateEndpoints.length} routes x ${matrixPrincipals.length} principals x ${filterVariants.length} filters)\n`);
 
     // Verify Fixture Immutability Checksum
     console.log('Recording post-test SHA-256 fixture state checksum for Branch A...');

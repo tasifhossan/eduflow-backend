@@ -40,13 +40,11 @@ async function main() {
     process.exit(1);
   }
 
-  // 1. Guard check: Refuse if center settings or users already exist
-  const existingSettings = await prisma.centerSettings.findUnique({
-    where: { key: 'center' },
-  });
+  // 1. Guard check: Refuse if users or branches already exist
   const userCount = await prisma.user.count();
+  const branchCount = await prisma.branch.count();
 
-  if (existingSettings || userCount > 0) {
+  if (userCount > 0 || branchCount > 0) {
     console.error('Refusing to initialize: center already initialized or users exist in database.');
     process.exit(1);
   }
@@ -110,44 +108,51 @@ async function main() {
 
   // 3. Transactional initialization
   const result = await prisma.$transaction(async (tx) => {
-    // 3a. Create Center Settings
-    const settings = await tx.centerSettings.create({
-      data: {
+    // 3a. Create or Update Center Settings
+    const centerSettingsData = {
+      name: centerName!,
+      shortName: centerShortName,
+      tagline: centerSlogan || '',
+      contactEmail: centerEmail!,
+      contactPhone: centerPhone!,
+      address: centerAddress || '',
+      primaryColor,
+      currency: currencyCode,
+      currencySymbol,
+      features: {
+        publicSite: true,
+        aiAssistant: true,
+        blog: true,
+        reviews: true,
+        testimonials: true,
+        newsletter: false,
+        showPoweredBy: true,
+        lectures: true,
+        assignments: true,
+        onlineClasses: true,
+        attendanceAlerts: true,
+      },
+      homepage: {
+        heroBadge: '',
+        heroPoints: [],
+        heroTitle: '',
+        heroSubtitle: '',
+        heroImageUrl: null,
+        announcement: { enabled: false, text: '', linkLabel: '', linkUrl: '' },
+        highlights: [],
+        whyChooseUs: [],
+        admissionSteps: [],
+        showFees: true,
+        showPhotoGallery: true,
+      },
+    };
+
+    const settings = await tx.centerSettings.upsert({
+      where: { key: 'center' },
+      update: centerSettingsData,
+      create: {
         key: 'center',
-        name: centerName!,
-        shortName: centerShortName,
-        tagline: centerSlogan || '',
-        contactEmail: centerEmail!,
-        contactPhone: centerPhone!,
-        address: centerAddress || '',
-        primaryColor,
-        currency: currencyCode,
-        currencySymbol,
-        features: {
-          publicSite: true,
-          aiAssistant: true,
-          blog: true,
-          reviews: true,
-          testimonials: true,
-          newsletter: false,
-          showPoweredBy: true,
-          lectures: true,
-          assignments: true,
-          onlineClasses: true,
-        },
-        homepage: {
-          heroBadge: '',
-          heroPoints: [],
-          heroTitle: '',
-          heroSubtitle: '',
-          heroImageUrl: null,
-          announcement: { enabled: false, text: '', linkLabel: '', linkUrl: '' },
-          highlights: [],
-          whyChooseUs: [],
-          admissionSteps: [],
-          showFees: true,
-          showPhotoGallery: true,
-        },
+        ...centerSettingsData,
       },
     });
 

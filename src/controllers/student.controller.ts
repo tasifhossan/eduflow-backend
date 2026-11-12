@@ -13,12 +13,21 @@ export async function getStudentsWithSummary(req: Request, res: Response) {
     }
 
     const branchId = req.user.branchId;
+    const studentWhere: any = {
+      role: Role.STUDENT,
+      branchId,
+    };
+    if (req.user.role === Role.TEACHER) {
+      studentWhere.enrollments = {
+        some: {
+          status: 'ACTIVE',
+          batch: { teacherId: req.user.userId },
+        },
+      };
+    }
 
     const students = await prisma.user.findMany({
-      where: {
-        role: Role.STUDENT,
-        branchId,
-      },
+      where: studentWhere,
       select: {
         id: true,
         name: true,

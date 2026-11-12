@@ -751,7 +751,7 @@ model EnquiryNote {
   authorId  String
   author    User            @relation("EnquiryNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   kind      EnquiryNoteKind @default(NOTE)
-  body      String
+  body      String          @db.VarChar(1000)
   createdAt DateTime        @default(now())
 
   @@index([enquiryId, createdAt])

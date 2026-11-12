@@ -50,6 +50,13 @@ export async function createTest(req: Request, res: Response) {
       });
     }
 
+    if (req.user.role === Role.TEACHER && batch.teacherId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You can only create tests for your assigned batches',
+      });
+    }
+
     // Verify chapter exists (if provided)
     if (chapterId) {
       const chapter = await prisma.chapter.findUnique({
@@ -347,13 +354,24 @@ export async function updateTest(req: Request, res: Response) {
 
     const existingTest = await prisma.test.findUnique({
       where: { id },
-      include: { batch: { select: { branchId: true } } },
+      include: { batch: { select: { branchId: true, teacherId: true } } },
     });
 
     if (!existingTest || existingTest.batch.branchId !== branchId) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      existingTest.batch.teacherId !== req.user.userId &&
+      existingTest.createdById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot edit a test for a batch you do not teach',
       });
     }
 
@@ -479,7 +497,7 @@ export async function deleteTest(req: Request, res: Response) {
     const existingTest = await prisma.test.findUnique({
       where: { id },
       include: {
-        batch: { select: { branchId: true } },
+        batch: { select: { branchId: true, teacherId: true } },
         attempts: { select: { id: true }, take: 1 },
         results: { select: { id: true }, take: 1 },
       },
@@ -489,6 +507,17 @@ export async function deleteTest(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      existingTest.batch.teacherId !== req.user.userId &&
+      existingTest.createdById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot delete a test for a batch you do not teach',
       });
     }
 
@@ -564,13 +593,24 @@ export async function restoreTest(req: Request, res: Response) {
 
     const existingTest = await prisma.test.findUnique({
       where: { id },
-      include: { batch: { select: { branchId: true } } },
+      include: { batch: { select: { branchId: true, teacherId: true } } },
     });
 
     if (!existingTest || existingTest.batch.branchId !== branchId) {
       return res.status(404).json({
         success: false,
         message: 'Test not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      existingTest.batch.teacherId !== req.user.userId &&
+      existingTest.createdById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot edit a test for a batch you do not teach',
       });
     }
 

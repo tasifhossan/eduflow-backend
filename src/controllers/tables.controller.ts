@@ -92,7 +92,7 @@ export const attendanceTableQuerySchema = z.object({
   startDate: z.string().optional(),
   endDate: z.string().optional(),
   q: z.string().trim().optional(),
-  sortBy: z.enum(['date', 'status', 'createdAt']).optional().default('date'),
+  sortBy: z.enum(['date', 'status']).optional().default('date'),
   sortOrder: z.enum(['asc', 'desc']).optional().default('desc'),
 });
 
@@ -240,7 +240,17 @@ export async function getTableStudents(req: Request, res: Response) {
     }
 
     const targetBatch = batch || batchId;
-    if (targetBatch) {
+    if (req.user.role === Role.TEACHER) {
+      where.enrollments = {
+        some: {
+          status: EnrollmentStatus.ACTIVE,
+          batch: {
+            teacherId: req.user.userId,
+            ...(targetBatch ? { id: targetBatch } : {}),
+          },
+        },
+      };
+    } else if (targetBatch) {
       where.enrollments = { some: { batchId: targetBatch } };
     }
 
@@ -337,8 +347,21 @@ export async function getTablePayments(req: Request, res: Response) {
     } else if (req.user.role === Role.SUPER_ADMIN) {
       const targetBranch = branchId || req.effectiveBranchId;
       if (targetBranch) where.branchId = targetBranch;
+    } else if (req.user.role === Role.TEACHER) {
+      where.branchId = req.user.branchId;
+      where.AND = [
+        {
+          allocations: {
+            some: {
+              charge: {
+                batch: { teacherId: req.user.userId },
+              },
+            },
+          },
+        },
+      ];
     } else {
-      // TEACHER, ADMIN, ACCOUNTANT
+      // ADMIN, ACCOUNTANT
       where.branchId = req.user.branchId;
     }
 
@@ -350,7 +373,10 @@ export async function getTablePayments(req: Request, res: Response) {
 
     const targetBatch = batch || batchId;
     if (targetBatch) {
-      where.allocations = { some: { charge: { batchId: targetBatch } } };
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        { allocations: { some: { charge: { batchId: targetBatch } } } },
+      ];
     }
 
     const dateFilter = parseDateRange(startDate, endDate);
@@ -499,6 +525,8 @@ export async function getTableAttendance(req: Request, res: Response) {
     } else if (req.user.role === Role.SUPER_ADMIN) {
       const targetBranch = branchId || req.effectiveBranchId;
       if (targetBranch) where.batch = { branchId: targetBranch };
+    } else if (req.user.role === Role.TEACHER) {
+      where.batch = { branchId: req.user.branchId, teacherId: req.user.userId };
     } else {
       where.batch = { branchId: req.user.branchId };
     }
@@ -534,7 +562,6 @@ export async function getTableAttendance(req: Request, res: Response) {
           status: true,
           markedById: true,
           markedBy: { select: { id: true, name: true } },
-          createdAt: true,
         },
       }),
     ]);
@@ -595,7 +622,9 @@ export async function getTableResults(req: Request, res: Response) {
     if (req.user.role === Role.SUPER_ADMIN) {
       const targetBranch = branchId || req.effectiveBranchId;
       if (targetBranch) testWhere.batch = { branchId: targetBranch };
-    } else if (req.user.role === Role.ADMIN || req.user.role === Role.TEACHER) {
+    } else if (req.user.role === Role.TEACHER) {
+      testWhere.batch = { branchId: req.user.branchId, teacherId: req.user.userId };
+    } else {
       testWhere.batch = { branchId: req.user.branchId };
     }
 
@@ -699,6 +728,8 @@ export async function getTableEnrollments(req: Request, res: Response) {
     } else if (req.user.role === Role.SUPER_ADMIN) {
       const targetBranch = branchId || req.effectiveBranchId;
       if (targetBranch) where.batch = { branchId: targetBranch };
+    } else if (req.user.role === Role.TEACHER) {
+      where.batch = { branchId: req.user.branchId, teacherId: req.user.userId };
     } else {
       where.batch = { branchId: req.user.branchId };
     }

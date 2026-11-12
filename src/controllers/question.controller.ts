@@ -1,17 +1,30 @@
 import { Request, Response } from 'express';
-import { QuestionType } from '@prisma/client';
+import { QuestionType, Role } from '@prisma/client';
 import { createQuestionSchema } from '../validators/test.validator';
 import { z } from 'zod';
 import prisma from '../utils/prisma';
 import { createAuditLog } from '../utils/audit';
 
-// Helper to verify test ownership
-async function verifyTestOwnership(testId: string, branchId: string): Promise<boolean> {
+// Helper to verify test ownership and teacher assignment
+async function verifyTestOwnership(
+  testId: string,
+  user: { userId: string; role: Role; branchId: string }
+): Promise<{ ok: boolean; status?: number; message?: string }> {
   const test = await prisma.test.findUnique({
     where: { id: testId },
-    include: { batch: { select: { branchId: true } } },
+    include: { batch: { select: { branchId: true, teacherId: true } } },
   });
-  return !!test && test.batch.branchId === branchId;
+  if (!test || test.batch.branchId !== user.branchId) {
+    return { ok: false, status: 404, message: 'Test not found or access denied' };
+  }
+  if (user.role === Role.TEACHER && test.batch.teacherId !== user.userId && test.createdById !== user.userId) {
+    return {
+      ok: false,
+      status: 403,
+      message: 'Forbidden: You cannot modify questions for a test you do not teach or create',
+    };
+  }
+  return { ok: true };
 }
 
 // Helper to check if exam is locked due to attempts or results
@@ -36,11 +49,11 @@ export async function addQuestion(req: Request, res: Response) {
     const branchId = req.user.branchId;
 
     // Verify test exists and belongs to branch
-    const isOwner = await verifyTestOwnership(testId, branchId);
-    if (!isOwner) {
-      return res.status(404).json({
+    const authCheck = await verifyTestOwnership(testId, req.user);
+    if (!authCheck.ok) {
+      return res.status(authCheck.status!).json({
         success: false,
-        message: 'Test not found or access denied',
+        message: authCheck.message,
       });
     }
 
@@ -120,11 +133,11 @@ export async function addQuestionsBulk(req: Request, res: Response) {
     const branchId = req.user.branchId;
 
     // Verify test exists and belongs to branch
-    const isOwner = await verifyTestOwnership(testId, branchId);
-    if (!isOwner) {
-      return res.status(404).json({
+    const authCheck = await verifyTestOwnership(testId, req.user);
+    if (!authCheck.ok) {
+      return res.status(authCheck.status!).json({
         success: false,
-        message: 'Test not found or access denied',
+        message: authCheck.message,
       });
     }
 
@@ -214,7 +227,7 @@ export async function updateQuestion(req: Request, res: Response) {
       where: { id },
       include: {
         test: {
-          include: { batch: { select: { branchId: true } } },
+          include: { batch: { select: { branchId: true, teacherId: true } } },
         },
       },
     });
@@ -223,6 +236,17 @@ export async function updateQuestion(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Question not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      existingQuestion.test.batch.teacherId !== req.user.userId &&
+      existingQuestion.test.createdById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot modify questions for a test you do not teach or create',
       });
     }
 
@@ -314,7 +338,7 @@ export async function deleteQuestion(req: Request, res: Response) {
       where: { id },
       include: {
         test: {
-          include: { batch: { select: { branchId: true } } },
+          include: { batch: { select: { branchId: true, teacherId: true } } },
         },
       },
     });
@@ -323,6 +347,17 @@ export async function deleteQuestion(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         message: 'Question not found or access denied',
+      });
+    }
+
+    if (
+      req.user.role === Role.TEACHER &&
+      existingQuestion.test.batch.teacherId !== req.user.userId &&
+      existingQuestion.test.createdById !== req.user.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You cannot modify questions for a test you do not teach or create',
       });
     }
 

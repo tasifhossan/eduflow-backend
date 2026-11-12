@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { Role, QuestionType, AttemptStatus } from '@prisma/client';
-import prisma from '../utils/prisma';
+import prisma, { runTimedTransaction } from '../utils/prisma';
 import { EXAM_CONFIG } from '../config/academics.config';
 import { shuffleArray } from '../utils/shuffle';
 import { recomputeRanks } from '../utils/ranks';
@@ -42,6 +42,13 @@ async function finalizeExpiredAttemptInTx(
 
   let totalScore = 0;
   const now = new Date();
+  const answersToCreate: Array<{
+    studentId: string;
+    questionId: string;
+    selectedOptionId: string | null;
+    writtenAnswerText: string | null;
+    marksAwarded: number | null;
+  }> = [];
 
   // 2. Process each question
   for (const q of test.questions) {
@@ -67,15 +74,17 @@ async function finalizeExpiredAttemptInTx(
       marksAwarded = null; // graded manually later
     }
 
-    await tx.studentAnswer.create({
-      data: {
-        studentId: attempt.studentId,
-        questionId: q.id,
-        selectedOptionId,
-        writtenAnswerText,
-        marksAwarded,
-      },
+    answersToCreate.push({
+      studentId: attempt.studentId,
+      questionId: q.id,
+      selectedOptionId,
+      writtenAnswerText,
+      marksAwarded,
     });
+  }
+
+  if (answersToCreate.length > 0) {
+    await tx.studentAnswer.createMany({ data: answersToCreate });
   }
 
   // 3. Create Result
@@ -370,7 +379,7 @@ export async function getStudentAttempt(req: Request, res: Response) {
       });
 
       if (test) {
-        result = await prisma.$transaction(async (tx) => {
+        result = await runTimedTransaction('exam.lazyFinalize', async (tx) => {
           return finalizeExpiredAttemptInTx(tx, attempt!, test);
         });
 
@@ -893,7 +902,7 @@ export async function finalizeTestAttempts(req: Request, res: Response) {
     let finalizedCount = 0;
 
     for (const att of expiredAttempts) {
-      await prisma.$transaction(async (tx) => {
+      await runTimedTransaction('exam.bulkFinalize', async (tx) => {
         await finalizeExpiredAttemptInTx(tx, att, test);
       });
       finalizedCount++;

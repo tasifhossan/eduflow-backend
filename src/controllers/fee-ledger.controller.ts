@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Role, Prisma, PaymentMethod, FeeChargeKind, FeeAdjustmentType } from '@prisma/client';
-import prisma from '../utils/prisma';
+import prisma, { runTimedTransaction } from '../utils/prisma';
 import { FeeLedgerService } from '../services/fee-ledger.service';
 import { formatMoney, roundMoney } from '../utils/money';
 import { createAuditLog } from '../utils/audit';
@@ -455,7 +455,8 @@ export async function recordPayment(req: Request, res: Response) {
     const todayStr = FeeLedgerService.getTodayInTimezone(settings.timezone);
 
     // Execute creation inside a locked transaction
-    const createdPayment = await prisma.$transaction(
+    const createdPayment = await runTimedTransaction(
+      'fee.recordPayment',
       async (tx) => {
         // 1. Generate receipt number with lock on ReceiptSequence
         const receiptNumber = await FeeLedgerService.generateReceiptNumber(
@@ -1087,7 +1088,7 @@ export async function createManualCharge(req: Request, res: Response) {
 
     const settings = await getCenterSettings();
 
-    const createdCharge = await prisma.$transaction(async (tx) => {
+    const createdCharge = await runTimedTransaction('fee.createManualCharge', async (tx) => {
       const ch = await tx.feeCharge.create({
         data: {
           branchId: student.branchId,
@@ -1308,37 +1309,42 @@ export async function createInstallments(req: Request, res: Response) {
     const settings = await getCenterSettings();
     const baseDate = new Date(firstDueDate);
 
-    const createdCharges = await prisma.$transaction(async (tx) => {
-      const list: any[] = [];
-      for (let i = 0; i < count; i++) {
-        const dueDate = new Date(baseDate);
-        dueDate.setMonth(baseDate.getMonth() + i * intervalMonths);
-
-        const ch = await tx.feeCharge.create({
-          data: {
+    const createdCharges = await runTimedTransaction(
+      'fee.createInstallments',
+      async (tx) => {
+        const installmentRows = Array.from({ length: count }, (_, i) => {
+          const dueDate = new Date(baseDate);
+          dueDate.setMonth(baseDate.getMonth() + i * intervalMonths);
+          return {
             branchId: student.branchId,
             studentId,
             batchId,
             enrollmentId: enrollment?.id || null,
-            kind: 'TUITION',
+            kind: 'TUITION' as const,
             period: null,
             description: description
               ? `${description} (${i + 1}/${count})`
               : `Installment ${i + 1} of ${count} - ${batch.name}`,
             amount: splitAmounts[i],
             dueDate,
-            source: 'INSTALLMENT',
-            status: 'ACTIVE',
+            source: 'INSTALLMENT' as const,
+            status: 'ACTIVE' as const,
             createdById: req.user!.userId,
-          },
+          };
+        });
+
+        const inserted = await tx.feeCharge.createManyAndReturn({
+          data: installmentRows,
         });
 
         // Apply any available credit
-        await FeeLedgerService.applyAvailableCreditToCharge(studentId, ch.id, tx, settings.timezone);
-        list.push(ch);
-      }
-      return list;
-    });
+        for (const ch of inserted) {
+          await FeeLedgerService.applyAvailableCreditToCharge(studentId, ch.id, tx, settings.timezone);
+        }
+        return inserted;
+      },
+      { timeout: 30000, maxWait: 10000 }
+    );
 
     // Audit log
     await createAuditLog({
@@ -1402,6 +1408,20 @@ export async function generateDues(req: Request, res: Response) {
     const { month, batchId, dryRun } = parseResult.data;
     const branchId = resolveBranchScope(req);
     const settings = await getCenterSettings();
+
+    // Verify batchId belongs to branch if explicitly specified
+    if (batchId) {
+      const targetBatch = await prisma.batch.findUnique({
+        where: { id: batchId },
+        select: { branchId: true },
+      });
+      if (!targetBatch) {
+        return res.status(404).json({ success: false, message: 'Batch not found' });
+      }
+      if (branchId && targetBatch.branchId !== branchId) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Batch belongs to another branch' });
+      }
+    }
 
     // Due date = centerSettings.feeDueDay of the given month in center timezone
     const [yearStr, monthStr] = month.split('-');
@@ -1485,7 +1505,7 @@ export async function generateDues(req: Request, res: Response) {
         });
       } else {
         try {
-          await prisma.$transaction(async (tx) => {
+          await runTimedTransaction('fee.generateDues', async (tx) => {
             const ch = await tx.feeCharge.create({
               data: {
                 branchId: enr.batch.branchId,

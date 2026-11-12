@@ -18,6 +18,7 @@
     "init-center": "tsx scripts/init-center.ts",
     "check:deploy": "tsx scripts/check-deploy.ts",
     "check:post-deploy": "tsx scripts/post-deploy.ts",
+    "prod:smoke": "tsx scripts/prod-smoke.ts",
     "seed:demo": "tsx prisma/seed-demo-content.ts"
   },
   "keywords": [],

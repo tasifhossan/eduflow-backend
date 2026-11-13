@@ -339,7 +339,7 @@ async function runSmokeTests() {
     const SMOKE_PHONE_BASE = `017${Math.floor(100000 + Math.random() * 800000)}`;
 
     // 0. PRE-AUTHENTICATION: Login demo roles once
-    const demoRoles = ['ADMIN', 'TEACHER', 'STUDENT', 'GUARDIAN'] as const;
+    const demoRoles = ['ADMIN', 'TEACHER', 'STUDENT', 'GUARDIAN', 'ACCOUNTANT'] as const;
     const authCookies: Record<string, string> = {};
     const demoUsers: Record<string, any> = {};
 
@@ -362,6 +362,30 @@ async function runSmokeTests() {
     const guardianCookie = authCookies['GUARDIAN'];
     const demoStudent = demoUsers['STUDENT'];
     const demoAdmin = demoUsers['ADMIN'];
+    const accountantCookie = authCookies['ACCOUNTANT'];
+    const demoAccountant = demoUsers['ACCOUNTANT'];
+
+    let smokeSuperAdmin = await prisma.user.findFirst({
+      where: { role: Role.SUPER_ADMIN, isActive: true },
+    });
+    if (!smokeSuperAdmin) {
+      smokeSuperAdmin = await prisma.user.create({
+        data: {
+          name: 'SMOKE-SuperAdmin',
+          email: `smoke.superadmin.${Date.now()}@demo.eduflow.local`,
+          role: Role.SUPER_ADMIN,
+          isActive: true,
+          password: await bcrypt.hash('Password123!', 10),
+          branchId: demoAdmin.branchId,
+        },
+      });
+      createdUserIds.push(smokeSuperAdmin.id);
+    }
+    const smokeSuperAdminCookie = `token=${jwt.sign(
+      { userId: smokeSuperAdmin.id, role: Role.SUPER_ADMIN, branchId: smokeSuperAdmin.branchId },
+      env.JWT_SECRET,
+      { expiresIn: '1d' }
+    )}`;
     originalSettingsBeforeSmoke = await prisma.centerSettings.findUnique({ where: { key: 'center' } });
 
     let smokeSubject = (await prisma.subject.findFirst({ where: { name: 'Physics' } })) || (await prisma.subject.findFirst());
@@ -2172,8 +2196,9 @@ async function runSmokeTests() {
     const mathSubject = await prisma.subject.findFirst({ where: { name: 'Higher Mathematics' } }) ||
       await prisma.subject.create({ data: { name: 'SMOKE Higher Mathematics' } });
 
+        const smokeBranch2Code = `SMB2_${SMOKE_RUN_SUFFIX}`.slice(0, 10);
     const smokeBranch2 = await prisma.branch.create({
-      data: { name: 'SMOKE-Branch-2', code: 'SMB2' },
+      data: { name: `SMOKE-Branch-2-${SMOKE_RUN_SUFFIX}`, code: smokeBranch2Code },
     });
     createdBranchIds.push(smokeBranch2.id);
 
@@ -5131,12 +5156,12 @@ async function runSmokeTests() {
         const accAsgRes = await req('/api/assignments', { headers: { Cookie: `token=${accToken}` } });
         assert(accAsgRes.status === 403, `Accountant must receive 403 on GET /api/assignments, got ${accAsgRes.status}`);
 
-        // 18. Unassigned teacher cannot see unassigned batch payments via /api/tables/payments or unassigned students via /api/users;
-        //     foreign accountant cannot see Batch 1 results via /api/tables/results
+        // 18. Teacher gets 403 on /api/tables/payments (teacher financial isolation) and cannot see unassigned students via /api/users;
+        //     accountant gets 403 on /api/tables/results (accountant least privilege)
         const tPayRes = await req(`/api/tables/payments?batchId=${batch1.id}`, { headers: { Cookie: teacher2Cookie } });
         assert(
-          tPayRes.status === 200 && Array.isArray(tPayRes.body?.data?.items) && tPayRes.body.data.items.length === 0,
-          `Unassigned teacher must get 0 items on GET /api/tables/payments?batchId=batch1.id, got ${tPayRes.status} count=${tPayRes.body?.data?.items?.length}`
+          tPayRes.status === 403,
+          `Teacher must get 403 on GET /api/tables/payments?batchId=batch1.id (financial isolation), got ${tPayRes.status}`
         );
         const tUsersRes = await req('/api/users', { headers: { Cookie: teacher2Cookie } });
         assert(
@@ -5157,8 +5182,8 @@ async function runSmokeTests() {
         const foreignAccToken = jwt.sign({ userId: foreignAcc.id, role: Role.ACCOUNTANT, branchId: foreignBranch.id }, env.JWT_SECRET, { expiresIn: '1h' });
         const fAccResultsRes = await req(`/api/tables/results?batchId=${batch1.id}`, { headers: { Cookie: `token=${foreignAccToken}` } });
         assert(
-          fAccResultsRes.status === 200 && Array.isArray(fAccResultsRes.body?.data?.items) && fAccResultsRes.body.data.items.length === 0,
-          `Foreign accountant must get 0 items on GET /api/tables/results?batchId=batch1.id, got ${fAccResultsRes.status} count=${fAccResultsRes.body?.data?.items?.length}`
+          fAccResultsRes.status === 403,
+          `Accountant must get 403 on GET /api/tables/results?batchId=batch1.id (least privilege), got ${fAccResultsRes.status}`
         );
 
         // Clean up c65 regression rows
@@ -6648,12 +6673,21 @@ async function runSmokeTests() {
       const testSubj = subjRes.body.data;
       createdSubjectIds.push(testSubj.id);
 
-      const subjUpdateRes = await req(`/api/subjects/${testSubj.id}`, {
+      // Admin must receive 403 on subject PATCH
+      const subjAdminUpdateRes = await req(`/api/subjects/${testSubj.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `${testSubj.name}-AdminAttempt` }),
+      });
+      assert(subjAdminUpdateRes.status === 403, `Admin PATCH subject expected 403, got: ${subjAdminUpdateRes.status}`);
+
+      // SuperAdmin receives 200 on subject PATCH
+      const subjUpdateRes = await req(`/api/subjects/${testSubj.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: smokeSuperAdminCookie },
         body: JSON.stringify({ name: `${testSubj.name}-Updated` }),
       });
-      assert(subjUpdateRes.status === 200, `Update subject failed: ${subjUpdateRes.status}`);
+      assert(subjUpdateRes.status === 200, `SuperAdmin update subject failed: ${subjUpdateRes.status}`);
 
       // Read back Subject audit logs
       const createSubjLog = await prisma.auditLog.findFirst({
@@ -6679,12 +6713,21 @@ async function runSmokeTests() {
       const testChap = chapRes.body.data;
       createdChapterIds.push(testChap.id);
 
-      const chapUpdateRes = await req(`/api/chapters/${testChap.id}`, {
+      // Admin must receive 403 on chapter PATCH
+      const chapAdminUpdateRes = await req(`/api/chapters/${testChap.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `${testChap.name}-AdminAttempt` }),
+      });
+      assert(chapAdminUpdateRes.status === 403, `Admin PATCH chapter expected 403, got: ${chapAdminUpdateRes.status}`);
+
+      // SuperAdmin receives 200 on chapter PATCH
+      const chapUpdateRes = await req(`/api/chapters/${testChap.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: smokeSuperAdminCookie },
         body: JSON.stringify({ name: `${testChap.name}-Updated` }),
       });
-      assert(chapUpdateRes.status === 200, `Update chapter failed: ${chapUpdateRes.status}`);
+      assert(chapUpdateRes.status === 200, `SuperAdmin update chapter failed: ${chapUpdateRes.status}`);
 
       // Read back Chapter audit logs
       const createChapLog = await prisma.auditLog.findFirst({
@@ -6893,6 +6936,76 @@ async function runSmokeTests() {
         'Configuration change audit logging for fee and academic entities',
         true,
         'Audit logs verified for batch fee (2 decimals), enrollment fee (2 decimals, no notes), batch CRUD/archive/restore, enrollment CRUD/unenroll/restore, subject/chapter CRUD, routine slots, and attendance edits'
+      );
+    }
+
+    // Check 67: Accountant least privilege & teacher financial isolation
+    if (shouldRun('67', 'Accountant least privilege & teacher financial isolation', false)) {
+      // 1. Accountant allowed endpoints
+      const accFeesDues = await req('/api/fees/dues', { headers: { Cookie: accountantCookie } });
+      assert(accFeesDues.status === 200, `Accountant dues expected 200, got: ${accFeesDues.status}`);
+
+      const accFeesPayments = await req('/api/fees/payments', { headers: { Cookie: accountantCookie } });
+      assert(accFeesPayments.status === 200, `Accountant payments expected 200, got: ${accFeesPayments.status}`);
+
+      const accStudentsSearch = await req('/api/tables/students?search=test', { headers: { Cookie: accountantCookie } });
+      assert(accStudentsSearch.status === 200, `Accountant student search expected 200, got: ${accStudentsSearch.status}`);
+
+      const accBatches = await req('/api/batches', { headers: { Cookie: accountantCookie } });
+      assert(accBatches.status === 200, `Accountant batch list expected 200, got: ${accBatches.status}`);
+      const sampleBatch = accBatches.body?.data?.[0];
+      if (sampleBatch) {
+        assert(sampleBatch.id && sampleBatch.name, 'Accountant batch must have id and name');
+        assert(sampleBatch.fee === undefined && sampleBatch.teacherId === undefined, 'Accountant batch list must not have fee/teacher fields');
+      }
+
+      const accMe = await req('/api/me', { headers: { Cookie: accountantCookie } });
+      assert(accMe.status === 200, `Accountant /api/me expected 200, got: ${accMe.status}`);
+
+      const accNotifs = await req('/api/notifications', { headers: { Cookie: accountantCookie } });
+      assert(accNotifs.status === 200, `Accountant notifications expected 200, got: ${accNotifs.status}`);
+
+      const accOverview = await req('/api/charts/overview', { headers: { Cookie: accountantCookie } });
+      assert(accOverview.status === 200, `Accountant chart overview expected 200, got: ${accOverview.status}`);
+      const accCards = accOverview.body?.data;
+      assert(accCards && accCards.monthRevenue !== undefined && accCards.duesCount !== undefined && accCards.totalDueAmount !== undefined, 'Accountant overview must have fee cards');
+      assert(accCards.studentsCount === undefined && accCards.batchesCount === undefined, 'Accountant overview must not leak academic counts');
+
+      // 2. Accountant forbidden academic endpoints
+      const accResults = await req('/api/tables/results', { headers: { Cookie: accountantCookie } });
+      assert(accResults.status === 403, `Accountant /api/tables/results expected 403, got: ${accResults.status}`);
+
+      const accAttendance = await req('/api/tables/attendance', { headers: { Cookie: accountantCookie } });
+      assert(accAttendance.status === 403, `Accountant /api/tables/attendance expected 403, got: ${accAttendance.status}`);
+
+      const accEnrollments = await req('/api/tables/enrollments', { headers: { Cookie: accountantCookie } });
+      assert(accEnrollments.status === 403, `Accountant /api/tables/enrollments expected 403, got: ${accEnrollments.status}`);
+
+      const accLectures = await req('/api/lectures', { headers: { Cookie: accountantCookie } });
+      assert(accLectures.status === 403, `Accountant /api/lectures expected 403, got: ${accLectures.status}`);
+
+      // 3. Teacher financial isolation
+      const teacherPayments = await req('/api/tables/payments', { headers: { Cookie: teacherCookie } });
+      assert(teacherPayments.status === 403, `Teacher /api/tables/payments expected 403, got: ${teacherPayments.status}`);
+
+      const teacherRevMonthly = await req('/api/charts/revenue-monthly', { headers: { Cookie: teacherCookie } });
+      assert(teacherRevMonthly.status === 403, `Teacher /api/charts/revenue-monthly expected 403, got: ${teacherRevMonthly.status}`);
+
+      const teacherSummary = await req('/api/dashboard/summary', { headers: { Cookie: teacherCookie } });
+      assert(teacherSummary.status === 200, `Teacher dashboard summary expected 200, got: ${teacherSummary.status}`);
+      const tSumData = teacherSummary.body?.data || {};
+      assert(tSumData.revenue === undefined && tSumData.payments === undefined && tSumData.totalPaid === undefined && tSumData.totalDue === undefined, 'Teacher dashboard summary must not contain revenue/payment figures');
+
+      const teacherOverview = await req('/api/charts/overview', { headers: { Cookie: teacherCookie } });
+      assert(teacherOverview.status === 200, `Teacher charts overview expected 200, got: ${teacherOverview.status}`);
+      const tOverviewData = teacherOverview.body?.data || {};
+      assert(tOverviewData.monthRevenue === undefined && tOverviewData.duesCount === undefined && tOverviewData.totalDueAmount === undefined, 'Teacher charts overview must not contain financial cards');
+
+      recordCheck(
+        '67',
+        'Accountant least privilege and teacher financial isolation',
+        true,
+        'Accountant restricted to fee endpoints & minimal batch list (403 on results, attendance, enrollments, lectures); Teacher stripped of all revenue/payments (403 on tables/payments & charts/revenue-monthly)'
       );
     }
   } finally {

@@ -31,30 +31,34 @@ router.get(
   getTableStudents
 );
 
-// 3. GET /tables/payments (All authenticated roles with role-based scoping)
+// 3. GET /tables/payments (All authenticated roles EXCEPT TEACHER)
 router.get(
   ['/payments', '/tables/payments'],
+  authorize(Role.ADMIN, Role.SUPER_ADMIN, Role.ACCOUNTANT, Role.STUDENT, Role.GUARDIAN),
   branchScope,
   getTablePayments
 );
 
-// 4. GET /tables/attendance (All authenticated roles with role-based scoping)
+// 4. GET /tables/attendance (All authenticated roles EXCEPT ACCOUNTANT)
 router.get(
   ['/attendance', '/tables/attendance'],
+  authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN, Role.SUPER_ADMIN),
   branchScope,
   getTableAttendance
 );
 
-// 5. GET /tables/results (All authenticated roles with role-based scoping)
+// 5. GET /tables/results (All authenticated roles EXCEPT ACCOUNTANT)
 router.get(
   ['/results', '/tables/results'],
+  authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN, Role.SUPER_ADMIN),
   branchScope,
   getTableResults
 );
 
-// 6. GET /tables/enrollments (All authenticated roles with role-based scoping)
+// 6. GET /tables/enrollments (All authenticated roles EXCEPT ACCOUNTANT)
 router.get(
   ['/enrollments', '/tables/enrollments'],
+  authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN, Role.SUPER_ADMIN),
   branchScope,
   getTableEnrollments
 );

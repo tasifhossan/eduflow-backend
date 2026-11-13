@@ -873,7 +873,7 @@ const ENDPOINTS: EndpointSpec[] = [
     name: 'GET /api/batches',
     method: 'GET',
     path: (f) => `/api/batches?studentId=${f.studentId}`,
-    allowedRoles: [Role.SUPER_ADMIN, Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN],
+    allowedRoles: [Role.SUPER_ADMIN, Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN, Role.ACCOUNTANT],
   },
   {
     name: 'GET /api/batches/:id',

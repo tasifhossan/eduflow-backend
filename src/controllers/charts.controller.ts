@@ -21,6 +21,10 @@ export async function getRevenueMonthlyChart(req: Request, res: Response) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
+    if (req.user.role === Role.TEACHER) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Teachers cannot access revenue charts' });
+    }
+
     const now = new Date();
     const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
     const effectiveBranchId = req.effectiveBranchId;
@@ -29,9 +33,6 @@ export async function getRevenueMonthlyChart(req: Request, res: Response) {
       reversal: null,
       receivedAt: { gte: twelveMonthsAgo },
       ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
-      ...(req.user.role === Role.TEACHER
-        ? { allocations: { some: { charge: { batch: { teacherId: req.user.userId } } } } }
-        : {}),
     };
 
     const payments = await prisma.payment.findMany({
@@ -685,6 +686,56 @@ export async function getOverviewChart(req: Request, res: Response) {
       });
     }
 
+    // ─── ACCOUNTANT Overview (Fee cards only) ─────────────────────────────
+    if (role === Role.ACCOUNTANT) {
+      const effectiveBranchId = req.effectiveBranchId;
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const [monthRevenueAgg, branchCharges] = await Promise.all([
+        prisma.payment.aggregate({
+          where: {
+            reversal: null,
+            receivedAt: { gte: startOfMonth },
+            ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          },
+          _sum: { amount: true },
+        }),
+        prisma.feeCharge.findMany({
+          where: {
+            status: 'ACTIVE',
+            ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          },
+          include: {
+            adjustments: true,
+            allocations: {
+              include: { payment: { select: { reversal: true } } },
+            },
+          },
+        }),
+      ]);
+
+      let duesCount = 0;
+      let totalDuesAmount = 0;
+      const todayStrAdmin = FeeLedgerService.getTodayInTimezone();
+      for (const ch of branchCharges) {
+        const bal = FeeLedgerService.deriveChargeStatus(ch, todayStrAdmin);
+        if (bal.balance.gt(0)) {
+          duesCount++;
+          totalDuesAmount += moneyToNumber(bal.balance);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          role: 'ACCOUNTANT',
+          monthRevenue: moneyToNumber(monthRevenueAgg._sum.amount),
+          duesCount,
+          totalDueAmount: Number(totalDuesAmount.toFixed(2)),
+        },
+      });
+    }
+
     // ─── ADMIN / TEACHER / SUPER_ADMIN Overview ─────────────────────────────
     const effectiveBranchId = req.effectiveBranchId;
     const isTeacherRole = role === Role.TEACHER;
@@ -721,17 +772,16 @@ export async function getOverviewChart(req: Request, res: Response) {
           ...(isTeacherRole ? { teacherId: userId } : {}),
         },
       }),
-      prisma.payment.aggregate({
-        where: {
-          reversal: null,
-          receivedAt: { gte: startOfMonth },
-          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
-          ...(isTeacherRole
-            ? { allocations: { some: { charge: { batch: { teacherId: userId } } } } }
-            : {}),
-        },
-        _sum: { amount: true },
-      }),
+      !isTeacherRole
+        ? prisma.payment.aggregate({
+            where: {
+              reversal: null,
+              receivedAt: { gte: startOfMonth },
+              ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+            },
+            _sum: { amount: true },
+          })
+        : Promise.resolve(null),
       prisma.attendance.groupBy({
         by: ['status'],
         where: {
@@ -743,31 +793,21 @@ export async function getOverviewChart(req: Request, res: Response) {
         },
         _count: { _all: true },
       }),
-      prisma.feeCharge.findMany({
-        where: {
-          status: 'ACTIVE',
-          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
-          ...(isTeacherRole ? { batch: { teacherId: userId } } : {}),
-        },
-        include: {
-          adjustments: true,
-          allocations: {
-            include: { payment: { select: { reversal: true } } },
-          },
-        },
-      }),
+      !isTeacherRole
+        ? prisma.feeCharge.findMany({
+            where: {
+              status: 'ACTIVE',
+              ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+            },
+            include: {
+              adjustments: true,
+              allocations: {
+                include: { payment: { select: { reversal: true } } },
+              },
+            },
+          })
+        : Promise.resolve([]),
     ]);
-
-    let duesCount = 0;
-    let totalDuesAmount = 0;
-    const todayStrAdmin = FeeLedgerService.getTodayInTimezone();
-    for (const ch of branchCharges) {
-      const bal = FeeLedgerService.deriveChargeStatus(ch, todayStrAdmin);
-      if (bal.balance.gt(0)) {
-        duesCount++;
-        totalDuesAmount += moneyToNumber(bal.balance);
-      }
-    }
 
     let todayTotalAtt = 0;
     let todayPresentAtt = 0;
@@ -780,7 +820,32 @@ export async function getOverviewChart(req: Request, res: Response) {
         ? Number(((todayPresentAtt / todayTotalAtt) * 100).toFixed(1))
         : 0;
 
-    const monthRevenue = moneyToNumber(monthRevenueAgg._sum.amount);
+    // For teachers: NO financial fields
+    if (isTeacherRole) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          role,
+          students: studentsCount,
+          teachers: teachersCount,
+          batches: batchesCount,
+          todayAttendanceRate,
+        },
+      });
+    }
+
+    let duesCount = 0;
+    let totalDuesAmount = 0;
+    const todayStrAdmin = FeeLedgerService.getTodayInTimezone();
+    for (const ch of (branchCharges as any[])) {
+      const bal = FeeLedgerService.deriveChargeStatus(ch, todayStrAdmin);
+      if (bal.balance.gt(0)) {
+        duesCount++;
+        totalDuesAmount += moneyToNumber(bal.balance);
+      }
+    }
+
+    const monthRevenue = monthRevenueAgg ? moneyToNumber(monthRevenueAgg._sum.amount) : 0;
     const totalDueAmount = Number(totalDuesAmount.toFixed(2));
 
     return res.status(200).json({

@@ -18,7 +18,7 @@ const router = Router();
 router.get('/:id/student-view', authenticate, authorize(Role.STUDENT), getBatchForStudent);
 router.post('/', authenticate, authorize(Role.ADMIN), branchScope, createBatch);
 
-router.get('/', authenticate, authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN), branchScope, getBatches);
+router.get('/', authenticate, authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN, Role.ACCOUNTANT), branchScope, getBatches);
 router.get('/:id', authenticate, authorize(Role.ADMIN, Role.TEACHER, Role.STUDENT, Role.GUARDIAN), branchScope, getBatchById);
 router.patch('/:id', authenticate, authorize(Role.ADMIN), branchScope, updateBatch);
 router.delete('/:id', authenticate, authorize(Role.ADMIN), branchScope, deleteBatch);

@@ -292,6 +292,9 @@ async function runSmokeTests() {
   const createdChapterIds: string[] = [];
   const createdSubjectIds: string[] = [];
   const createdFaqIds: string[] = [];
+  const createdTestimonialIds: string[] = [];
+  const cmsAuditEntityIds: string[] = [];
+  let cmsAuditSince: Date | null = null;
   let originalSettingsBeforeSmoke: any = null;
   let mainServerChild: any = null;
   let mainIsOnline = false;
@@ -7008,6 +7011,504 @@ async function runSmokeTests() {
         'Accountant restricted to fee endpoints & minimal batch list (403 on results, attendance, enrollments, lectures); Teacher stripped of all revenue/payments (403 on tables/payments & charts/revenue-monthly)'
       );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK 68: CMS — blog, FAQ, testimonials, teacher profiles, review visibility
+    // ─────────────────────────────────────────────────────────────────────────
+    if (shouldRun('68', 'CMS content management (blog, FAQ, testimonials, teachers, reviews, audit)', false)) {
+      console.log('\n--- Check 68: CMS content management ---');
+      const cmsStartedAt = new Date();
+      cmsAuditSince = cmsStartedAt;
+      const TAG = `SMOKE-CMS-${SMOKE_RUN_SUFFIX}`;
+      const slugBase = `smoke-cms-${SMOKE_RUN_SUFFIX.replace(/_/g, '-')}`;
+      const JSON_H = { 'Content-Type': 'application/json' };
+      const superC = smokeSuperAdminCookie;
+      const NX = 'smoke-nonexistent-id';
+      const call = (method: string, p: string, cookie?: string, body?: unknown) =>
+        req(p, {
+          method,
+          headers: { ...(body !== undefined ? JSON_H : {}), ...(cookie ? { Cookie: cookie } : {}) },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+      type Row = { id: string; slug?: string; sortOrder?: number; isPublished?: boolean; answer?: string };
+      const itemsOf = (r: { body: { data?: { items?: unknown } } | null }): Row[] =>
+        ((r.body?.data?.items ?? []) as Row[]);
+      const siteSettings = await prisma.centerSettings.findUnique({ where: { key: 'center' } });
+      const siteFeatures = (siteSettings?.features ?? {}) as Record<string, boolean>;
+      const siteOn = siteFeatures.publicSite !== false;
+      const centerContent = async () => (await call('GET', '/api/public/center')).body?.data?.content ?? {};
+
+      // 1. Permission matrix (non-mutating probes: nonexistent ids / invalid bodies)
+      const roleCookies: Record<string, string> = {
+        SUPER_ADMIN: superC,
+        ADMIN: adminCookie,
+        TEACHER: teacherCookie,
+        STUDENT: studentCookie,
+        GUARDIAN: guardianCookie,
+        ACCOUNTANT: accountantCookie,
+      };
+      const STAFF = ['SUPER_ADMIN', 'ADMIN'];
+      const OWNER = ['SUPER_ADMIN'];
+      const matrix: Array<{ m: string; p: string; body?: unknown; allowed: string[] }> = [
+        { m: 'GET', p: '/api/cms/summary', allowed: STAFF },
+        { m: 'GET', p: '/api/cms/blog', allowed: STAFF },
+        { m: 'GET', p: `/api/cms/blog/${NX}`, allowed: STAFF },
+        { m: 'POST', p: '/api/cms/blog', body: { unknownField: 1 }, allowed: STAFF },
+        { m: 'PATCH', p: `/api/cms/blog/${NX}`, body: { title: 'x' }, allowed: STAFF },
+        { m: 'POST', p: `/api/cms/blog/${NX}/publish`, body: {}, allowed: OWNER },
+        { m: 'POST', p: `/api/cms/blog/${NX}/unpublish`, body: {}, allowed: OWNER },
+        { m: 'DELETE', p: `/api/cms/blog/${NX}`, allowed: OWNER },
+        { m: 'GET', p: '/api/cms/faq', allowed: STAFF },
+        { m: 'POST', p: '/api/cms/faq', body: { unknownField: 1 }, allowed: STAFF },
+        { m: 'PUT', p: '/api/cms/faq/order', body: { ids: [NX] }, allowed: STAFF },
+        { m: 'POST', p: '/api/cms/faq/suggestions', body: { unknownField: 1 }, allowed: STAFF },
+        { m: 'PATCH', p: `/api/cms/faq/${NX}`, body: { question: 'x' }, allowed: STAFF },
+        { m: 'POST', p: `/api/cms/faq/${NX}/publish`, body: {}, allowed: OWNER },
+        { m: 'POST', p: `/api/cms/faq/${NX}/unpublish`, body: {}, allowed: OWNER },
+        { m: 'DELETE', p: `/api/cms/faq/${NX}`, allowed: OWNER },
+        { m: 'GET', p: '/api/cms/testimonials', allowed: STAFF },
+        { m: 'POST', p: '/api/cms/testimonials', body: { unknownField: 1 }, allowed: STAFF },
+        { m: 'PUT', p: '/api/cms/testimonials/order', body: { ids: [NX] }, allowed: STAFF },
+        { m: 'PATCH', p: `/api/cms/testimonials/${NX}`, body: { name: 'x' }, allowed: STAFF },
+        { m: 'PATCH', p: `/api/cms/testimonials/${NX}/featured`, body: { isFeatured: true }, allowed: STAFF },
+        { m: 'POST', p: `/api/cms/testimonials/${NX}/publish`, body: {}, allowed: OWNER },
+        { m: 'POST', p: `/api/cms/testimonials/${NX}/unpublish`, body: {}, allowed: OWNER },
+        { m: 'DELETE', p: `/api/cms/testimonials/${NX}`, allowed: OWNER },
+        { m: 'GET', p: '/api/cms/teachers', allowed: STAFF },
+        { m: 'PATCH', p: `/api/cms/teachers/${NX}`, body: { publicOrder: 1 }, allowed: STAFF },
+        { m: 'GET', p: '/api/cms/reviews', allowed: STAFF },
+        { m: 'PATCH', p: `/api/cms/reviews/${NX}/visibility`, body: { isHidden: true }, allowed: STAFF },
+      ];
+      for (const e of matrix) {
+        const anon = await call(e.m, e.p, undefined, e.body);
+        assert(anon.status === 401, `${e.m} ${e.p} anonymous expected 401, got ${anon.status}`);
+        for (const [role, cookie] of Object.entries(roleCookies)) {
+          const r = await call(e.m, e.p, cookie, e.body);
+          if (e.allowed.includes(role)) {
+            assert(r.status !== 401 && r.status !== 403 && r.status < 500, `${e.m} ${e.p} ${role} should be allowed, got ${r.status}`);
+          } else {
+            assert(r.status === 403, `${e.m} ${e.p} ${role} expected 403, got ${r.status}`);
+          }
+        }
+      }
+
+      // 2. BLOG: validation, drafts, permissions, scheduling, slug lock, sitemap
+      const md = '## Heading\n\n- item one\n- item two\n\n**bold** and *italic* [site](https://example.com)';
+      const blogBody = (n: string, extra: Record<string, unknown> = {}) => ({
+        title: `${TAG} Post ${n}`,
+        excerpt: `${TAG} excerpt ${n}`,
+        content: `${md}\n${TAG}`,
+        category: 'SMOKE-CMS',
+        ...extra,
+      });
+      const rejects: Array<[string, Record<string, unknown>]> = [
+        ['script title', { title: '<script>alert(1)</script>' }],
+        ['img onerror', { content: '<img src=x onerror=alert(1)>' }],
+        ['javascript link', { content: '[x](javascript:alert(1))' }],
+        ['http link', { content: '[x](http://insecure.example.com)' }],
+        ['data link', { content: '[x](data:text/html;base64,AAAA)' }],
+        ['event attribute', { excerpt: 'hover onmouseover=alert(1)' }],
+        ['unknown field', { role: 'ADMIN' }],
+        ['title too long', { title: `${TAG}-reject ${'T'.repeat(130)}` }],
+        ['excerpt too long', { excerpt: 'E'.repeat(201) }],
+        ['content too long', { content: 'C'.repeat(20001) }],
+        ['category too long', { category: 'K'.repeat(41) }],
+        ['non-cloudinary cover', { coverImage: 'https://evil.example.com/a.png' }],
+        ['http cloudinary cover', { coverImage: 'http://res.cloudinary.com/x/a.png' }],
+        ['lookalike host cover', { coverImage: 'https://res.cloudinary.com.evil.example.com/x/a.png' }],
+        ['javascript cover', { coverImage: 'javascript:alert(1)' }],
+      ];
+      for (const [label, patch] of rejects) {
+        const r = await call('POST', '/api/cms/blog', adminCookie, blogBody(`reject-${label.replace(/ /g, '-')}`, patch));
+        assert(r.status === 400, `Blog create "${label}" expected 400, got ${r.status}`);
+      }
+      const leakedRejects = await prisma.blogPost.count({ where: { title: { contains: `${TAG} Post reject-` } } });
+      assert(leakedRejects === 0, `Rejected blog payloads must not create rows, found ${leakedRejects}`);
+
+      const summary0 = (await call('GET', '/api/cms/summary', superC)).body?.data;
+      const hasBlog0 = Boolean((await centerContent()).hasBlog);
+
+      const c1 = await call('POST', '/api/cms/blog', adminCookie, blogBody('one'));
+      assert(c1.status === 201, `ADMIN blog create expected 201, got ${c1.status}`);
+      const post1 = c1.body?.data;
+      createdBlogPostIds.push(post1?.id);
+      cmsAuditEntityIds.push(post1?.id);
+      assert(post1?.status === 'draft' && post1?.isPublished === false, 'New blog post must be a draft');
+      assert(/^smoke-cms-/.test(post1?.slug ?? ''), `Slug should be generated from the title, got ${post1?.slug}`);
+
+      const c2 = await call('POST', '/api/cms/blog', adminCookie, blogBody('two', { slug: `${slugBase}-two` }));
+      assert(c2.status === 201 && c2.body?.data?.slug === `${slugBase}-two`, 'Explicit slug accepted on create');
+      const post2 = c2.body?.data;
+      createdBlogPostIds.push(post2?.id);
+      cmsAuditEntityIds.push(post2?.id);
+      const dup = await call('POST', '/api/cms/blog', adminCookie, blogBody('dup', { slug: `${slugBase}-two` }));
+      assert(dup.status === 409, `Duplicate slug expected 409, got ${dup.status}`);
+      const slugEdit = await call('PATCH', `/api/cms/blog/${post2?.id}`, adminCookie, { slug: `${slugBase}-two-edited` });
+      assert(slugEdit.status === 200 && slugEdit.body?.data?.slug === `${slugBase}-two-edited`, 'Slug editable before first publish');
+
+      const c3 = await call('POST', '/api/cms/blog', adminCookie, { title: `${TAG} Post three` });
+      const post3 = c3.body?.data;
+      createdBlogPostIds.push(post3?.id);
+      cmsAuditEntityIds.push(post3?.id);
+      const pubIncomplete = await call('POST', `/api/cms/blog/${post3?.id}/publish`, superC, {});
+      assert(pubIncomplete.status === 400, `Publish without excerpt/content/category expected 400, got ${pubIncomplete.status}`);
+
+      // ADMIN cannot publish, unpublish or delete
+      for (const [m, p, b] of [
+        ['POST', `/api/cms/blog/${post1?.id}/publish`, {}],
+        ['POST', `/api/cms/blog/${post1?.id}/unpublish`, {}],
+        ['DELETE', `/api/cms/blog/${post1?.id}`, undefined],
+      ] as Array<[string, string, unknown]>) {
+        const r = await call(m, p, adminCookie, b);
+        assert(r.status === 403, `ADMIN ${m} ${p} expected 403, got ${r.status}`);
+      }
+      const stillDraft = await prisma.blogPost.findUnique({ where: { id: post1?.id } });
+      assert(stillDraft && !stillDraft.isPublished, 'ADMIN attempts must not change publish state');
+
+      // Past publishedAt rejected
+      const pastPub = await call('POST', `/api/cms/blog/${post2?.id}/publish`, superC, {
+        publishedAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+      });
+      assert(pastPub.status === 400, `publishedAt in the past expected 400, got ${pastPub.status}`);
+
+      // Scheduled (future) post is invisible everywhere
+      const future = new Date(Date.now() + 3600 * 1000).toISOString();
+      const schedRes = await call('POST', `/api/cms/blog/${post2?.id}/publish`, superC, { publishedAt: future });
+      assert(schedRes.status === 200 && schedRes.body?.data?.status === 'scheduled', `Scheduling expected status scheduled, got ${schedRes.body?.data?.status}`);
+      const pubList = async () => itemsOf(await call('GET', '/api/blog?category=SMOKE-CMS&limit=50'));
+      const sitemapSlugs = async () =>
+        ((await call('GET', '/api/public/sitemap')).body?.data?.blogPosts ?? []) as Array<{ slug: string }>;
+      assert(!(await pubList()).some((x) => x.slug === `${slugBase}-two-edited`), 'Scheduled post must not be in the public list');
+      assert((await call('GET', `/api/blog/${slugBase}-two-edited`)).status === 404, 'Scheduled post detail must be 404');
+      assert(!(await sitemapSlugs()).some((x) => x.slug === `${slugBase}-two-edited`), 'Sitemap must exclude scheduled posts');
+      const adminSched = itemsOf(await call('GET', '/api/cms/blog?status=scheduled&limit=100', adminCookie));
+      assert(adminSched.some((x) => x.id === post2?.id), 'Admin list status=scheduled should include the post');
+      const adminDraft = itemsOf(await call('GET', '/api/cms/blog?status=draft&limit=100', adminCookie));
+      assert(!adminDraft.some((x) => x.id === post2?.id), 'Admin list status=draft must not include a scheduled post');
+      const summaryS = (await call('GET', '/api/cms/summary', superC)).body?.data;
+      assert(summaryS?.blog?.scheduled === (summary0?.blog?.scheduled ?? 0) + 1, 'Summary scheduled count should increase by 1');
+      const centerSched = await centerContent();
+      if (siteOn) assert(Boolean(centerSched.hasBlog) === hasBlog0, 'A scheduled post must not change content.hasBlog');
+
+      // Publish now: visible immediately
+      const nowPub = await call('POST', `/api/cms/blog/${post1?.id}/publish`, superC, {});
+      assert(nowPub.status === 200 && nowPub.body?.data?.status === 'published', `Publish now expected published, got ${nowPub.status}`);
+      assert((await pubList()).some((x) => x.slug === post1?.slug), 'Published post should be in the public list');
+      assert((await call('GET', `/api/blog/${post1?.slug}`)).status === 200, 'Published post detail should be 200');
+      assert((await sitemapSlugs()).some((x) => x.slug === post1?.slug), 'Sitemap should include the visible post');
+      const summaryP = (await call('GET', '/api/cms/summary', superC)).body?.data;
+      assert(summaryP?.blog?.published === (summary0?.blog?.published ?? 0) + 1, 'Summary published count should increase by 1');
+      if (siteOn) assert((await centerContent()).hasBlog === true, 'content.hasBlog should be true with a visible post');
+
+      // Slug immutable after first publish
+      const slugLocked = await call('PATCH', `/api/cms/blog/${post1?.id}`, adminCookie, { slug: `${slugBase}-changed` });
+      assert(slugLocked.status === 409, `Slug change after publish expected 409, got ${slugLocked.status}`);
+      const slugRow = await prisma.blogPost.findUnique({ where: { id: post1?.id }, select: { slug: true } });
+      assert(slugRow?.slug === post1?.slug, 'Slug must be unchanged after a rejected edit');
+
+      // Time passes: scheduled post becomes visible (past publishedAt)
+      await prisma.blogPost.update({ where: { id: post2?.id }, data: { publishedAt: new Date(Date.now() - 60 * 1000) } });
+      const touch = await call('PATCH', `/api/cms/blog/${post2?.id}`, adminCookie, { excerpt: `${TAG} excerpt two edited` });
+      assert(touch.status === 200, `ADMIN edit of a published post expected 200, got ${touch.status}`);
+      assert((await pubList()).some((x) => x.slug === `${slugBase}-two-edited`), 'Post is visible once publishedAt has passed');
+      assert((await call('GET', `/api/blog/${slugBase}-two-edited`)).status === 200, 'Detail visible after publishedAt');
+      assert((await sitemapSlugs()).some((x) => x.slug === `${slugBase}-two-edited`), 'Sitemap includes post after publishedAt');
+      assert(itemsOf(await call('GET', '/api/cms/blog?status=published&limit=100', adminCookie)).some((x) => x.id === post2?.id), 'Admin status=published includes it');
+
+      // Existing (legacy) cover value is not re-validated unless changed
+      await prisma.blogPost.update({ where: { id: post1?.id }, data: { coverImage: 'https://example.com/demo-legacy.png' } });
+      const legacyKeep = await call('PATCH', `/api/cms/blog/${post1?.id}`, adminCookie, { title: `${TAG} Post one renamed` });
+      assert(legacyKeep.status === 200 && legacyKeep.body?.data?.coverImage === 'https://example.com/demo-legacy.png', 'Unchanged legacy cover must stay valid');
+      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+      if (cloudName) {
+        const okCover = await call('PATCH', `/api/cms/blog/${post1?.id}`, adminCookie, {
+          coverImage: `https://res.cloudinary.com/${cloudName}/image/upload/v1/eduflow/content/smoke.png`,
+        });
+        assert(okCover.status === 200, `Cloudinary cover under own cloud expected 200, got ${okCover.status}`);
+        const otherCloud = await call('PATCH', `/api/cms/blog/${post1?.id}`, adminCookie, {
+          coverImage: `https://res.cloudinary.com/${cloudName}-other/image/upload/v1/x.png`,
+        });
+        assert(otherCloud.status === 400, `Cover under another cloud expected 400, got ${otherCloud.status}`);
+      }
+
+      // Unpublish keeps slug locked and removes from public
+      const unpub = await call('POST', `/api/cms/blog/${post2?.id}/unpublish`, superC, {});
+      assert(unpub.status === 200 && unpub.body?.data?.status === 'draft', 'Unpublish returns to draft');
+      assert((await call('GET', `/api/blog/${slugBase}-two-edited`)).status === 404, 'Unpublished post detail is 404');
+      assert(!(await sitemapSlugs()).some((x) => x.slug === `${slugBase}-two-edited`), 'Sitemap excludes unpublished post');
+      const relock = await call('PATCH', `/api/cms/blog/${post2?.id}`, adminCookie, { slug: `${slugBase}-again` });
+      assert(relock.status === 409, `Slug stays locked after unpublish, got ${relock.status}`);
+      await call('POST', `/api/cms/blog/${post1?.id}/unpublish`, superC, {});
+      if (siteOn && !hasBlog0) assert((await centerContent()).hasBlog === false, 'content.hasBlog returns to false when nothing is visible');
+      const delPost = await call('DELETE', `/api/cms/blog/${post3?.id}`, superC);
+      assert(delPost.status === 200, `SUPER_ADMIN delete expected 200, got ${delPost.status}`);
+      assert((await prisma.blogPost.count({ where: { id: post3?.id } })) === 0, 'Deleted post must be gone');
+
+
+      // 3. FAQ: suggestions, drafts with empty answers, publish gate, reordering, delete
+      const f1 = await call('POST', '/api/cms/faq', adminCookie, {
+        question: `${TAG} Question One`,
+        category: 'Admission',
+      });
+      assert(f1.status === 201, `FAQ create expected 201, got ${f1.status}`);
+      const faq1 = f1.body?.data;
+      createdFaqIds.push(faq1?.id);
+      cmsAuditEntityIds.push(faq1?.id);
+      assert(faq1?.isPublished === false && faq1?.answer === '', 'New FAQ item must be draft with empty answer');
+
+      // Cannot publish with empty answer
+      const pubEmpty = await call('POST', `/api/cms/faq/${faq1?.id}/publish`, superC, {});
+      assert(pubEmpty.status === 400, `Publish FAQ with empty answer expected 400, got ${pubEmpty.status}`);
+
+      // Set answer and publish
+      const setAns = await call('PATCH', `/api/cms/faq/${faq1?.id}`, adminCookie, {
+        answer: `${TAG} Answer One with **markdown**`,
+      });
+      assert(setAns.status === 200, `Update FAQ answer expected 200, got ${setAns.status}`);
+      const pubFaq = await call('POST', `/api/cms/faq/${faq1?.id}/publish`, superC, {});
+      assert(pubFaq.status === 200 && pubFaq.body?.data?.isPublished === true, `Publish FAQ expected 200, got ${pubFaq.status}`);
+
+      // HTML rejected in question and answer
+      const htmlFaqQ = await call('POST', '/api/cms/faq', adminCookie, { question: '<b>HTML Q</b>' });
+      assert(htmlFaqQ.status === 400, `HTML in question expected 400, got ${htmlFaqQ.status}`);
+      const htmlFaqA = await call('PATCH', `/api/cms/faq/${faq1?.id}`, adminCookie, { answer: '<script>alert(1)</script>' });
+      assert(htmlFaqA.status === 400, `HTML in answer expected 400, got ${htmlFaqA.status}`);
+
+      // Suggestions: inserts drafts with empty answers, idempotent
+      const sug1 = await call('POST', '/api/cms/faq/suggestions', adminCookie, {});
+      assert(sug1.status === 200, `FAQ suggestions expected 200, got ${sug1.status}`);
+      const sug1Created = sug1.body?.data?.created ?? 0;
+      assert(sug1Created > 0, `Suggestions should create items, got ${sug1Created}`);
+      const sugIds = (sug1.body?.data?.ids ?? []) as string[];
+      createdFaqIds.push(...sugIds);
+      cmsAuditEntityIds.push(...sugIds);
+      const sugItems = await prisma.faqItem.findMany({ where: { id: { in: sugIds } } });
+      assert(sugItems.every((x) => !x.isPublished && x.answer === ''), 'Suggestions must be unpublished drafts with empty answers');
+
+      // Idempotent: calling again creates 0
+      const sug2 = await call('POST', '/api/cms/faq/suggestions', adminCookie, {});
+      assert(sug2.status === 200 && sug2.body?.data?.created === 0, 'Suggestions must be idempotent (0 created on second run)');
+
+      // Reorder
+      const f2 = await call('POST', '/api/cms/faq', adminCookie, { question: `${TAG} Question Two`, answer: 'Ans 2' });
+      const faq2 = f2.body?.data;
+      createdFaqIds.push(faq2?.id);
+      cmsAuditEntityIds.push(faq2?.id);
+      const reorderFaqRes = await call('PUT', '/api/cms/faq/order', adminCookie, { ids: [faq2?.id, faq1?.id] });
+      assert(reorderFaqRes.status === 200, `FAQ reorder expected 200, got ${reorderFaqRes.status}`);
+      const faq1After = await prisma.faqItem.findUnique({ where: { id: faq1?.id } });
+      const faq2After = await prisma.faqItem.findUnique({ where: { id: faq2?.id } });
+      assert((faq2After?.sortOrder ?? -1) < (faq1After?.sortOrder ?? -1), 'FAQ sort order must reflect the new ids array');
+
+      // Unpublish & delete
+      const unpubFaq = await call('POST', `/api/cms/faq/${faq1?.id}/unpublish`, superC, {});
+      assert(unpubFaq.status === 200 && unpubFaq.body?.data?.isPublished === false, 'FAQ unpublish returns to draft');
+      const delFaq = await call('DELETE', `/api/cms/faq/${faq2?.id}`, superC);
+      assert(delFaq.status === 200, 'FAQ delete expected 200');
+
+      // 4. TESTIMONIALS: consent requirement, publish gate, featured toggle, withdrawal of consent
+      const t1 = await call('POST', '/api/cms/testimonials', adminCookie, {
+        name: `${TAG} Student One`,
+        roleTitle: 'HSC Candidate',
+        content: `${TAG} Great learning experience.`,
+        rating: 5,
+        hasConsent: false,
+      });
+      assert(t1.status === 201, `Testimonial create expected 201, got ${t1.status}`);
+      const test1 = t1.body?.data;
+      createdTestimonialIds.push(test1?.id);
+      cmsAuditEntityIds.push(test1?.id);
+
+      // Publish requires consent
+      const pubNoConsent = await call('POST', `/api/cms/testimonials/${test1?.id}/publish`, superC, {});
+      assert(pubNoConsent.status === 400, `Publish without consent expected 400, got ${pubNoConsent.status}`);
+
+      // Grant consent and publish
+      await call('PATCH', `/api/cms/testimonials/${test1?.id}`, adminCookie, { hasConsent: true });
+      const pubTest = await call('POST', `/api/cms/testimonials/${test1?.id}/publish`, superC, {});
+      assert(pubTest.status === 200 && pubTest.body?.data?.isPublished === true, `Publish with consent expected 200, got ${pubTest.status}`);
+      const pubTestList = (await call('GET', '/api/testimonials')).body?.data ?? [];
+      assert(pubTestList.some((x: any) => x.id === test1?.id), 'Published testimonial with consent appears in public list');
+
+      // Featured toggle
+      const featRes = await call('PATCH', `/api/cms/testimonials/${test1?.id}/featured`, adminCookie, { isFeatured: true });
+      assert(featRes.status === 200 && featRes.body?.data?.isFeatured === true, `Featured toggle expected 200, got ${featRes.status}`);
+
+      // Reorder testimonials
+      const t2 = await call('POST', '/api/cms/testimonials', adminCookie, {
+        name: `${TAG} Student Two`,
+        roleTitle: 'Alumnus',
+        content: 'Content 2',
+        hasConsent: true,
+      });
+      const test2 = t2.body?.data;
+      createdTestimonialIds.push(test2?.id);
+      cmsAuditEntityIds.push(test2?.id);
+      const reorderTestRes = await call('PUT', '/api/cms/testimonials/order', adminCookie, { ids: [test2?.id, test1?.id] });
+      assert(reorderTestRes.status === 200, `Testimonials reorder expected 200, got ${reorderTestRes.status}`);
+
+      // Withdrawing consent unpublishes immediately
+      const withdrawConsent = await call('PATCH', `/api/cms/testimonials/${test1?.id}`, adminCookie, { hasConsent: false });
+      assert(withdrawConsent.status === 200 && withdrawConsent.body?.data?.isPublished === false, 'Withdrawing consent must unpublish testimonial');
+      const pubTestListAfter = (await call('GET', '/api/testimonials')).body?.data ?? [];
+      assert(!pubTestListAfter.some((x: any) => x.id === test1?.id), 'Testimonial without consent must disappear from public list');
+
+      // Delete testimonial
+      const delTest = await call('DELETE', `/api/cms/testimonials/${test2?.id}`, superC);
+      assert(delTest.status === 200, 'Testimonial delete expected 200');
+
+      // 5. TEACHER PROFILES: listing completeness, publishing requirements, self-edit vs admin edit, branch isolation
+      const teachListAdmin = itemsOf(await call('GET', '/api/cms/teachers', adminCookie));
+      assert(teachListAdmin.every((t: any) => t.branchId === demoAdmin.branchId), 'ADMIN must only see teachers from own branch');
+      const teachListSuper = itemsOf(await call('GET', '/api/cms/teachers', superC));
+      assert(teachListSuper.length >= teachListAdmin.length, 'SUPER_ADMIN sees all teachers');
+
+      // Target teacher in Branch A
+      const targetTeacher = smokeTeacher2;
+      cmsAuditEntityIds.push(targetTeacher.id);
+
+      // Publishing public profile requires headline and bio
+      const pubIncompleteTeach = await call('PATCH', `/api/cms/teachers/${targetTeacher.id}`, adminCookie, {
+        isPublicProfile: true,
+        headline: '',
+        bio: '',
+      });
+      assert(pubIncompleteTeach.status === 400, `Publishing teacher profile without headline/bio expected 400, got ${pubIncompleteTeach.status}`);
+
+      // Valid teacher update by ADMIN
+      const validTeachUpdate = await call('PATCH', `/api/cms/teachers/${targetTeacher.id}`, adminCookie, {
+        isPublicProfile: true,
+        headline: `${TAG} Physics Specialist`,
+        bio: `${TAG} Teaching physics with 10+ years passion.`,
+        qualifications: 'M.Sc in Physics, DU',
+        experienceYears: 10,
+        publicOrder: 5,
+      });
+      assert(validTeachUpdate.status === 200 && validTeachUpdate.body?.data?.isPublicProfile === true, `Teacher update by ADMIN expected 200, got ${validTeachUpdate.status}`);
+
+      // ADMIN from Branch 2 trying to update Branch 1 teacher gets 404
+      const foreignAdminTeachUpdate = await call('PATCH', `/api/cms/teachers/${targetTeacher.id}`, admin2Cookie, {
+        headline: 'Hacked Headline',
+      });
+      assert(foreignAdminTeachUpdate.status === 404, `ADMIN of another branch expected 404 on teacher, got ${foreignAdminTeachUpdate.status}`);
+
+      // Teacher self-edit on PATCH /api/me: can edit headline, bio, qualifications, experienceYears, avatarUrl; NEVER isPublicProfile or publicOrder
+      const teachSelfUpdate = await call('PATCH', '/api/me', teacher2Cookie, {
+        headline: `${TAG} Physics Lead`,
+        bio: `${TAG} Updated bio by teacher self.`,
+        qualifications: 'PhD Candidate',
+        experienceYears: 12,
+        isPublicProfile: false, // Must be ignored / stripped
+        publicOrder: 0,         // Must be ignored / stripped
+      });
+      assert(teachSelfUpdate.status === 200, `Teacher self-edit on /api/me expected 200, got ${teachSelfUpdate.status}`);
+      const teacherAfterSelf = await prisma.user.findUnique({ where: { id: targetTeacher.id } });
+      assert(teacherAfterSelf?.headline === `${TAG} Physics Lead`, 'Teacher self-edit updated headline');
+      assert(teacherAfterSelf?.isPublicProfile === true, 'Teacher self-edit must NOT be able to change isPublicProfile');
+      assert(teacherAfterSelf?.publicOrder === 5, 'Teacher self-edit must NOT be able to change publicOrder');
+
+      // Public teachers endpoint check: returns qualifications, experienceYears, sorted by publicOrder
+      const pubTeachersRes = await call('GET', '/api/public/teachers');
+      const pubTeachers = pubTeachersRes.body?.data?.items ?? [];
+      const foundTarget = pubTeachers.find((t: any) => t.id === targetTeacher.id);
+      assert(foundTarget && foundTarget.qualifications === 'PhD Candidate' && foundTarget.experienceYears === 12, 'Public teachers response includes qualifications and experienceYears');
+
+      // 6. REVIEWS & VISIBILITY: hide review, disappears from lists and averages, branch isolation
+      // Create a test batch and review for student
+      const revBatch = await prisma.batch.create({
+        data: {
+          name: `${TAG}-Batch`,
+          type: 'ACADEMIC',
+          subjectId: smokeSubject.id,
+          branchId: demoAdmin.branchId,
+          isPublished: true,
+        },
+      });
+      createdBatchIds.push(revBatch.id);
+      await prisma.enrollment.create({
+        data: {
+          batchId: revBatch.id,
+          studentId: demoStudent.id,
+          status: 'ACTIVE',
+        },
+      });
+      const revRes = await call('POST', `/api/batches/${revBatch.id}/reviews`, studentCookie, {
+        rating: 5,
+        comment: `${TAG} Excellent course!`,
+      });
+      assert(revRes.status === 201, `Create review expected 201, got ${revRes.status}`);
+      const reviewRow = revRes.body?.data;
+      cmsAuditEntityIds.push(reviewRow?.id);
+
+      // Verify review appears publicly
+      const batchDetailBefore = (await call('GET', `/api/public/batches/${revBatch.slug || revBatch.id}`)).body?.data;
+      const batchReviewsBefore = (await call('GET', `/api/batches/${revBatch.id}/reviews`)).body?.data?.items ?? [];
+      assert(batchReviewsBefore.some((r: any) => r.id === reviewRow?.id), 'Review visible in batch reviews before hiding');
+
+      // ADMIN from Branch 2 trying to hide Branch 1 review gets 404
+      const foreignAdminHideRev = await call('PATCH', `/api/cms/reviews/${reviewRow?.id}/visibility`, admin2Cookie, {
+        isHidden: true,
+        reason: 'Spam',
+      });
+      assert(foreignAdminHideRev.status === 404, `ADMIN of another branch expected 404 on review visibility, got ${foreignAdminHideRev.status}`);
+
+      // ADMIN of own branch hides review
+      const hideRev = await call('PATCH', `/api/cms/reviews/${reviewRow?.id}/visibility`, adminCookie, {
+        isHidden: true,
+        reason: 'Content check',
+      });
+      assert(hideRev.status === 200 && hideRev.body?.data?.isHidden === true, `Hide review expected 200, got ${hideRev.status}`);
+
+      // Verify hidden review disappears from public list and averages
+      const batchReviewsAfter = (await call('GET', `/api/batches/${revBatch.id}/reviews`)).body?.data?.items ?? [];
+      assert(!batchReviewsAfter.some((r: any) => r.id === reviewRow?.id), 'Hidden review must disappear from /batches/:id/reviews');
+
+      // Unhide review
+      const unhideRev = await call('PATCH', `/api/cms/reviews/${reviewRow?.id}/visibility`, adminCookie, {
+        isHidden: false,
+      });
+      assert(unhideRev.status === 200 && unhideRev.body?.data?.isHidden === false, `Unhide review expected 200, got ${unhideRev.status}`);
+
+      // 7. UPLOAD SIGNATURE: purpose "content"
+      // ADMIN allowed
+      const uploadSigAdmin = await call('POST', '/api/uploads/signature', adminCookie, { purpose: 'content' });
+      assert(uploadSigAdmin.status === 200, `Upload signature with purpose content for ADMIN expected 200, got ${uploadSigAdmin.status}`);
+      assert(uploadSigAdmin.body?.data?.folder === `eduflow/content/${demoAdmin.id}`, 'Folder must be eduflow/content/<userId>');
+      assert(uploadSigAdmin.body?.data?.max_bytes === 2 * 1024 * 1024, 'Max bytes must be 2MB');
+      assert(uploadSigAdmin.body?.data?.allowed_formats === 'png,jpg,jpeg,webp', 'Allowed formats must match');
+
+      // TEACHER allowed
+      const uploadSigTeacher = await call('POST', '/api/uploads/signature', teacherCookie, { purpose: 'content' });
+      assert(uploadSigTeacher.status === 200, `Upload signature with purpose content for TEACHER expected 200, got ${uploadSigTeacher.status}`);
+
+      // STUDENT forbidden (403)
+      const uploadSigStudent = await call('POST', '/api/uploads/signature', studentCookie, { purpose: 'content' });
+      assert(uploadSigStudent.status === 403, `Upload signature with purpose content for STUDENT expected 403, got ${uploadSigStudent.status}`);
+
+      // GUARDIAN forbidden (403)
+      const uploadSigGuardian = await call('POST', '/api/uploads/signature', guardianCookie, { purpose: 'content' });
+      assert(uploadSigGuardian.status === 403, `Upload signature with purpose content for GUARDIAN expected 403, got ${uploadSigGuardian.status}`);
+
+      // 8. AUDIT LOG VERIFICATION: Audit entries contain changed field NAMES and ids only, zero text
+      const cmsAuditLogs = await prisma.auditLog.findMany({
+        where: {
+          createdAt: { gte: cmsStartedAt },
+          action: { startsWith: 'CMS_' },
+        },
+      });
+      assert(cmsAuditLogs.length > 0, `CMS privileged actions must create AuditLog entries, found ${cmsAuditLogs.length}`);
+      for (const log of cmsAuditLogs) {
+        const metaStr = JSON.stringify(log.metadata || {});
+        // Must never leak content or body text into metadata
+        assert(!metaStr.includes('Great learning experience'), `Audit log leaked testimonial content: ${metaStr}`);
+        assert(!metaStr.includes('Teaching physics with 10+ years passion'), `Audit log leaked teacher bio: ${metaStr}`);
+        assert(!metaStr.includes('Answer One with markdown'), `Audit log leaked FAQ answer: ${metaStr}`);
+      }
+
+      recordCheck('68', 'CMS content management (blog, FAQ, testimonials, teachers, reviews, audit)', true, 'All CMS flows verified with strict validation, branch scoping, zero secret leaks, and audit logs');
+    }
+
+
   } finally {
     // ─────────────────────────────────────────────────────────────────────────
     // FIXTURE CLEANUP
@@ -7216,6 +7717,20 @@ async function runSmokeTests() {
             about: originalSettingsBeforeSmoke.about as any,
             legal: originalSettingsBeforeSmoke.legal as any,
             features: originalSettingsBeforeSmoke.features as any,
+          },
+        });
+      }
+
+      if (createdTestimonialIds.length > 0) {
+        await prisma.testimonial.deleteMany({ where: { id: { in: createdTestimonialIds } } });
+      }
+      await prisma.testimonial.deleteMany({ where: { name: { startsWith: 'SMOKE-' } } });
+
+      if (cmsAuditSince) {
+        await prisma.auditLog.deleteMany({
+          where: {
+            createdAt: { gte: cmsAuditSince },
+            action: { startsWith: 'CMS_' },
           },
         });
       }

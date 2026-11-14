@@ -161,7 +161,7 @@ async function run() {
     await prisma.paymentAllocation.deleteMany({ where: { payment: { studentId: { in: userIds } } } });
     await prisma.payment.deleteMany({ where: { studentId: { in: userIds } } });
     await prisma.feeCharge.deleteMany({ where: { studentId: { in: userIds } } });
-    await prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+    await prisma.auditLog.deleteMany({ where: { OR: [{ actorId: { in: userIds } }, { entityId: { in: userIds } }] } });
     await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   }

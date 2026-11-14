@@ -9,6 +9,7 @@ import {
 } from '../validators/public.validator';
 import { getCenterSettings } from '../services/settings.service';
 import { moneyToNumber } from '../utils/money';
+import { blogVisibleWhere, reviewVisibleWhere, msUntilNextScheduledPost } from '../utils/contentVisibility';
 
 // In-memory cache for GET /stats (5 minutes)
 interface CachedStats {
@@ -24,6 +25,10 @@ interface CachedStats {
 
 let cachedStats: CachedStats | null = null;
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+export function invalidateStatsCache() {
+  cachedStats = null;
+}
 
 /**
  * Formats a list of routine slots into a concise schedule summary.
@@ -146,7 +151,7 @@ export async function getPublicBatches(req: Request, res: Response) {
       by: ['batchId'],
       _avg: { rating: true },
       _count: { rating: true },
-      where: { batchId: { in: batchIds } },
+      where: { batchId: { in: batchIds }, ...reviewVisibleWhere },
     });
 
     const ratingMap = new Map<string, { avgRating: number; reviewCount: number }>();
@@ -292,7 +297,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
     // Load latest 10 reviews and rating breakdown
     const [latestReviews, reviewGroups, relatedBatches] = await Promise.all([
       prisma.review.findMany({
-        where: { batchId: batch.id },
+        where: { batchId: batch.id, ...reviewVisibleWhere },
         orderBy: { createdAt: 'desc' },
         take: 10,
         select: {
@@ -310,7 +315,7 @@ export async function getPublicBatchBySlug(req: Request, res: Response) {
       prisma.review.groupBy({
         by: ['rating'],
         _count: { rating: true },
-        where: { batchId: batch.id },
+        where: { batchId: batch.id, ...reviewVisibleWhere },
       }),
       prisma.batch.findMany({
         where: {
@@ -498,7 +503,7 @@ export async function getPublicStats(req: Request, res: Response) {
       }),
       prisma.user.count({ where: { role: Role.TEACHER, isPublicProfile: true } }),
       prisma.user.count({ where: { role: Role.STUDENT, enrollments: { some: { status: 'ACTIVE' } } } }),
-      prisma.review.aggregate({ _avg: { rating: true } }),
+      prisma.review.aggregate({ _avg: { rating: true }, where: reviewVisibleWhere }),
     ]);
 
     const statsData = {
@@ -623,13 +628,15 @@ export async function getPublicTeachers(req: Request, res: Response) {
         where,
         skip,
         take,
-        orderBy: { name: 'asc' },
+        orderBy: [{ publicOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }],
         select: {
           id: true,
           name: true,
           headline: true,
           bio: true,
           avatarUrl: true,
+          qualifications: true,
+          experienceYears: true,
           teachingBatches: {
             where: { isPublished: true },
             select: {
@@ -652,6 +659,8 @@ export async function getPublicTeachers(req: Request, res: Response) {
         headline: t.headline,
         bio: t.bio,
         avatarUrl: t.avatarUrl,
+        qualifications: t.qualifications,
+        experienceYears: t.experienceYears,
         subjects: subjectNames,
       };
     });
@@ -831,7 +840,7 @@ export async function getPublicSitemap(_req: Request, res: Response) {
       if (features.blog !== false) {
         const publishedPosts = await prisma.blogPost.findMany({
           where: {
-            isPublished: true,
+            ...blogVisibleWhere(),
             slug: { not: '' },
           },
           select: {
@@ -846,9 +855,12 @@ export async function getPublicSitemap(_req: Request, res: Response) {
     }
 
     const data = { batches, blogPosts };
+    // Cap the cache lifetime so a scheduled post appears at its publish time.
+    const untilNext = await msUntilNextScheduledPost();
+    const ttl = untilNext === null ? SITEMAP_CACHE_TTL_MS : Math.min(SITEMAP_CACHE_TTL_MS, untilNext + 50);
     cachedSitemap = {
       data,
-      expiresAt: now + SITEMAP_CACHE_TTL_MS,
+      expiresAt: now + ttl,
     };
 
     return res.status(200).json({

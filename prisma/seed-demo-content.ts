@@ -1153,9 +1153,9 @@ If you attend a 1.5-hour lecture on electromagnetism, your daily schedule must c
   for (const t of testimonialsData) {
     const existing = await prisma.testimonial.findFirst({ where: { name: t.name } });
     if (!existing) {
-      await prisma.testimonial.create({ data: t });
+      await prisma.testimonial.create({ data: { ...t, hasConsent: true, isPublished: true } });
     } else {
-      await prisma.testimonial.update({ where: { id: existing.id }, data: t });
+      await prisma.testimonial.update({ where: { id: existing.id }, data: { ...t, hasConsent: true, isPublished: true } });
     }
   }
   console.log(`Seeded ${testimonialsData.length} student testimonials.`);

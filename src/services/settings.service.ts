@@ -1,5 +1,11 @@
 import prisma from '../utils/prisma';
 import { Prisma } from '@prisma/client';
+import {
+  blogVisibleWhere,
+  faqVisibleWhere,
+  testimonialVisibleWhere,
+  msUntilNextScheduledPost,
+} from '../utils/contentVisibility';
 
 export interface CenterPublicData {
   name: string;
@@ -155,9 +161,9 @@ export async function getContentSummary(
   const [batchCount, teacherCount, blogCount, faqCount, testimonialCount] = await Promise.all([
     prisma.batch.count({ where: { isPublished: true } }),
     prisma.user.count({ where: { role: 'TEACHER', isPublicProfile: true, isActive: true } }),
-    prisma.blogPost.count({ where: { isPublished: true } }),
-    prisma.faqItem.count(),
-    prisma.testimonial.count(),
+    prisma.blogPost.count({ where: blogVisibleWhere() }),
+    prisma.faqItem.count({ where: faqVisibleWhere }),
+    prisma.testimonial.count({ where: testimonialVisibleWhere }),
   ]);
 
   const hasAbout = publicSiteOn && Boolean(
@@ -177,7 +183,9 @@ export async function getContentSummary(
   };
 
   cachedContent = summary;
-  contentCacheExpiry = now + CONTENT_CACHE_TTL_MS;
+  // Cap the cache so a scheduled post flips hasBlog at its publish time.
+  const untilNext = await msUntilNextScheduledPost();
+  contentCacheExpiry = now + (untilNext === null ? CONTENT_CACHE_TTL_MS : Math.min(CONTENT_CACHE_TTL_MS, untilNext + 50));
   return summary;
 }
 

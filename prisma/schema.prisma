@@ -218,6 +218,9 @@ model User {
   bio                  String?
   headline             String?
   isPublicProfile      Boolean                 @default(false)
+  qualifications       String?                 @db.VarChar(200)
+  experienceYears      Int?
+  publicOrder          Int                     @default(0)
   mustChangePassword   Boolean                 @default(false)
   isActive             Boolean                 @default(true)
   lastLoginAt          DateTime?
@@ -273,6 +276,7 @@ model User {
   @@index([studentCode])
   @@index([phone])
   @@index([isActive])
+  @@index([role, isPublicProfile, publicOrder])
 }
 
 model PasswordResetToken {
@@ -671,10 +675,15 @@ model Review {
   rating    Int
   comment   String?
   createdAt DateTime @default(now())
+  isHidden     Boolean   @default(false)
+  hiddenById   String?
+  hiddenReason String?   @db.VarChar(200)
+  hiddenAt     DateTime?
 
   @@unique([batchId, studentId])
   @@index([batchId])
   @@index([studentId])
+  @@index([batchId, isHidden])
 }
 
 model BlogPost {
@@ -690,6 +699,7 @@ model BlogPost {
   publishedAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  updatedById String?
 
   @@index([isPublished, publishedAt])
   @@index([category])
@@ -699,13 +709,19 @@ model Testimonial {
   id         String   @id @default(cuid())
   name       String
   roleTitle  String
-  content    String
+  content    String   @db.VarChar(500)
   avatarUrl  String?
   rating     Int      @default(5)
   isFeatured Boolean  @default(false)
   createdAt  DateTime @default(now())
+  isPublished Boolean  @default(true)
+  hasConsent  Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  updatedAt   DateTime @default(now()) @updatedAt
+  updatedById String?
 
   @@index([isFeatured])
+  @@index([isPublished, hasConsent, sortOrder])
 }
 
 model ContactMessage {
@@ -766,12 +782,16 @@ model NewsletterSubscriber {
 
 model FaqItem {
   id        String   @id @default(cuid())
-  question  String
-  answer    String
+  question  String   @db.VarChar(200)
+  answer    String   @db.VarChar(2000)
   category  String
   sortOrder Int      @default(0)
+  isPublished Boolean  @default(true)
+  updatedAt   DateTime @default(now()) @updatedAt
+  updatedById String?
 
   @@index([category, sortOrder])
+  @@index([isPublished, sortOrder])
 }
 
 model CenterSettings {

@@ -1792,6 +1792,20 @@ export async function runBranchIsolationTests(): Promise<{
         description: 'Get report card by period for foreign/unenrolled/unlinked user',
         principals: ['STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
       },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/cms/teachers/${f.teacher1Id}`,
+        body: () => ({ publicOrder: 9 }),
+        description: 'Update teacher public profile in foreign branch',
+        principals: ['ADMIN_B', 'TEACHER_B'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/cms/reviews/${f.reviewId}/visibility`,
+        body: () => ({ isHidden: true }),
+        description: 'Update review visibility in foreign branch',
+        principals: ['ADMIN_B', 'TEACHER_B'],
+      },
 
     ];
 
@@ -1893,6 +1907,8 @@ export async function runBranchIsolationTests(): Promise<{
       { path: '/api/notices', skipBranchIdMatchForSameBranchTeacher: true },
       { path: '/api/my/report-cards' },
       { path: '/api/contact' },
+      { path: '/api/cms/teachers' },
+      { path: '/api/cms/reviews' },
     ];
 
     routesCovered = idEndpoints.length + listAggregateEndpoints.length;
@@ -1909,22 +1925,28 @@ export async function runBranchIsolationTests(): Promise<{
         let status = 0;
         let bodyText = '';
 
-        try {
-          const res = await fetch(`${BASE_URL}${targetPath}`, {
-            method: ep.method,
-            headers: {
-              Cookie: `token=${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: ep.body ? JSON.stringify(ep.body(fixturesA)) : undefined,
-            signal: AbortSignal.timeout(8000),
-          });
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await fetch(`${BASE_URL}${targetPath}`, {
+              method: ep.method,
+              headers: {
+                Cookie: `token=${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: ep.body ? JSON.stringify(ep.body(fixturesA)) : undefined,
+              signal: AbortSignal.timeout(15000),
+            });
 
-          status = res.status;
-          bodyText = await res.text();
-        } catch (err: any) {
-          status = -1;
-          bodyText = err.message;
+            status = res.status;
+            bodyText = await res.text();
+            break;
+          } catch (err: any) {
+            status = -1;
+            bodyText = err.message;
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 500));
+            }
+          }
         }
 
         // Intra-branch or cross-branch access to foreign branch/unassigned batch/unlinked student

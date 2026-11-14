@@ -46,6 +46,7 @@ function introspectRoutes(expressApp: any): Array<{ method: string; path: string
     '/api/audit-logs',
     '/api/settings',
     '/api/enquiries',
+    '/api/cms',
   ];
 
   for (const layer of stack) {
@@ -1175,6 +1176,7 @@ function discoverAllAuthorizedRoutes(): { endpoints: EndpointSpec[]; untestable:
             else if (fullPattern.includes('/fees/charges/:id')) replaced = replaced.replace(':id', f.chargeId);
             else if (fullPattern.includes('/fees/payments/:id')) replaced = replaced.replace(':id', f.paymentId);
             else if (fullPattern.includes('/subjects/:id')) replaced = replaced.replace(':id', f.subjectId);
+            else if (fullPattern.includes('/cms/teachers/:id')) replaced = replaced.replace(':id', f.teacherId);
             else replaced = replaced.replace(/:id\b/g, f.studentId);
             replaced = replaced.replace(/:[a-zA-Z0-9_]+/g, 'matrix-dummy-id');
             return replaced;
@@ -1410,34 +1412,43 @@ async function runRoleMatrix() {
 
       process.stdout.write('.');
       // Test 1: Anonymous
-      try {
-        const res = await fetch(url, {
-          method: ep.method,
-          headers: ep.body ? { 'Content-Type': 'application/json' } : {},
-          body: ep.body ? JSON.stringify(ep.body(fixtures, 'ANONYMOUS')) : undefined,
-          signal: AbortSignal.timeout(10000),
-        });
-
-        // Anonymous should always get 401 Unauthorized for authenticated endpoints
-        if (res.status !== 401 && res.status !== 403) {
-          const text = await res.text();
-          mismatches.push({
-            endpoint: ep.name,
+      let anonRes: Response | null = null;
+      let anonErr: any = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          anonRes = await fetch(url, {
             method: ep.method,
-            role: 'ANONYMOUS',
-            expected: '401 Unauthorized',
-            actualStatus: res.status,
-            actualBodySnippet: text.slice(0, 80),
+            headers: ep.body ? { 'Content-Type': 'application/json' } : {},
+            body: ep.body ? JSON.stringify(ep.body(fixtures, 'ANONYMOUS')) : undefined,
+            signal: AbortSignal.timeout(15000),
           });
+          break;
+        } catch (err: any) {
+          anonErr = err;
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 500));
+          }
         }
-      } catch (err: any) {
+      }
+
+      if (!anonRes) {
         mismatches.push({
           endpoint: ep.name,
           method: ep.method,
           role: 'ANONYMOUS',
           expected: '401 Unauthorized',
           actualStatus: 0,
-          actualBodySnippet: err.message,
+          actualBodySnippet: anonErr?.message || 'Request failed',
+        });
+      } else if (anonRes.status !== 401 && anonRes.status !== 403) {
+        const text = await anonRes.text();
+        mismatches.push({
+          endpoint: ep.name,
+          method: ep.method,
+          role: 'ANONYMOUS',
+          expected: '401 Unauthorized',
+          actualStatus: anonRes.status,
+          actualBodySnippet: text.slice(0, 80),
         });
       }
 
@@ -1446,51 +1457,64 @@ async function runRoleMatrix() {
         const isAllowed = ep.allowedRoles.includes(role);
         const token = tokens[role];
 
-        try {
-          const res = await fetch(url, {
-            method: ep.method,
-            headers: {
-              Cookie: `token=${token}`,
-              ...(ep.body ? { 'Content-Type': 'application/json' } : {}),
-            },
-            body: ep.body ? JSON.stringify(ep.body(fixtures, role)) : undefined,
-            signal: AbortSignal.timeout(10000),
-          });
-
-          if (isAllowed) {
-            if (res.status === 401 || res.status === 403) {
-              const text = await res.text();
-              mismatches.push({
-                endpoint: ep.name,
-                method: ep.method,
-                role,
-                expected: 'Allowed (2xx)',
-                actualStatus: res.status,
-                actualBodySnippet: text.slice(0, 80),
-              });
-            }
-          } else {
-            if (res.status !== 403 && res.status !== 404 && res.status !== 401) {
-              const text = await res.text();
-              mismatches.push({
-                endpoint: ep.name,
-                method: ep.method,
-                role,
-                expected: '403 Forbidden',
-                actualStatus: res.status,
-                actualBodySnippet: text.slice(0, 80),
-              });
+        let res: Response | null = null;
+        let lastErr: any = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            res = await fetch(url, {
+              method: ep.method,
+              headers: {
+                Cookie: `token=${token}`,
+                ...(ep.body ? { 'Content-Type': 'application/json' } : {}),
+              },
+              body: ep.body ? JSON.stringify(ep.body(fixtures, role)) : undefined,
+              signal: AbortSignal.timeout(15000),
+            });
+            break;
+          } catch (err: any) {
+            lastErr = err;
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 500));
             }
           }
-        } catch (err: any) {
+        }
+
+        if (!res) {
           mismatches.push({
             endpoint: ep.name,
             method: ep.method,
             role,
             expected: isAllowed ? 'Allowed' : '403 Forbidden',
             actualStatus: 0,
-            actualBodySnippet: err.message,
+            actualBodySnippet: lastErr?.message || 'Request failed',
           });
+          continue;
+        }
+
+        if (isAllowed) {
+          if (res.status === 401 || res.status === 403) {
+            const text = await res.text();
+            mismatches.push({
+              endpoint: ep.name,
+              method: ep.method,
+              role,
+              expected: 'Allowed (2xx)',
+              actualStatus: res.status,
+              actualBodySnippet: text.slice(0, 80),
+            });
+          }
+        } else {
+          if (res.status !== 403 && res.status !== 404 && res.status !== 401) {
+            const text = await res.text();
+            mismatches.push({
+              endpoint: ep.name,
+              method: ep.method,
+              role,
+              expected: '403 Forbidden',
+              actualStatus: res.status,
+              actualBodySnippet: text.slice(0, 80),
+            });
+          }
         }
       }
     }

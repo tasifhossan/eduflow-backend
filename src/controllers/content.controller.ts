@@ -18,6 +18,12 @@ import {
   newsletterSubscribeSchema,
 } from '../validators/content.validator';
 import { normalizePhone } from '../utils/phone';
+import {
+  blogVisibleWhere,
+  faqVisibleWhere,
+  testimonialVisibleWhere,
+  reviewVisibleWhere,
+} from '../utils/contentVisibility';
 
 /**
  * Masks full name to show first name and last initial only (e.g., "Arif Hossain" -> "Arif H.").
@@ -50,7 +56,7 @@ export async function getBlogPosts(req: Request, res: Response) {
     const { skip, take } = parsePagination({ page, limit }, { defaultLimit: 9, maxLimit: 50 });
 
     const where: Prisma.BlogPostWhereInput = {
-      isPublished: true,
+      ...blogVisibleWhere(),
     };
 
     if (category) {
@@ -139,7 +145,7 @@ export async function getBlogPostBySlug(req: Request, res: Response) {
       },
     });
 
-    if (!post || !post.isPublished) {
+    if (!post || !post.isPublished || !post.publishedAt || post.publishedAt.getTime() > Date.now()) {
       return res.status(404).json({
         success: false,
         message: 'Blog post not found',
@@ -160,7 +166,7 @@ export async function getBlogPostBySlug(req: Request, res: Response) {
 
     let relatedPosts = await prisma.blogPost.findMany({
       where: {
-        isPublished: true,
+        ...blogVisibleWhere(),
         id: { not: post.id },
         category: { equals: post.category, mode: 'insensitive' },
       },
@@ -176,7 +182,7 @@ export async function getBlogPostBySlug(req: Request, res: Response) {
       const excludedIds = [post.id, ...relatedPosts.map((p) => p.id)];
       const fallbackPosts = await prisma.blogPost.findMany({
         where: {
-          isPublished: true,
+          ...blogVisibleWhere(),
           id: { notIn: excludedIds },
         },
         take: 3 - relatedPosts.length,
@@ -212,8 +218,10 @@ export async function getBlogPostBySlug(req: Request, res: Response) {
 export async function getTestimonials(req: Request, res: Response) {
   try {
     const testimonials = await prisma.testimonial.findMany({
+      where: testimonialVisibleWhere,
       orderBy: [
         { isFeatured: 'desc' },
+        { sortOrder: 'asc' },
         { createdAt: 'desc' },
       ],
       select: {
@@ -257,14 +265,14 @@ export async function getFaqItems(req: Request, res: Response) {
     }
 
     const { category } = parseResult.data;
-    const where: Prisma.FaqItemWhereInput = {};
+    const where: Prisma.FaqItemWhereInput = { ...faqVisibleWhere };
     if (category) {
       where.category = { equals: category, mode: 'insensitive' };
     }
 
     const items = await prisma.faqItem.findMany({
       where,
-      orderBy: { sortOrder: 'asc' },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       select: {
         id: true,
         question: true,
@@ -316,9 +324,9 @@ export async function getBatchReviews(req: Request, res: Response) {
     const { skip, take } = parsePagination({ page, limit }, { defaultLimit: 10, maxLimit: 50 });
 
     const [total, reviews] = await Promise.all([
-      prisma.review.count({ where: { batchId } }),
+      prisma.review.count({ where: { batchId, ...reviewVisibleWhere } }),
       prisma.review.findMany({
-        where: { batchId },
+        where: { batchId, ...reviewVisibleWhere },
         skip,
         take,
         orderBy: { createdAt: 'desc' },

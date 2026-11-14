@@ -1,8 +1,21 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcrypt';
-import { Prisma } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import prisma from '../utils/prisma';
+import { createAuditLog } from '../utils/audit';
+import { checkCloudinaryImageUrl, changedFields } from '../utils/contentSanitize';
+import { teacherProfileFields } from '../validators/cms.validator';
+import { invalidateContentCaches } from '../utils/contentCaches';
+
+// Fields a TEACHER may edit about their own public profile (never isPublicProfile / publicOrder).
+const teacherSelfSchema = z.object({
+  headline: teacherProfileFields.headline.optional(),
+  bio: teacherProfileFields.bio.optional(),
+  avatarUrl: teacherProfileFields.avatarUrl.optional(),
+  qualifications: teacherProfileFields.qualifications.optional(),
+  experienceYears: teacherProfileFields.experienceYears.optional(),
+});
 
 export const updateProfileSchema = z.object({
   name: z.string().trim().min(1, 'Name cannot be empty').optional(),
@@ -44,6 +57,8 @@ export async function getProfile(req: Request, res: Response) {
         avatarUrl: true,
         bio: true,
         headline: true,
+        qualifications: true,
+        experienceYears: true,
         notifyByEmail: true,
         createdAt: true,
       },
@@ -101,6 +116,55 @@ export async function updateProfile(req: Request, res: Response) {
     if (headline !== undefined) updateData.headline = headline;
     if (notifyByEmail !== undefined) updateData.notifyByEmail = notifyByEmail;
 
+    // TEACHER public-profile fields: plain text only, Cloudinary avatar, never isPublicProfile/publicOrder.
+    let teacherChangedFields: string[] = [];
+    if (req.user.role === Role.TEACHER) {
+      const publicInput: Record<string, unknown> = {};
+      for (const key of ['headline', 'bio', 'avatarUrl', 'qualifications', 'experienceYears'] as const) {
+        if (req.body && Object.prototype.hasOwnProperty.call(req.body, key)) {
+          publicInput[key] = key === 'avatarUrl' && req.body[key] === '' ? null : req.body[key];
+        }
+      }
+      const teacherParse = teacherSelfSchema.safeParse(publicInput);
+      if (!teacherParse.success) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          data: teacherParse.error.flatten(),
+        });
+      }
+      const current = await prisma.user.findUnique({
+        where: { id: req.user.userId },
+        select: {
+          headline: true,
+          bio: true,
+          avatarUrl: true,
+          qualifications: true,
+          experienceYears: true,
+        },
+      });
+      const t = teacherParse.data;
+      if (t.avatarUrl && t.avatarUrl !== current?.avatarUrl) {
+        const reason = checkCloudinaryImageUrl(t.avatarUrl);
+        if (reason) {
+          return res.status(400).json({
+            success: false,
+            message: 'Validation failed',
+            data: { fieldErrors: { avatarUrl: [reason] } },
+          });
+        }
+      }
+      if (t.qualifications !== undefined) updateData.qualifications = t.qualifications;
+      if (t.experienceYears !== undefined) updateData.experienceYears = t.experienceYears;
+      teacherChangedFields = changedFields(current ?? {}, {
+        headline: t.headline,
+        bio: t.bio,
+        avatarUrl: t.avatarUrl,
+        qualifications: t.qualifications,
+        experienceYears: t.experienceYears,
+      });
+    }
+
     const updatedUser = await prisma.user.update({
       where: { id: req.user.userId },
       data: updateData,
@@ -115,10 +179,25 @@ export async function updateProfile(req: Request, res: Response) {
         avatarUrl: true,
         bio: true,
         headline: true,
+        qualifications: true,
+        experienceYears: true,
         notifyByEmail: true,
         createdAt: true,
       },
     });
+
+    if (teacherChangedFields.length > 0) {
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'TEACHER_PROFILE_SELF_UPDATED',
+        entityType: 'User',
+        entityId: req.user.userId,
+        branchId: req.user.branchId,
+        metadata: { fields: teacherChangedFields },
+        ip: req.ip,
+      });
+      invalidateContentCaches();
+    }
 
     return res.status(200).json({
       success: true,

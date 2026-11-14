@@ -317,6 +317,10 @@ export async function getTablePayments(req: Request, res: Response) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
+    if (req.user.role === Role.TEACHER) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Teachers cannot access payment records' });
+    }
+
     const parseResult = paymentTableQuerySchema.safeParse(req.query);
     if (!parseResult.success) {
       return res.status(400).json({
@@ -347,19 +351,6 @@ export async function getTablePayments(req: Request, res: Response) {
     } else if (req.user.role === Role.SUPER_ADMIN) {
       const targetBranch = branchId || req.effectiveBranchId;
       if (targetBranch) where.branchId = targetBranch;
-    } else if (req.user.role === Role.TEACHER) {
-      where.branchId = req.user.branchId;
-      where.AND = [
-        {
-          allocations: {
-            some: {
-              charge: {
-                batch: { teacherId: req.user.userId },
-              },
-            },
-          },
-        },
-      ];
     } else {
       // ADMIN, ACCOUNTANT
       where.branchId = req.user.branchId;
@@ -495,6 +486,10 @@ export async function getTableAttendance(req: Request, res: Response) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
+    if (req.user.role === Role.ACCOUNTANT) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Accountants cannot access attendance records' });
+    }
+
     const parseResult = attendanceTableQuerySchema.safeParse(req.query);
     if (!parseResult.success) {
       return res.status(400).json({
@@ -587,6 +582,10 @@ export async function getTableResults(req: Request, res: Response) {
   try {
     if (!req.user) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    if (req.user.role === Role.ACCOUNTANT) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Accountants cannot access exam results' });
     }
 
     const parseResult = resultTableQuerySchema.safeParse(req.query);
@@ -696,6 +695,10 @@ export async function getTableEnrollments(req: Request, res: Response) {
   try {
     if (!req.user) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    if (req.user.role === Role.ACCOUNTANT) {
+      return res.status(403).json({ success: false, message: 'Forbidden: Accountants cannot access enrollment records' });
     }
 
     const parseResult = enrollmentTableQuerySchema.safeParse(req.query);

@@ -7,6 +7,6 @@ const router = Router();
 
 router.get('/', authenticate, authorize(Role.ADMIN, Role.TEACHER), getChapters);
 router.post('/', authenticate, authorize(Role.ADMIN), createChapter);
-router.patch('/:id', authenticate, authorize(Role.ADMIN), updateChapter);
+router.patch('/:id', authenticate, authorize(Role.SUPER_ADMIN), updateChapter);
 
 export default router;

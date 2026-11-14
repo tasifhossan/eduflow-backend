@@ -451,20 +451,105 @@ export async function recordPayment(req: Request, res: Response) {
     }
 
     const settings = await getCenterSettings();
+    const branch = await prisma.branch.findUnique({
+      where: { id: branchId },
+      select: { code: true },
+    });
+    const branchCode = branch?.code || 'BR';
     const effectiveReceivedAt = receivedAt ? new Date(receivedAt) : new Date();
     const todayStr = FeeLedgerService.getTodayInTimezone(settings.timezone);
+    const { fullYear, yy } = FeeLedgerService.getYearInTimezone(effectiveReceivedAt, settings.timezone);
 
-    // Execute creation inside a locked transaction
+    // Pre-read open charges and plan allocations before entering the transaction
+    const mode = allocation?.mode || 'AUTO';
+    const plannedAllocations: Array<{ chargeId: string; amount: Prisma.Decimal }> = [];
+
+    if (mode === 'AUTO') {
+      const openCharges = await prisma.feeCharge.findMany({
+        where: {
+          studentId,
+          status: 'ACTIVE',
+          ...(allocation?.batchId ? { batchId: allocation.batchId } : {}),
+        },
+        include: {
+          adjustments: true,
+          allocations: {
+            include: { payment: { select: { reversal: true } } },
+          },
+        },
+        orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+      });
+
+      let remainingAmount = paymentAmount;
+      for (const ch of openCharges) {
+        if (remainingAmount.lte(0)) break;
+        const balDetails = FeeLedgerService.deriveChargeStatus(ch, todayStr);
+        if (balDetails.balance.gt(0)) {
+          const toAlloc = Prisma.Decimal.min(remainingAmount, balDetails.balance);
+          plannedAllocations.push({ chargeId: ch.id, amount: toAlloc });
+          remainingAmount = remainingAmount.sub(toAlloc);
+        }
+      }
+    } else if (mode === 'MANUAL') {
+      const items = allocation?.items || [];
+      let manualTotal = new Prisma.Decimal(0);
+      const chargeIds = items.map((it) => it.chargeId);
+
+      const openCharges = await prisma.feeCharge.findMany({
+        where: {
+          id: { in: chargeIds },
+          studentId,
+          status: 'ACTIVE',
+        },
+        include: {
+          adjustments: true,
+          allocations: {
+            include: { payment: { select: { reversal: true } } },
+          },
+        },
+      });
+
+      const chargeMap = new Map(openCharges.map((c) => [c.id, c]));
+
+      for (const it of items) {
+        const allocAmt = roundMoney(it.amount);
+        manualTotal = manualTotal.add(allocAmt);
+        const ch = chargeMap.get(it.chargeId);
+        if (!ch) {
+          return res.status(400).json({ success: false, message: `Invalid charge ID: ${it.chargeId}` });
+        }
+        const balDetails = FeeLedgerService.deriveChargeStatus(ch, todayStr);
+        if (allocAmt.gt(balDetails.balance)) {
+          return res.status(400).json({
+            success: false,
+            message: `Allocation amount ${allocAmt.toFixed(2)} exceeds charge ${it.chargeId} balance ${balDetails.balance.toFixed(2)}`,
+          });
+        }
+        plannedAllocations.push({ chargeId: ch.id, amount: allocAmt });
+      }
+
+      if (manualTotal.gt(paymentAmount)) {
+        return res.status(400).json({
+          success: false,
+          message: `Total manual allocations (${manualTotal.toFixed(2)}) cannot exceed payment amount (${paymentAmount.toFixed(2)})`,
+        });
+      }
+    }
+
+    // Execute minimal write transaction with default 5s timeout
     const createdPayment = await runTimedTransaction(
       'fee.recordPayment',
       async (tx) => {
-        // 1. Generate receipt number with lock on ReceiptSequence
-        const receiptNumber = await FeeLedgerService.generateReceiptNumber(
-          branchId,
-          effectiveReceivedAt,
-          settings.timezone,
-          tx
-        );
+        // 1. Single atomic sequence increment RETURNING lastNumber
+        const seqResult = await tx.$queryRaw<Array<{ lastNumber: number }>>`
+          INSERT INTO "ReceiptSequence" ("id", "branchId", "year", "lastNumber")
+          VALUES (concat('seq_', md5(random()::text || clock_timestamp()::text)), ${branchId}, ${fullYear}, 1)
+          ON CONFLICT ("branchId", "year")
+          DO UPDATE SET "lastNumber" = "ReceiptSequence"."lastNumber" + 1
+          RETURNING "lastNumber"
+        `;
+        const nextNumber = seqResult[0]?.lastNumber || 1;
+        const receiptNumber = `${branchCode}-${yy}-${String(nextNumber).padStart(6, '0')}`;
 
         // 2. Insert Payment
         const payment = await tx.payment.create({
@@ -483,96 +568,42 @@ export async function recordPayment(req: Request, res: Response) {
           },
         });
 
-        // 3. Handle Allocation (AUTO vs MANUAL)
-        const mode = allocation?.mode || 'AUTO';
-        let remainingAmount = paymentAmount;
-        const createdAllocations: Array<{ chargeId: string; amount: Prisma.Decimal }> = [];
+        // 3. Batch insert allocations
+        if (plannedAllocations.length > 0) {
+          await tx.paymentAllocation.createMany({
+            data: plannedAllocations.map((a) => ({
+              branchId,
+              paymentId: payment.id,
+              chargeId: a.chargeId,
+              amount: a.amount,
+            })),
+          });
 
-        if (mode === 'AUTO') {
-          // Find open active charges for this student
-          const openCharges = await tx.feeCharge.findMany({
-            where: {
-              studentId,
-              status: 'ACTIVE',
-              ...(allocation?.batchId ? { batchId: allocation.batchId } : {}),
-            },
+          // 4. Single verification query to ensure charge balances are not over-allocated
+          const allocatedChargeIds = plannedAllocations.map((a) => a.chargeId);
+          const recheckedCharges = await tx.feeCharge.findMany({
+            where: { id: { in: allocatedChargeIds } },
             include: {
               adjustments: true,
               allocations: {
                 include: { payment: { select: { reversal: true } } },
               },
             },
-            orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
           });
 
-          for (const ch of openCharges) {
-            if (remainingAmount.lte(0)) break;
-            const balDetails = FeeLedgerService.deriveChargeStatus(ch, todayStr);
-            if (balDetails.balance.gt(0)) {
-              const toAlloc = Prisma.Decimal.min(remainingAmount, balDetails.balance);
-              await tx.paymentAllocation.create({
-                data: {
-                  branchId,
-                  paymentId: payment.id,
-                  chargeId: ch.id,
-                  amount: toAlloc,
-                },
-              });
-              createdAllocations.push({ chargeId: ch.id, amount: toAlloc });
-              remainingAmount = remainingAmount.sub(toAlloc);
+          for (const ch of recheckedCharges) {
+            const bal = FeeLedgerService.deriveChargeStatus(ch, todayStr);
+            if (bal.balance.lt(0)) {
+              throw new Error(`Charge ${ch.id} balance over-allocated (${bal.balance.toFixed(2)})`);
             }
-          }
-        } else if (mode === 'MANUAL') {
-          const items = allocation?.items || [];
-          let manualTotal = new Prisma.Decimal(0);
-
-          for (const it of items) {
-            const allocAmt = roundMoney(it.amount);
-            manualTotal = manualTotal.add(allocAmt);
-
-            const ch = await tx.feeCharge.findUnique({
-              where: { id: it.chargeId },
-              include: {
-                adjustments: true,
-                allocations: {
-                  include: { payment: { select: { reversal: true } } },
-                },
-              },
-            });
-
-            if (!ch || ch.status === 'VOID' || ch.studentId !== studentId) {
-              throw new Error(`Invalid charge ID: ${it.chargeId}`);
-            }
-
-            const balDetails = FeeLedgerService.deriveChargeStatus(ch, todayStr);
-            if (allocAmt.gt(balDetails.balance)) {
-              throw new Error(
-                `Allocation amount ${allocAmt.toFixed(2)} exceeds charge ${it.chargeId} balance ${balDetails.balance.toFixed(2)}`
-              );
-            }
-
-            await tx.paymentAllocation.create({
-              data: {
-                branchId,
-                paymentId: payment.id,
-                chargeId: ch.id,
-                amount: allocAmt,
-              },
-            });
-            createdAllocations.push({ chargeId: ch.id, amount: allocAmt });
-          }
-
-          if (manualTotal.gt(paymentAmount)) {
-            throw new Error(`Total manual allocations (${manualTotal.toFixed(2)}) cannot exceed payment amount (${paymentAmount.toFixed(2)})`);
           }
         }
 
         return {
           payment,
-          allocations: createdAllocations,
+          allocations: plannedAllocations,
         };
-      },
-      { timeout: 20000, maxWait: 10000 }
+      }
     );
 
     // Audit log
@@ -1309,6 +1340,8 @@ export async function createInstallments(req: Request, res: Response) {
     const settings = await getCenterSettings();
     const baseDate = new Date(firstDueDate);
 
+    const studentCredit = await FeeLedgerService.getStudentCredit(studentId);
+
     const createdCharges = await runTimedTransaction(
       'fee.createInstallments',
       async (tx) => {
@@ -1337,13 +1370,15 @@ export async function createInstallments(req: Request, res: Response) {
           data: installmentRows,
         });
 
-        // Apply any available credit
-        for (const ch of inserted) {
-          await FeeLedgerService.applyAvailableCreditToCharge(studentId, ch.id, tx, settings.timezone);
+        // Apply credit only if student has available credit
+        if (studentCredit.gt(0)) {
+          for (const ch of inserted) {
+            await FeeLedgerService.applyAvailableCreditToCharge(studentId, ch.id, tx, settings.timezone);
+          }
         }
         return inserted;
       },
-      { timeout: 30000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 10000 }
     );
 
     // Audit log
@@ -1448,6 +1483,26 @@ export async function generateDues(req: Request, res: Response) {
     const created: any[] = [];
     const skipped: any[] = [];
 
+    // Pre-check existing tuition charges in ONE batch query
+    const enrollmentIds = enrollments.map((e) => e.id);
+    const existingCharges = await prisma.feeCharge.findMany({
+      where: {
+        enrollmentId: { in: enrollmentIds },
+        kind: 'TUITION',
+        period: month,
+        status: 'ACTIVE',
+      },
+      select: { enrollmentId: true },
+    });
+    const existingSet = new Set(existingCharges.map((c) => c.enrollmentId));
+
+    const toCreate: Array<{
+      enr: (typeof enrollments)[0];
+      baseFee: Prisma.Decimal;
+      discountAmount: Prisma.Decimal;
+      effectiveFee: Prisma.Decimal;
+    }> = [];
+
     for (const enr of enrollments) {
       // Base fee
       const baseFee = enr.customFeeAmount !== null ? roundMoney(enr.customFeeAmount) : roundMoney(enr.batch.feeAmount);
@@ -1473,16 +1528,7 @@ export async function generateDues(req: Request, res: Response) {
       }
 
       // Check if tuition charge already exists
-      const existing = await prisma.feeCharge.findFirst({
-        where: {
-          enrollmentId: enr.id,
-          kind: 'TUITION',
-          period: month,
-          status: 'ACTIVE',
-        },
-      });
-
-      if (existing) {
+      if (existingSet.has(enr.id)) {
         skipped.push({
           enrollmentId: enr.id,
           studentId: enr.student.id,
@@ -1504,62 +1550,104 @@ export async function generateDues(req: Request, res: Response) {
           netAmount: formatMoney(effectiveFee),
         });
       } else {
-        try {
-          await runTimedTransaction('fee.generateDues', async (tx) => {
-            const ch = await tx.feeCharge.create({
-              data: {
-                branchId: enr.batch.branchId,
-                studentId: enr.student.id,
-                batchId: enr.batch.id,
-                enrollmentId: enr.id,
-                kind: 'TUITION',
-                period: month,
-                description: `Monthly Tuition Fee - ${month}`,
-                amount: baseFee,
-                dueDate,
-                source: 'GENERATED',
-                status: 'ACTIVE',
-                createdById: req.user!.userId,
-              },
-            });
+        toCreate.push({ enr, baseFee, discountAmount, effectiveFee });
+      }
+    }
 
-            // Store discount adjustment if applicable
-            if (discountAmount.gt(0)) {
-              await tx.feeAdjustment.create({
-                data: {
-                  branchId: enr.batch.branchId,
-                  chargeId: ch.id,
-                  type: 'DISCOUNT',
-                  amount: discountAmount,
-                  reason: 'Enrollment discount',
-                  status: 'ACTIVE',
-                  createdById: req.user!.userId,
-                },
-              });
-            }
+    if (!dryRun && toCreate.length > 0) {
+      // Pre-check student credits in a single query before entering the transaction
+      const studentIds = Array.from(new Set(toCreate.map((i) => i.enr.student.id)));
+      const paymentsWithCredit = await prisma.payment.findMany({
+        where: {
+          studentId: { in: studentIds },
+          reversal: null,
+        },
+        select: {
+          studentId: true,
+          amount: true,
+          allocations: { select: { amount: true } },
+        },
+      });
 
-            // Auto-apply student credit
-            await FeeLedgerService.applyAvailableCreditToCharge(enr.student.id, ch.id, tx, settings.timezone);
-
-            created.push({
-              chargeId: ch.id,
-              studentId: enr.student.id,
-              studentName: enr.student.name,
-              amount: formatMoney(baseFee),
-              effectiveAmount: formatMoney(effectiveFee),
-            });
-          }, { timeout: 30000, maxWait: 15000 });
-        } catch (txErr: any) {
-          console.error('generateDues enrollment transaction error:', txErr);
-          skipped.push({
-            enrollmentId: enr.id,
-            studentId: enr.student.id,
-            studentName: enr.student.name,
-            batchId: enr.batch.id,
-            reason: txErr.message || 'Error creating charge',
-          });
+      const studentsWithCredit = new Set<string>();
+      for (const p of paymentsWithCredit) {
+        let rem = p.amount;
+        for (const a of p.allocations) {
+          rem = rem.sub(a.amount);
+        }
+        if (rem.gt(0)) {
+          studentsWithCredit.add(p.studentId);
         }
       }
+
+      await runTimedTransaction('fee.generateDues', async (tx) => {
+        const chargeRows = toCreate.map(({ enr, baseFee }) => ({
+          branchId: enr.batch.branchId,
+          studentId: enr.student.id,
+          batchId: enr.batch.id,
+          enrollmentId: enr.id,
+          kind: 'TUITION' as const,
+          period: month,
+          description: `Monthly Tuition Fee - ${month}`,
+          amount: baseFee,
+          dueDate,
+          source: 'GENERATED' as const,
+          status: 'ACTIVE' as const,
+          createdById: req.user!.userId,
+        }));
+
+        const insertedCharges = await tx.feeCharge.createManyAndReturn({
+          data: chargeRows,
+        });
+
+        const chargeByEnrollment = new Map(insertedCharges.map((c) => [c.enrollmentId, c]));
+        const discountAdjustments: any[] = [];
+
+        for (const item of toCreate) {
+          const ch = chargeByEnrollment.get(item.enr.id);
+          if (!ch) continue;
+
+          if (item.discountAmount.gt(0)) {
+            discountAdjustments.push({
+              branchId: item.enr.batch.branchId,
+              chargeId: ch.id,
+              type: 'DISCOUNT' as const,
+              amount: item.discountAmount,
+              reason: 'Enrollment discount',
+              status: 'ACTIVE' as const,
+              createdById: req.user!.userId,
+            });
+          }
+
+          created.push({
+            chargeId: ch.id,
+            studentId: item.enr.student.id,
+            studentName: item.enr.student.name,
+            amount: formatMoney(item.baseFee),
+            effectiveAmount: formatMoney(item.effectiveFee),
+          });
+        }
+
+        if (discountAdjustments.length > 0) {
+          await tx.feeAdjustment.createMany({
+            data: discountAdjustments,
+          });
+        }
+
+        // Apply available credits only if any of the students have positive credit
+        if (studentsWithCredit.size > 0) {
+          for (const item of toCreate) {
+            if (studentsWithCredit.has(item.enr.student.id)) {
+              const ch = chargeByEnrollment.get(item.enr.id);
+              if (ch) {
+                await FeeLedgerService.applyAvailableCreditToCharge(item.enr.student.id, ch.id, tx, settings.timezone);
+              }
+            }
+          }
+        }
+      },
+      { timeout: 15000, maxWait: 10000 }
+      );
     }
 
     if (!dryRun) {

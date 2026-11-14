@@ -38,7 +38,22 @@ export async function getSignedUploadParams(req: Request, res: Response) {
     let allowedFormats: string | undefined;
     let maxBytes: number | undefined;
 
-    if (purpose === 'material') {
+    if (purpose === 'content') {
+      // Public website assets (blog cover, teacher avatar, testimonial photo)
+      if (
+        userRole !== Role.ADMIN &&
+        userRole !== Role.SUPER_ADMIN &&
+        userRole !== Role.TEACHER
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You do not have permission to upload website content assets',
+        });
+      }
+      folder = `eduflow/content/${req.user.userId}`;
+      allowedFormats = 'png,jpg,jpeg,webp';
+      maxBytes = 2 * 1024 * 1024;
+    } else if (purpose === 'material') {
       if (userRole === Role.STUDENT || userRole === Role.GUARDIAN) {
         return res.status(403).json({
           success: false,

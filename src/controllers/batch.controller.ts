@@ -185,6 +185,24 @@ export async function getBatches(req: Request, res: Response) {
 
     const takeLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
 
+    if (req.user.role === Role.ACCOUNTANT) {
+      const batches = await prisma.batch.findMany({
+        where: whereClause,
+        ...(takeLimit && !isNaN(takeLimit) && takeLimit > 0 ? { take: takeLimit } : {}),
+        select: {
+          id: true,
+          name: true,
+        },
+        orderBy: { name: 'asc' },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Batches retrieved successfully',
+        data: batches,
+      });
+    }
+
     const batches = await prisma.batch.findMany({
       where: whereClause,
       ...(takeLimit && !isNaN(takeLimit) && takeLimit > 0 ? { take: takeLimit } : {}),

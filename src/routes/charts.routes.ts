@@ -17,10 +17,10 @@ const router = Router();
 
 router.use(authenticate);
 
-// 1. Revenue monthly (ADMIN, TEACHER, SUPER_ADMIN)
+// 1. Revenue monthly (ADMIN, SUPER_ADMIN)
 router.get(
   ['/revenue-monthly', '/charts/revenue-monthly'],
-  authorize(Role.ADMIN, Role.TEACHER, Role.SUPER_ADMIN),
+  authorize(Role.ADMIN, Role.SUPER_ADMIN),
   branchScope,
   getRevenueMonthlyChart
 );

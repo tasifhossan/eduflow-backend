@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import { Role } from '@prisma/client';
 import prisma from '../utils/prisma';
 import { createAuditLog } from '../utils/audit';
 
@@ -115,6 +116,13 @@ export async function updateSubject(req: Request, res: Response) {
       return res.status(401).json({
         success: false,
         message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    if (req.user.role !== Role.SUPER_ADMIN) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only SUPER_ADMIN can edit or rename subjects',
       });
     }
 

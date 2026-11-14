@@ -36,6 +36,7 @@ import meRouter from './routes/me.routes';
 import aiRouter from './routes/ai.routes';
 import auditRouter from './routes/audit.routes';
 import settingsRouter from './routes/settings.routes';
+import cmsRouter from './routes/cms.routes';
 import { requireFeature } from './middleware/featureFlag.middleware';
 import { noCache } from './middleware/noCache.middleware';
 import { authenticate } from './middleware/auth.middleware';
@@ -184,6 +185,7 @@ app.use('/api', practiceRouter);
 app.use('/api/ai', requireFeature('aiAssistant'), aiRouter);
 app.use('/api/audit-logs', auditRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/cms', cmsRouter);
 app.get('/api/online-classes', authenticate, requireFeature('onlineClasses'), (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, message: 'Online classes feature active', data: [] });
 });

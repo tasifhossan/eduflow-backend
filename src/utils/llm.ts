@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import Groq from 'groq-sdk';
 import crypto from 'crypto';
 import env from '../config/env';
 
@@ -48,6 +49,17 @@ export interface CallLLMOptions {
   maxTokens?: number;
   temperature?: number;
   isChat?: boolean;
+  task?: 'chat' | 'insights' | 'practice_explanation' | 'fast_text';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Banglish & Multilingual Detection Heuristics
+// ─────────────────────────────────────────────────────────────────────────────
+export const BANGLISH_REGEX =
+  /\b(koto|keno|kivabe|korbo|bujhiye|dao|ache|achen|er|gula|gulo|hobe|parbo|ki|vai|bhai|bhaiya|apu|apni|tumi|shuru|admission|vorti|bhorti)\b/i;
+
+export function hasBengaliOrBanglish(text: string): boolean {
+  return /[\u0980-\u09FF]/.test(text) || BANGLISH_REGEX.test(text);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +180,7 @@ function setInChatCache(key: string, response: string): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Role Mapping & Alternation
+// Role Mapping & Alternation for Gemini
 // ─────────────────────────────────────────────────────────────────────────────
 function formatMessages(
   messages: LLMMessage[]
@@ -219,6 +231,7 @@ function classifyError(error: unknown): LLMError {
     status === 429 ||
     err?.code === 429 ||
     err?.code === 'RESOURCE_EXHAUSTED' ||
+    err?.code === 'rate_limit_exceeded' ||
     lowerMsg.includes('429') ||
     lowerMsg.includes('resource_exhausted') ||
     lowerMsg.includes('quota exceeded') ||
@@ -255,13 +268,18 @@ function classifyError(error: unknown): LLMError {
     lowerMsg.includes('invalid model') ||
     lowerMsg.includes('models/')
   ) {
-    return new LLMUnavailableError(`Configured LLM model is not available or rejected by provider: ${message}`, error);
+    return new LLMUnavailableError(
+      `Configured LLM model is not available or rejected by provider: ${message}`,
+      error
+    );
   }
 
   return new LLMUnavailableError(message || 'Failed to communicate with LLM provider', error);
 }
 
-// Client factory or getter
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider Clients
+// ─────────────────────────────────────────────────────────────────────────────
 let stubClient: any = null;
 
 export function setStubClient(client: any): void {
@@ -293,9 +311,173 @@ function getGeminiClient(): GoogleGenAI {
   });
 }
 
+let groqClientInstance: Groq | null = null;
+
+function getGroqClient(): Groq | null {
+  const apiKey = env.GROQ_API_KEY?.trim();
+  if (!apiKey) return null;
+  if (!groqClientInstance) {
+    groqClientInstance = new Groq({ apiKey });
+  }
+  return groqClientInstance;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct Provider Invocations
+// ─────────────────────────────────────────────────────────────────────────────
+async function callGeminiDirect(model: string, options: CallLLMOptions): Promise<string> {
+  const isChat = options.isChat ?? true;
+  const client = getGeminiClient();
+  checkAndIncrementDailyLimit();
+
+  const contents = formatMessages(options.messages);
+  const maxOutputTokens = options.maxTokens ?? (isChat ? 600 : 800);
+  const temperature = options.temperature ?? (isChat ? 0.3 : 0.2);
+
+  const config: any = {
+    abortSignal: AbortSignal.timeout(30000),
+    httpOptions: { timeout: 30000 },
+    maxOutputTokens,
+    temperature,
+  };
+
+  if (options.systemPrompt) {
+    config.systemInstruction = options.systemPrompt;
+  }
+
+  const response = await concurrencyLimiter.run(async () => {
+    return await client.models.generateContent({
+      model,
+      contents,
+      config,
+    });
+  });
+
+  const candidate = response.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+
+  if (
+    finishReason === 'SAFETY' ||
+    finishReason === 'BLOCKLIST' ||
+    finishReason === 'PROHIBITED_CONTENT' ||
+    finishReason === 'SPII' ||
+    finishReason === 'IMAGE_SAFETY' ||
+    response.promptFeedback?.blockReason
+  ) {
+    throw new LLMBlockedError(
+      `Generation blocked by content safety filters: ${finishReason || response.promptFeedback?.blockReason || 'SAFETY'}`
+    );
+  }
+
+  const text = response.text?.trim();
+  if (!text) {
+    if (finishReason === 'MAX_TOKENS') {
+      throw new LLMUnavailableError('Model reached token limit without producing output');
+    }
+    throw new LLMUnavailableError('Model returned empty response');
+  }
+
+  return text;
+}
+
+async function callGroqDirect(model: string, options: CallLLMOptions): Promise<string> {
+  const groq = getGroqClient();
+  if (!groq) {
+    throw new LLMUnavailableError('GROQ_API_KEY is not configured');
+  }
+
+  const groqMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+  if (options.systemPrompt) {
+    groqMessages.push({ role: 'system', content: options.systemPrompt });
+  }
+  for (const m of options.messages) {
+    groqMessages.push({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+    });
+  }
+
+  const completion = await groq.chat.completions.create({
+    messages: groqMessages,
+    model,
+    max_tokens: options.maxTokens ?? (options.isChat ? 600 : 800),
+    temperature: options.temperature ?? (options.isChat ? 0.3 : 0.2),
+  });
+
+  const text = completion.choices[0]?.message?.content?.trim();
+  if (!text) {
+    throw new LLMUnavailableError('Groq returned empty response');
+  }
+
+  return text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Router & Fallback Coordinator
+// ─────────────────────────────────────────────────────────────────────────────
+interface RouteTarget {
+  provider: 'gemini' | 'groq';
+  model: string;
+}
+
+interface RouteDecision {
+  primary: RouteTarget;
+  fallback?: RouteTarget;
+}
+
+function resolveRoute(options: CallLLMOptions): RouteDecision {
+  const hasGroq = Boolean(env.GROQ_API_KEY?.trim());
+  const geminiModel = env.LLM_MODEL || 'gemini-3.5-flash-lite';
+  const groqFastModel = env.GROQ_MODEL || 'llama-3.1-8b-instant';
+  const groqComplexModel = env.GROQ_COMPLEX_MODEL || 'llama-3.3-70b-versatile';
+
+  const fullPromptText = `${options.systemPrompt || ''} ${options.messages.map((m) => m.content).join(' ')}`;
+  const isBangla = hasBengaliOrBanglish(fullPromptText);
+
+  // 1. Executive Insights: Analytical reasoning over institutional metrics
+  if (options.task === 'insights') {
+    if (hasGroq) {
+      return {
+        primary: { provider: 'groq', model: groqComplexModel },
+        fallback: { provider: 'gemini', model: geminiModel },
+      };
+    }
+    return { primary: { provider: 'gemini', model: geminiModel } };
+  }
+
+  // 2. Practice Question Explanation: Sub-second latency for students
+  if (options.task === 'practice_explanation' || options.task === 'fast_text') {
+    if (hasGroq && !isBangla) {
+      return {
+        primary: { provider: 'groq', model: groqFastModel },
+        fallback: { provider: 'gemini', model: geminiModel },
+      };
+    }
+    return {
+      primary: { provider: 'gemini', model: geminiModel },
+      fallback: hasGroq && !isBangla ? { provider: 'groq', model: groqFastModel } : undefined,
+    };
+  }
+
+  // 3. Admissions Counselor Chat (task === 'chat' or default)
+  // Bengali or Banglish queries stay strictly on Gemini (native tokenizer & comprehension)
+  if (isBangla) {
+    return {
+      primary: { provider: 'gemini', model: geminiModel },
+    };
+  }
+
+  // Clean English Admissions Chat: Gemini primary with Groq 8B fallback
+  return {
+    primary: { provider: 'gemini', model: geminiModel },
+    fallback: hasGroq ? { provider: 'groq', model: groqFastModel } : undefined,
+  };
+}
+
 /**
- * Invokes Google Gemini with quota guards, concurrency limit (2), 30s timeout,
- * and chat response caching.
+ * Multi-Model LLM Gateway:
+ * Intelligently routes between Groq (Llama 8B / 70B) and Google Gemini (gemini-3.5-flash-lite)
+ * with language/task-aware capabilities, zero-downtime fallback, and SHA-256 caching.
  */
 export async function callLLM(options: CallLLMOptions): Promise<string> {
   const isChat = options.isChat ?? true;
@@ -312,74 +494,50 @@ export async function callLLM(options: CallLLMOptions): Promise<string> {
     }
   }
 
-  // 2. Validate client & API key
-  const client = getGeminiClient();
+  // 2. Determine optimal model & fallback route
+  const route = resolveRoute(options);
 
-  // 3. Check & increment daily quota guard before calling provider
-  checkAndIncrementDailyLimit();
-
-  // 4. Format contents with strict alternating user/model roles
-  const contents = formatMessages(options.messages);
-
-  // 5. Build request configuration
-  const model = env.LLM_MODEL || 'gemini-3.5-flash-lite';
-  const maxOutputTokens = options.maxTokens ?? (isChat ? 600 : 800);
-  const temperature = options.temperature ?? (isChat ? 0.3 : 0.2);
-
-  const config: any = {
-    abortSignal: AbortSignal.timeout(30000),
-    httpOptions: { timeout: 30000 },
-    maxOutputTokens,
-    temperature,
-  };
-
-  if (options.systemPrompt) {
-    config.systemInstruction = options.systemPrompt;
-  }
-
-  // 6. Execute request wrapped in concurrency limiter
+  // 3. Attempt Primary Provider
   try {
-    const response = await concurrencyLimiter.run(async () => {
-      return await client.models.generateContent({
-        model,
-        contents,
-        config,
-      });
-    });
-
-    const candidate = response.candidates?.[0];
-    const finishReason = candidate?.finishReason;
-
-    // Check safety filters
-    if (
-      finishReason === 'SAFETY' ||
-      finishReason === 'BLOCKLIST' ||
-      finishReason === 'PROHIBITED_CONTENT' ||
-      finishReason === 'SPII' ||
-      finishReason === 'IMAGE_SAFETY' ||
-      response.promptFeedback?.blockReason
-    ) {
-      throw new LLMBlockedError(
-        `Generation blocked by content safety filters: ${finishReason || response.promptFeedback?.blockReason || 'SAFETY'}`
-      );
+    let result: string;
+    if (route.primary.provider === 'groq') {
+      result = await callGroqDirect(route.primary.model, options);
+    } else {
+      result = await callGeminiDirect(route.primary.model, options);
     }
 
-    const text = response.text?.trim();
-    if (!text) {
-      if (finishReason === 'MAX_TOKENS') {
-        throw new LLMUnavailableError('Model reached token limit without producing output');
-      }
-      throw new LLMUnavailableError('Model returned empty response');
-    }
-
-    // Save to chat cache if applicable
     if (isChat && cacheKey) {
-      setInChatCache(cacheKey, text);
+      setInChatCache(cacheKey, result);
+    }
+    return result;
+  } catch (primaryError) {
+    const classified = classifyError(primaryError);
+
+    // If no fallback route exists or error is non-recoverable safety block, rethrow
+    if (!route.fallback || classified instanceof LLMBlockedError) {
+      throw classified;
     }
 
-    return text;
-  } catch (error) {
-    throw classifyError(error);
+    console.warn(
+      `[LLM Router] Primary provider ${route.primary.provider} (${route.primary.model}) failed: ${classified.message}. Failing over to ${route.fallback.provider} (${route.fallback.model})...`
+    );
+
+    // 4. Execute Safe Fallback
+    try {
+      let fallbackResult: string;
+      if (route.fallback.provider === 'groq') {
+        fallbackResult = await callGroqDirect(route.fallback.model, options);
+      } else {
+        fallbackResult = await callGeminiDirect(route.fallback.model, options);
+      }
+
+      if (isChat && cacheKey) {
+        setInChatCache(cacheKey, fallbackResult);
+      }
+      return fallbackResult;
+    } catch (fallbackError) {
+      throw classifyError(fallbackError);
+    }
   }
 }
 
@@ -401,4 +559,6 @@ export const _testInternals = {
   concurrencyLimiter,
   formatMessages,
   classifyError,
+  resolveRoute,
+  hasBengaliOrBanglish,
 };

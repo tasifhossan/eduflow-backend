@@ -5,6 +5,7 @@ import {
   createPracticeSession,
   submitPracticeSession,
   getPracticeSession,
+  explainPracticeQuestion,
 } from '../controllers/practice.controller';
 
 const router = Router();
@@ -28,6 +29,13 @@ router.post(
   authenticate,
   authorize(Role.STUDENT),
   submitPracticeSession
+);
+
+router.post(
+  '/students/:studentId/practice-sessions/:sessionId/explain',
+  authenticate,
+  authorize(Role.STUDENT),
+  explainPracticeQuestion
 );
 
 export default router;

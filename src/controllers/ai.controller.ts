@@ -144,6 +144,7 @@ ${faqKnowledge}`;
       maxTokens: 600,
       temperature: 0.3,
       isChat: true,
+      task: 'chat',
     });
 
     return res.status(200).json({
@@ -426,6 +427,7 @@ Write a succinct executive summary (2 short paragraphs) followed by 3-4 bulleted
         maxTokens: 800,
         temperature: 0.2,
         isChat: false,
+        task: 'insights',
       });
     } catch (llmError) {
       console.warn('AI Insights LLM generation failed, returning structured anomalies with summary: null');

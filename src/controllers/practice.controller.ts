@@ -3,6 +3,7 @@ import { Role, QuestionType } from '@prisma/client';
 import { createPracticeSessionSchema, submitPracticeSessionSchema } from '../validators/practice.validator';
 import { getBatchChapterWeakSpots } from '../utils/analytics';
 import { scoreMcqQuestion } from '../utils/scoring';
+import { callLLM } from '../utils/llm';
 import prisma from '../utils/prisma';
 
 // POST /api/students/:studentId/practice-sessions
@@ -439,6 +440,120 @@ export async function getPracticeSession(req: Request, res: Response) {
     return res.status(500).json({
       success: false,
       message: 'Internal server error',
+    });
+  }
+}
+
+// POST /api/students/:studentId/practice-sessions/:sessionId/explain
+// STUDENT only, generates instant step-by-step tutoring explanation for a question
+export async function explainPracticeQuestion(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    const { role, userId } = req.user;
+    const studentId = req.params.studentId as string;
+    const sessionId = req.params.sessionId as string;
+
+    if (role !== Role.STUDENT) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only students can access practice sessions',
+      });
+    }
+
+    if (userId !== studentId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You can only access your own practice sessions',
+      });
+    }
+
+    const { questionId } = req.body;
+    if (!questionId || typeof questionId !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed: questionId is required',
+      });
+    }
+
+    const session = await prisma.practiceSession.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session || session.studentId !== studentId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Practice session not found or access denied',
+      });
+    }
+
+    if (!session.questionIds.includes(questionId)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question does not belong to this practice session',
+      });
+    }
+
+    const question = await prisma.question.findUnique({
+      where: { id: questionId },
+      include: {
+        options: true,
+        test: {
+          include: {
+            chapter: { select: { name: true } },
+          },
+        },
+      },
+    });
+
+    if (!question) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question not found',
+      });
+    }
+
+    const optionsText = question.options
+      .map((o) => `- ${o.text}${o.isCorrect ? ' (Correct Answer)' : ''}`)
+      .join('\n');
+
+    const systemPrompt = `You are a high-impact, encouraging coaching center academic tutor.
+Explain step-by-step why the marked correct option is the right answer and why the distractors are wrong.
+Keep the explanation clear, educational, and concise (under 120 words).`;
+
+    const userPrompt = `Subject Chapter: ${question.test?.chapter?.name || 'General'}
+Question: ${question.text}
+Options:
+${optionsText}
+
+Please provide a clear, concise step-by-step explanation.`;
+
+    const explanation = await callLLM({
+      systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+      maxTokens: 350,
+      temperature: 0.2,
+      isChat: false,
+      task: 'practice_explanation',
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        questionId: question.id,
+        explanation,
+      },
+    });
+  } catch (error) {
+    console.error('Explain practice question error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate explanation. Please try again.',
     });
   }
 }

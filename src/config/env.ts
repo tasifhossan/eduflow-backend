@@ -17,6 +17,13 @@ const envSchema = z.object({
   LLM_DAILY_LIMIT: z
     .preprocess((val) => (val === '' || val === undefined ? 200 : val), z.coerce.number().int().positive())
     .default(200),
+  GROQ_API_KEY: z.string().optional(),
+  GROQ_MODEL: z
+    .preprocess((val) => (val === '' || val === undefined ? 'llama-3.1-8b-instant' : val), z.string())
+    .default('llama-3.1-8b-instant'),
+  GROQ_COMPLEX_MODEL: z
+    .preprocess((val) => (val === '' || val === undefined ? 'llama-3.3-70b-versatile' : val), z.string())
+    .default('llama-3.3-70b-versatile'),
   DEMO_MODE: z.string().optional(),
 });
 

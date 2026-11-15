@@ -337,10 +337,6 @@ export async function callLLM(options: CallLLMOptions): Promise<string> {
     config.systemInstruction = options.systemPrompt;
   }
 
-  if (isChat) {
-    config.thinkingConfig = { thinkingBudget: 0 };
-  }
-
   // 6. Execute request wrapped in concurrency limiter
   try {
     const response = await concurrencyLimiter.run(async () => {

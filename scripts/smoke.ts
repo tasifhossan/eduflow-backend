@@ -10,6 +10,7 @@ import env from '../src/config/env';
 import { ATTACHMENT_CONFIG } from '../src/config/academics.config';
 import { FeeLedgerService } from '../src/services/fee-ledger.service';
 import { reconcileFees } from './reconcile-fees';
+import { backfillLegacyResources } from './backfill-materials';
 import { getApiRateLimitMax, isRelaxedRateLimitEnabled } from '../src/config/rateLimit.config';
 import { shuffleArray } from '../src/utils/shuffle';
 
@@ -293,6 +294,9 @@ async function runSmokeTests() {
   const createdSubjectIds: string[] = [];
   const createdFaqIds: string[] = [];
   const createdTestimonialIds: string[] = [];
+  const createdMaterialIds: string[] = [];
+  const createdMaterialAttachmentIds: string[] = [];
+  const createdResourceIds: string[] = [];
   const cmsAuditEntityIds: string[] = [];
   let cmsAuditSince: Date | null = null;
   let originalSettingsBeforeSmoke: any = null;
@@ -5043,7 +5047,7 @@ async function runSmokeTests() {
           },
         });
         const delRes = await req(`/api/resources/${c65Res.id}`, { method: 'DELETE', headers: { Cookie: teacher2Cookie } });
-        assert(delRes.status === 403, `Teacher2 must receive 403 when deleting unassigned batch resource, got ${delRes.status}`);
+        assert(delRes.status === 403 || delRes.status === 410, `Teacher2 must receive 403 or 410 when deleting unassigned batch resource, got ${delRes.status}`);
 
         // 10. Teacher 2 cannot grade answers in Batch 1
         const c65Q = await prisma.question.create({
@@ -7508,6 +7512,396 @@ async function runSmokeTests() {
       recordCheck('68', 'CMS content management (blog, FAQ, testimonials, teachers, reviews, audit)', true, 'All CMS flows verified with strict validation, branch scoping, zero secret leaks, and audit logs');
     }
 
+    // =========================================================================
+    // CHECK 69: Study materials library with private files, access rules and legacy backfill
+    // =========================================================================
+    if (shouldRun('69', 'Study materials library with private files, access rules and legacy backfill', false)) {
+      console.log('\n--- Check 69: Study materials library ---');
+
+      // 1. Chapter of another subject rejected
+      const bioSubject = await prisma.subject.create({
+        data: { name: `SMOKE-Bio-Subject-${Date.now()}` },
+      });
+      createdSubjectIds.push(bioSubject.id);
+      const bioChapter = await prisma.chapter.create({
+        data: { name: `SMOKE-Bio-Chapter-${Date.now()}`, subjectId: bioSubject.id },
+      });
+      createdChapterIds.push(bioChapter.id);
+
+      const crossSubjectRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: bioChapter.id,
+          title: 'SMOKE-Cross-Subject-Material',
+          type: 'NOTES',
+        }),
+      });
+      assert(crossSubjectRes.status === 400, `Expected 400 when chapter belongs to another subject, got ${crossSubjectRes.status}`);
+
+      // 2. Link must be https
+      const insecureLinkRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          title: 'SMOKE-Insecure-Link-Material',
+          type: 'REFERENCE',
+          attachments: [
+            {
+              kind: 'LINK',
+              title: 'Insecure Link',
+              url: 'http://insecure-http-link.example.com',
+            },
+          ],
+        }),
+      });
+      assert(insecureLinkRes.status === 400, `Expected 400 for non-https link attachment, got ${insecureLinkRes.status}`);
+
+      // 3. Teacher limited to own batches
+      const teacher2DenyRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacher2Cookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          title: 'SMOKE-Teacher2-Unauthorized-Material',
+          type: 'NOTES',
+        }),
+      });
+      assert(teacher2DenyRes.status === 403, `Teacher must receive 403 when creating material in unassigned batch, got ${teacher2DenyRes.status}`);
+
+      // 4. Another-branch admin 404
+      const admin2DenyRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          title: 'SMOKE-Admin2-Unauthorized-Material',
+          type: 'NOTES',
+        }),
+      });
+      assert(admin2DenyRes.status === 404, `Admin of another branch must receive 404 on target batch, got ${admin2DenyRes.status}`);
+
+      // 5. Create valid published material with FILE and LINK attachments
+      const testFilePublicId = `eduflow/material/${demoAdmin.branchId}/SMOKE_note_${Date.now()}`;
+      const validMatRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          title: 'SMOKE-Calculus-Notes',
+          description: 'Lecture 1 notes and slides',
+          type: 'NOTES',
+          publish: true,
+          notify: false,
+          attachments: [
+            {
+              kind: 'FILE',
+              title: 'Notes PDF',
+              publicId: testFilePublicId,
+              format: 'pdf',
+              bytes: 10240,
+              originalName: 'notes.pdf',
+            },
+            {
+              kind: 'LINK',
+              title: 'Reference Documentation',
+              url: 'https://developer.mozilla.org/en-US/docs/Web',
+            },
+          ],
+        }),
+      });
+      assert(validMatRes.status === 201, `Failed to create valid study material: ${JSON.stringify(validMatRes.body)}`);
+      const validMatId = validMatRes.body.data.id;
+      createdMaterialIds.push(validMatId);
+      const validAttachments = validMatRes.body.data.attachments;
+      for (const a of validAttachments) {
+        createdMaterialAttachmentIds.push(a.id);
+      }
+
+      // 6. No FILE publicId or permanent url in any response
+      const matJson = JSON.stringify(validMatRes.body.data);
+      assert(!matJson.includes(testFilePublicId), `Response leaked FILE publicId: ${matJson}`);
+      const fileAtt = validAttachments.find((a: any) => a.kind === 'FILE');
+      assert(fileAtt && fileAtt.url === undefined, 'FILE attachment must not return a url property');
+      const linkAtt = validAttachments.find((a: any) => a.kind === 'LINK');
+      assert(linkAtt && typeof linkAtt.url === 'string' && linkAtt.url.startsWith('https://'), 'LINK attachment must expose https url');
+
+      // 7. Student of another batch denied access to batch list and direct material
+      const c69UnenrolledStudent = await prisma.user.create({
+        data: {
+          name: 'SMOKE C69 Unenrolled Student',
+          email: `smoke.c69.unreg.${SMOKE_RUN_SUFFIX}@demo.eduflow.local`,
+          role: Role.STUDENT,
+          branchId: demoAdmin.branchId,
+          password: smokeHash,
+        },
+      });
+      createdUserIds.push(c69UnenrolledStudent.id);
+      const c69UnenrolledToken = jwt.sign(
+        { userId: c69UnenrolledStudent.id, role: 'STUDENT', branchId: demoAdmin.branchId },
+        process.env.JWT_SECRET || 'test-secret'
+      );
+      const c69UnenrolledCookie = `token=${c69UnenrolledToken}`;
+
+      const unregListRes = await req(`/api/batches/${smokeBatch.id}/materials`, {
+        headers: { Cookie: c69UnenrolledCookie },
+      });
+      assert(unregListRes.status === 403, `Unenrolled student must receive 403 on batch materials list, got ${unregListRes.status}`);
+
+      const unregDirectRes = await req(`/api/materials/${validMatId}`, {
+        headers: { Cookie: c69UnenrolledCookie },
+      });
+      assert(unregDirectRes.status === 403, `Unenrolled student must receive 403 on direct material, got ${unregDirectRes.status}`);
+
+      // 8. Drafts and future availableFrom hidden from students and guardians
+      const draftMatRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          title: 'SMOKE-Secret-Draft-Material',
+          type: 'PREPARATION',
+          publish: false,
+        }),
+      });
+      assert(draftMatRes.status === 201, 'Failed to create draft material');
+      const draftMatId = draftMatRes.body.data.id;
+      createdMaterialIds.push(draftMatId);
+
+      const futureDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      const futureMatRes = await req('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          title: 'SMOKE-Future-Material',
+          type: 'PRACTICE',
+          publish: true,
+          availableFrom: futureDate,
+        }),
+      });
+      assert(futureMatRes.status === 201, 'Failed to create future material');
+      const futureMatId = futureMatRes.body.data.id;
+      createdMaterialIds.push(futureMatId);
+
+      // Student checks materials list
+      const studentListRes = await req(`/api/batches/${smokeBatch.id}/materials`, {
+        headers: { Cookie: studentCookie },
+      });
+      assert(studentListRes.status === 200, `Student must be able to list materials in enrolled batch, got ${studentListRes.status}`);
+      const studentItems = studentListRes.body.data.items;
+      assert(!studentItems.some((i: any) => i.id === draftMatId), 'Draft material leaked to student materials list');
+      assert(!studentItems.some((i: any) => i.id === futureMatId), 'Future availableFrom material leaked to student materials list');
+      assert(studentItems.some((i: any) => i.id === validMatId), 'Published material missing from student materials list');
+
+      // Student direct access to draft & future must be 404
+      const studentDraftRes = await req(`/api/materials/${draftMatId}`, {
+        headers: { Cookie: studentCookie },
+      });
+      assert(studentDraftRes.status === 404, `Student direct get of draft material must be 404, got ${studentDraftRes.status}`);
+
+      const studentFutureRes = await req(`/api/materials/${futureMatId}`, {
+        headers: { Cookie: studentCookie },
+      });
+      assert(studentFutureRes.status === 404, `Student direct get of future material must be 404, got ${studentFutureRes.status}`);
+
+      // 9. Guardian scoping (only linked child)
+      const unlinkedGuardRes = await req(`/api/batches/${smokeBatch.id}/materials?studentId=${demoStudent.id}`, {
+        headers: { Cookie: unlinkedGuardCookie },
+      });
+      assert(unlinkedGuardRes.status === 403, `Unlinked guardian must receive 403, got ${unlinkedGuardRes.status}`);
+
+      const linkedGuardRes = await req(`/api/batches/${smokeBatch.id}/materials?studentId=${demoStudent.id}`, {
+        headers: { Cookie: guardianCookie },
+      });
+      assert(linkedGuardRes.status === 200, `Linked guardian must receive 200, got ${linkedGuardRes.status}`);
+      const guardItems = linkedGuardRes.body.data.items;
+      assert(!guardItems.some((i: any) => i.id === draftMatId), 'Draft material leaked to guardian');
+      assert(!guardItems.some((i: any) => i.id === futureMatId), 'Future material leaked to guardian');
+
+      // 10. Unenrolled student denied download
+      const fileAttId = fileAtt.id;
+      const unregDlRes = await req(`/api/attachments/${fileAttId}/download`, {
+        headers: { Cookie: c69UnenrolledCookie },
+      });
+      assert(unregDlRes.status === 403, `Unenrolled student must be denied download (403), got ${unregDlRes.status}`);
+
+      // 11. Signed link expires & MaterialAccess counts
+      const studentDl1 = await req(`/api/attachments/${fileAttId}/download`, {
+        headers: { Cookie: studentCookie },
+      });
+      assert(studentDl1.status === 200, `Enrolled student failed download: ${JSON.stringify(studentDl1.body)}`);
+      assert(typeof studentDl1.body.data.url === 'string' && studentDl1.body.data.url.length > 0, 'Download url missing');
+      assert(typeof studentDl1.body.data.expiresAt === 'string', 'expiresAt timestamp missing');
+      const expiresDate = new Date(studentDl1.body.data.expiresAt);
+      const diffSec = (expiresDate.getTime() - Date.now()) / 1000;
+      assert(diffSec > 200 && diffSec <= 300, `Signed download url must expire in ~300s (5 min), got diff ${diffSec}s`);
+
+      // Second download to increment MaterialAccess
+      const studentDl2 = await req(`/api/attachments/${fileAttId}/download`, {
+        headers: { Cookie: studentCookie },
+      });
+      assert(studentDl2.status === 200, 'Second student download failed');
+
+      const accessLog = await prisma.materialAccess.findUnique({
+        where: {
+          materialId_studentId: {
+            materialId: validMatId,
+            studentId: demoStudent.id,
+          },
+        },
+      });
+      assert(accessLog !== null && accessLog.accessCount >= 2, `MaterialAccess count expected >= 2, got ${accessLog?.accessCount}`);
+
+      // Staff access log endpoint
+      const staffAccessRes = await req(`/api/materials/${validMatId}/access`, {
+        headers: { Cookie: teacherCookie },
+      });
+      assert(staffAccessRes.status === 200, `Staff access logs endpoint failed: ${JSON.stringify(staffAccessRes.body)}`);
+      const studentAccessEntry = staffAccessRes.body.data.find((e: any) => e.studentId === demoStudent.id);
+      assert(studentAccessEntry && studentAccessEntry.opened === true && studentAccessEntry.accessCount >= 2, 'Staff access logs must report opened and count >= 2');
+
+      // 12. Copied asset survives deletion of one copy
+      const copyTargetBatch = await prisma.batch.create({
+        data: {
+          name: `SMOKE-Copy-Target-${Date.now()}`,
+          slug: `smoke-copy-target-${Date.now()}`,
+          type: 'ACADEMIC',
+          subjectId: mathSubject.id,
+          branchId: demoAdmin.branchId,
+          teacherId: demoUsers['TEACHER'].id,
+          isPublished: true,
+        },
+      });
+      createdBatchIds.push(copyTargetBatch.id);
+
+      const copyRes = await req(`/api/materials/${validMatId}/copy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ batchIds: [copyTargetBatch.id] }),
+      });
+      assert(copyRes.status === 200, `Copy material failed: ${JSON.stringify(copyRes.body)}`);
+      const copiedMat = copyRes.body.data.materials[0];
+      createdMaterialIds.push(copiedMat.id);
+      for (const ca of copiedMat.attachments) {
+        createdMaterialAttachmentIds.push(ca.id);
+      }
+
+      // Verify copied attachment has the same publicId in DB
+      const dbCopiedAtt = await prisma.materialAttachment.findFirst({
+        where: { materialId: copiedMat.id, kind: 'FILE' },
+      });
+      assert(dbCopiedAtt && dbCopiedAtt.publicId === testFilePublicId, 'Copied attachment must reference original publicId');
+
+      // Delete the original material
+      const deleteOrigRes = await req(`/api/materials/${validMatId}`, {
+        method: 'DELETE',
+        headers: { Cookie: teacherCookie },
+      });
+      assert(deleteOrigRes.status === 200, `Delete original material failed: ${JSON.stringify(deleteOrigRes.body)}`);
+
+      // Verify copied material still exists intact in the target batch
+      const verifyCopyAfterDel = await prisma.studyMaterial.findUnique({
+        where: { id: copiedMat.id },
+        include: { attachments: true },
+      });
+      assert(verifyCopyAfterDel !== null, 'Copied material must survive deletion of original');
+      const survivingAtt = verifyCopyAfterDel.attachments.find((a) => a.kind === 'FILE');
+      assert(survivingAtt && survivingAtt.publicId === testFilePublicId, 'Copied FILE attachment must survive intact with its publicId');
+
+      // 13. Feature flag 404
+      const origFeatures = (originalSettingsBeforeSmoke?.features as any) || {};
+      await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ features: { materials: false } }),
+      });
+
+      const gatedListRes = await req(`/api/batches/${smokeBatch.id}/materials`, {
+        headers: { Cookie: teacherCookie },
+      });
+      assert(gatedListRes.status === 404, `Materials endpoint must return 404 when materials feature is false, got ${gatedListRes.status}`);
+
+      // Restore feature flag
+      await req('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: superAdminCookie },
+        body: JSON.stringify({ features: { materials: origFeatures.materials !== false } }),
+      });
+
+      const ungatedListRes = await req(`/api/batches/${smokeBatch.id}/materials`, {
+        headers: { Cookie: teacherCookie },
+      });
+      assert(ungatedListRes.status === 200, `Materials endpoint must return 200 when materials feature is restored, got ${ungatedListRes.status}`);
+
+      // 14. Legacy routes return 410 pointing to /api/materials
+      const legacyCreateRes = await req('/api/resources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ title: 'Deprecated', batchId: smokeBatch.id }),
+      });
+      assert(legacyCreateRes.status === 410, `POST /api/resources must return 410, got ${legacyCreateRes.status}`);
+      assert(JSON.stringify(legacyCreateRes.body).includes('/api/materials'), '410 response must mention /api/materials');
+
+      const legacyListRes = await req(`/api/batches/${smokeBatch.id}/resources`, {
+        headers: { Cookie: teacherCookie },
+      });
+      assert(legacyListRes.status === 410, `GET /api/batches/:id/resources must return 410, got ${legacyListRes.status}`);
+
+      const legacyDeleteRes = await req('/api/resources/dummy-legacy-id', {
+        method: 'DELETE',
+        headers: { Cookie: teacherCookie },
+      });
+      assert(legacyDeleteRes.status === 410, `DELETE /api/resources/:id must return 410, got ${legacyDeleteRes.status}`);
+
+      // 15. Legacy backfill script is idempotent
+      const legacyRes = await prisma.resource.create({
+        data: {
+          title: `SMOKE-Legacy-Doc-${Date.now()}`,
+          fileUrl: 'https://example.com/legacy-document.pdf',
+          fileType: 'application/pdf',
+          batchId: smokeBatch.id,
+          chapterId: smokeChapter1.id,
+          uploadedById: demoUsers['TEACHER'].id,
+        },
+      });
+      createdResourceIds.push(legacyRes.id);
+
+      const bf1 = await backfillLegacyResources();
+      assert(bf1.migrated >= 1, `First backfill run must migrate legacy resource, got migrated=${bf1.migrated}`);
+
+      const backfilledMat = await prisma.studyMaterial.findUnique({
+        where: { legacyResourceId: legacyRes.id },
+        include: { attachments: true },
+      });
+      assert(backfilledMat !== null, 'Legacy resource must have corresponding StudyMaterial');
+      assert(backfilledMat.type === 'NOTES', `PDF file must be classified as NOTES, got ${backfilledMat.type}`);
+      assert(backfilledMat.isPublished === true, 'Backfilled material must be published');
+      assert(backfilledMat.attachments.length === 1, 'Backfilled material must have 1 attachment');
+      assert(backfilledMat.attachments[0].kind === 'LINK', 'Backfilled attachment must be LINK');
+      createdMaterialIds.push(backfilledMat.id);
+      createdMaterialAttachmentIds.push(backfilledMat.attachments[0].id);
+
+      const bf2 = await backfillLegacyResources();
+      assert(bf2.migrated === 0, `Second backfill run must be idempotent (migrated 0), got migrated=${bf2.migrated}`);
+      assert(bf2.skipped >= 1, `Second backfill run must report skipped >= 1, got skipped=${bf2.skipped}`);
+
+      recordCheck(
+        '69',
+        'Study materials library with private files, access rules and legacy backfill',
+        true,
+        'All 15 study material requirements verified: teacher scoping, 404 branch isolation, draft protection, guardian child link, download token expiry, zero publicId leaks, https link enforcement, subject-chapter integrity, surviving shared asset, MaterialAccess tracking, feature flag 404, 410 legacy retirement, and idempotent backfill'
+      );
+    }
+
 
   } finally {
     // ─────────────────────────────────────────────────────────────────────────
@@ -7568,6 +7962,23 @@ async function runSmokeTests() {
         await prisma.test.deleteMany({ where: { id: { in: createdTestIds } } });
       }
       await prisma.test.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
+      // Clean up study materials, attachments and access logs
+      if (createdMaterialAttachmentIds.length > 0) {
+        await prisma.materialAttachment.deleteMany({ where: { id: { in: createdMaterialAttachmentIds } } });
+      }
+      await prisma.materialAttachment.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
+      if (createdMaterialIds.length > 0) {
+        await prisma.materialAccess.deleteMany({ where: { materialId: { in: createdMaterialIds } } });
+        await prisma.studyMaterial.deleteMany({ where: { id: { in: createdMaterialIds } } });
+      }
+      await prisma.studyMaterial.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
+
+      if (createdResourceIds.length > 0) {
+        await prisma.resource.deleteMany({ where: { id: { in: createdResourceIds } } });
+      }
+      await prisma.resource.deleteMany({ where: { title: { startsWith: 'SMOKE-' } } });
 
       // Clean up academic attachments, submissions, assignments, lectures before batches
       if (createdAttachmentIds.length > 0) {

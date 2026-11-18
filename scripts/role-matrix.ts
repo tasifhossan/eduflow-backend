@@ -99,6 +99,7 @@ interface Fixtures {
   chargeId: string;
   paymentId: string;
   targetUserId: string;
+  materialId: string;
 }
 
 interface Mismatch {
@@ -145,6 +146,7 @@ interface DatabaseSnapshot {
   submissions: TableSnapshot;
   attachments: TableSnapshot;
   notices: TableSnapshot;
+  studyMaterials: TableSnapshot;
 }
 
 function hashRows(rows: Array<{ id: string; [key: string]: any }>): TableSnapshot {
@@ -295,6 +297,11 @@ async function takeDatabaseSnapshot(): Promise<DatabaseSnapshot> {
     select: { id: true, title: true, branchId: true, createdAt: true },
   });
 
+  const studyMaterials = await prisma.studyMaterial.findMany({
+    where: { NOT: { title: { startsWith: 'MATRIX-' } } },
+    select: { id: true, title: true, batchId: true, isPublished: true, createdAt: true },
+  });
+
   return {
     users: hashRows(users),
     batches: hashRows(batches),
@@ -316,6 +323,7 @@ async function takeDatabaseSnapshot(): Promise<DatabaseSnapshot> {
     submissions: hashRows(submissions),
     attachments: hashRows(attachments),
     notices: hashRows(notices),
+    studyMaterials: hashRows(studyMaterials),
   };
 }
 
@@ -457,6 +465,32 @@ async function cleanMatrixFixtures() {
 
     // 9. Tests
     await prisma.test.deleteMany({
+      where: {
+        OR: [
+          { title: { startsWith: 'MATRIX-' } },
+          { batch: { name: { startsWith: 'MATRIX-' } } },
+        ],
+      },
+    });
+
+    // 9.5. Study materials & attachments & access logs
+    await prisma.materialAccess.deleteMany({
+      where: {
+        OR: [
+          { material: { title: { startsWith: 'MATRIX-' } } },
+          { student: { email: { startsWith: 'matrix.' } } },
+        ],
+      },
+    });
+    await prisma.materialAttachment.deleteMany({
+      where: {
+        OR: [
+          { material: { title: { startsWith: 'MATRIX-' } } },
+          { title: { startsWith: 'MATRIX-' } },
+        ],
+      },
+    });
+    await prisma.studyMaterial.deleteMany({
       where: {
         OR: [
           { title: { startsWith: 'MATRIX-' } },
@@ -790,6 +824,29 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
     },
   });
 
+  // Create MATRIX-StudyMaterial
+  const matrixMaterial = await prisma.studyMaterial.create({
+    data: {
+      branchId: branch.id,
+      batchId: batch.id,
+      subjectId: subject.id,
+      title: 'MATRIX- Study Material Probe',
+      type: 'NOTES',
+      isPublished: true,
+      createdById: teacher.id,
+      attachments: {
+        create: [
+          {
+            kind: 'LINK',
+            title: 'MATRIX- Link Attachment',
+            url: 'https://example.com/notes.pdf',
+            uploadedById: teacher.id,
+          },
+        ],
+      },
+    },
+  });
+
   const tokens: Record<string, string> = {
     [Role.SUPER_ADMIN]: jwt.sign({ userId: superAdmin.id, role: Role.SUPER_ADMIN, branchId: superAdmin.branchId }, env.JWT_SECRET),
     [Role.ADMIN]: jwt.sign({ userId: admin.id, role: Role.ADMIN, branchId: admin.branchId }, env.JWT_SECRET),
@@ -814,6 +871,7 @@ async function setupFixtures(): Promise<{ fixtures: Fixtures; tokens: Record<str
       chargeId: charge.id,
       paymentId: modernPayment.id,
       targetUserId: targetUser.id,
+      materialId: matrixMaterial.id,
     },
     tokens,
   };
@@ -1177,12 +1235,33 @@ function discoverAllAuthorizedRoutes(): { endpoints: EndpointSpec[]; untestable:
             else if (fullPattern.includes('/fees/payments/:id')) replaced = replaced.replace(':id', f.paymentId);
             else if (fullPattern.includes('/subjects/:id')) replaced = replaced.replace(':id', f.subjectId);
             else if (fullPattern.includes('/cms/teachers/:id')) replaced = replaced.replace(':id', f.teacherId);
+            else if (fullPattern.includes('/materials/:id')) replaced = replaced.replace(':id', f.materialId);
             else replaced = replaced.replace(/:id\b/g, f.studentId);
             replaced = replaced.replace(/:[a-zA-Z0-9_]+/g, 'matrix-dummy-id');
+            if (fullPattern.includes('/materials') && (fullPattern.includes('/batches/') || fullPattern.includes('/materials/'))) {
+              if (!replaced.includes('studentId=')) {
+                replaced += (replaced.includes('?') ? '&' : '?') + `studentId=${f.studentId}`;
+              }
+            }
             return replaced;
           },
           body: (f: Fixtures) => {
             if (method === 'POST' || method === 'PATCH' || method === 'PUT') {
+              if (fullPattern === '/api/materials' && method === 'POST') {
+                return { batchId: f.batchId, title: 'MATRIX- Probe Material', type: 'NOTES' };
+              }
+              if (fullPattern.endsWith('/copy')) {
+                return { batchIds: [f.batchId] };
+              }
+              if (fullPattern.endsWith('/order')) {
+                return { ids: [f.materialId] };
+              }
+              if (fullPattern.endsWith('/publish')) {
+                return { notify: false };
+              }
+              if (fullPattern.endsWith('/unpublish')) {
+                return {};
+              }
               return { name: 'MATRIX-Fallback-Probe', status: 'ACTIVE', branchId: f.branchId, studentId: f.studentId, batchId: f.batchId };
             }
             return undefined;

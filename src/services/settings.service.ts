@@ -37,6 +37,7 @@ export interface CenterPublicData {
     lectures?: boolean;
     assignments?: boolean;
     onlineClasses?: boolean;
+    materials?: boolean;
     [key: string]: unknown;
   };
   content: {
@@ -114,6 +115,7 @@ export async function getCenterSettings(forceRefresh = false) {
           assignments: true,
           onlineClasses: true,
           attendanceAlerts: true,
+          materials: true,
         },
         attendancePolicy: {
           alertOnLate: false,
@@ -197,6 +199,7 @@ export async function getPublicCenterSettings(forceRefresh = false): Promise<Cen
     lectures: rawFeatures.lectures !== false,
     assignments: rawFeatures.assignments !== false,
     onlineClasses: rawFeatures.onlineClasses !== false,
+    materials: rawFeatures.materials !== false,
   };
 
   const content = await getContentSummary(

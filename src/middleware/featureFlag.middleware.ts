@@ -11,7 +11,8 @@ export type FeatureFlagName =
   | 'showPoweredBy'
   | 'lectures'
   | 'assignments'
-  | 'onlineClasses';
+  | 'onlineClasses'
+  | 'materials';
 
 export function requireFeature(flag: FeatureFlagName) {
   return async (_req: Request, res: Response, next: NextFunction) => {

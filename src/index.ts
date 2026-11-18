@@ -152,6 +152,7 @@ app.use(
 import lectureRouter from './routes/lecture.routes';
 import assignmentRouter from './routes/assignment.routes';
 import attachmentRouter from './routes/attachment.routes';
+import materialRouter from './routes/material.routes';
 import notificationRouter from './routes/notification.routes';
 import enquiryRouter from './routes/enquiry.routes';
 
@@ -192,6 +193,7 @@ app.get('/api/online-classes', authenticate, requireFeature('onlineClasses'), (_
 app.use('/api', lectureRouter);
 app.use('/api', assignmentRouter);
 app.use('/api', attachmentRouter);
+app.use('/api', materialRouter);
 app.use('/api', notificationRouter);
 app.use('/api/enquiries', enquiryRouter);
 app.use('/api', reportCardRouter);

@@ -10,7 +10,7 @@ import { ATTACHMENT_CONFIG } from '../config/academics.config';
  * Validates that publicId belongs to caller's branch and folder,
  * and checks the Cloudinary asset existence, format, and size.
  */
-async function verifyCloudinaryAsset(
+export async function verifyCloudinaryAsset(
   publicId: string,
   purpose: 'material' | 'submission',
   branchId: string,
@@ -93,6 +93,41 @@ async function verifyCloudinaryAsset(
   }
 
   return { resourceType, format, bytes };
+}
+
+/**
+ * Deletes a Cloudinary asset only when no other row in Attachment or MaterialAttachment references it.
+ */
+export async function safelyDeleteCloudinaryAsset(
+  publicId: string,
+  resourceType?: string | null,
+  excludeAttachmentId?: string,
+  excludeMaterialAttachmentId?: string
+): Promise<void> {
+  try {
+    const otherAttachmentCount = await prisma.attachment.count({
+      where: {
+        publicId,
+        ...(excludeAttachmentId ? { id: { not: excludeAttachmentId } } : {}),
+      },
+    });
+
+    const otherMaterialAttachmentCount = await prisma.materialAttachment.count({
+      where: {
+        publicId,
+        ...(excludeMaterialAttachmentId ? { id: { not: excludeMaterialAttachmentId } } : {}),
+      },
+    });
+
+    if (otherAttachmentCount === 0 && otherMaterialAttachmentCount === 0) {
+      await cloudinary.uploader.destroy(publicId, {
+        resource_type: resourceType || 'raw',
+        type: 'authenticated',
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to delete Cloudinary asset safely:', publicId, err);
+  }
 }
 
 export async function createAttachment(req: Request, res: Response) {
@@ -384,9 +419,134 @@ export async function getAttachmentDownload(req: Request, res: Response) {
     });
 
     if (!attachment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Attachment not found',
+      const materialAttachment = await prisma.materialAttachment.findUnique({
+        where: { id },
+        include: {
+          material: {
+            include: {
+              batch: {
+                select: { id: true, branchId: true, teacherId: true, archivedAt: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!materialAttachment) {
+        return res.status(404).json({
+          success: false,
+          message: 'Attachment not found',
+        });
+      }
+
+      const { material } = materialAttachment;
+      const user = req.user;
+      let isAuthorized = false;
+
+      if (user.role === Role.SUPER_ADMIN) {
+        isAuthorized = true;
+      } else if (user.role === Role.ADMIN) {
+        isAuthorized = material.branchId === user.branchId;
+      } else if (user.role === Role.TEACHER) {
+        isAuthorized = material.batch.teacherId === user.userId;
+      } else if (user.role === Role.STUDENT) {
+        const isAvailable = !material.availableFrom || material.availableFrom <= new Date();
+        if (material.isPublished && isAvailable) {
+          const enrollment = await prisma.enrollment.findUnique({
+            where: {
+              studentId_batchId: {
+                studentId: user.userId,
+                batchId: material.batchId,
+              },
+            },
+          });
+          if (enrollment?.status === EnrollmentStatus.ACTIVE) {
+            isAuthorized = true;
+            // Update MaterialAccess for student
+            await prisma.materialAccess.upsert({
+              where: {
+                materialId_studentId: {
+                  materialId: material.id,
+                  studentId: user.userId,
+                },
+              },
+              create: {
+                materialId: material.id,
+                studentId: user.userId,
+                firstAccessAt: new Date(),
+                lastAccessAt: new Date(),
+                accessCount: 1,
+              },
+              update: {
+                lastAccessAt: new Date(),
+                accessCount: { increment: 1 },
+              },
+            });
+          }
+        }
+      } else if (user.role === Role.GUARDIAN) {
+        const isAvailable = !material.availableFrom || material.availableFrom <= new Date();
+        if (material.isPublished && isAvailable) {
+          const studentId = req.query.studentId as string;
+          if (studentId) {
+            const link = await prisma.guardianLink.findUnique({
+              where: {
+                guardianId_studentId: {
+                  guardianId: user.userId,
+                  studentId,
+                },
+              },
+            });
+            if (link) {
+              const enrollment = await prisma.enrollment.findUnique({
+                where: {
+                  studentId_batchId: {
+                    studentId,
+                    batchId: material.batchId,
+                  },
+                },
+              });
+              isAuthorized = enrollment?.status === EnrollmentStatus.ACTIVE;
+            }
+          }
+        }
+      }
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Access denied to this attachment',
+        });
+      }
+
+      if (materialAttachment.kind === 'LINK') {
+        return res.status(200).json({
+          success: true,
+          data: {
+            url: materialAttachment.url,
+            expiresAt: null,
+          },
+        });
+      }
+
+      const expiresAtSec = Math.floor(Date.now() / 1000) + ATTACHMENT_CONFIG.DOWNLOAD_URL_EXPIRES_IN_SECONDS;
+      const expiresAt = new Date(expiresAtSec * 1000).toISOString();
+      const signedDownloadUrl = cloudinary.utils.private_download_url(
+        materialAttachment.publicId || '',
+        materialAttachment.format || '',
+        {
+          resource_type: (materialAttachment.resourceType || 'raw') as any,
+          type: 'authenticated',
+          expires_at: expiresAtSec,
+        }
+      );
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          url: signedDownloadUrl,
+          expiresAt,
+        },
       });
     }
 
@@ -571,9 +731,70 @@ export async function deleteAttachment(req: Request, res: Response) {
     });
 
     if (!attachment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Attachment not found',
+      const materialAttachment = await prisma.materialAttachment.findUnique({
+        where: { id },
+        include: {
+          material: {
+            include: {
+              batch: {
+                select: { id: true, branchId: true, teacherId: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!materialAttachment) {
+        return res.status(404).json({
+          success: false,
+          message: 'Attachment not found',
+        });
+      }
+
+      const isUploader = materialAttachment.uploadedById === req.user.userId;
+      const isAdmin =
+        req.user.role === Role.SUPER_ADMIN ||
+        (req.user.role === Role.ADMIN && materialAttachment.material.branchId === req.user.branchId);
+      const isTeacher =
+        req.user.role === Role.TEACHER &&
+        materialAttachment.material.batch.teacherId === req.user.userId;
+
+      if (!isUploader && !isAdmin && !isTeacher) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Access denied to delete this material attachment',
+        });
+      }
+
+      if (materialAttachment.kind === 'FILE' && materialAttachment.publicId) {
+        await safelyDeleteCloudinaryAsset(
+          materialAttachment.publicId,
+          materialAttachment.resourceType,
+          undefined,
+          materialAttachment.id
+        );
+      }
+
+      await prisma.materialAttachment.delete({
+        where: { id },
+      });
+
+      await createAuditLog({
+        actorId: req.user.userId,
+        action: 'ATTACHMENT_DELETE',
+        entityType: 'MaterialAttachment',
+        entityId: materialAttachment.id,
+        branchId: materialAttachment.material.branchId,
+        metadata: {
+          id: materialAttachment.id,
+          materialId: materialAttachment.materialId,
+          kind: materialAttachment.kind,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Attachment deleted successfully',
       });
     }
 
@@ -591,14 +812,7 @@ export async function deleteAttachment(req: Request, res: Response) {
 
     // Best-effort delete from Cloudinary if it's a file
     if (attachment.kind === 'FILE' && attachment.publicId) {
-      try {
-        await cloudinary.uploader.destroy(attachment.publicId, {
-          resource_type: attachment.resourceType || 'raw',
-          type: 'authenticated',
-        });
-      } catch (err) {
-        console.warn('Failed to delete Cloudinary asset:', attachment.publicId, err);
-      }
+      await safelyDeleteCloudinaryAsset(attachment.publicId, attachment.resourceType, attachment.id);
     }
 
     await prisma.attachment.delete({

@@ -10,6 +10,7 @@ export const NOTIFICATION_TYPE_WHITELIST = [
   'LECTURE_CANCELLED',
   'ASSIGNMENT_PUBLISHED',
   'SUBMISSION_GRADED',
+  'MATERIAL_PUBLISHED',
 ] as const;
 
 export type AcademicNotificationType = typeof NOTIFICATION_TYPE_WHITELIST[number];
@@ -20,7 +21,7 @@ export interface SendAcademicNotificationParams {
   body: string;
   batchId: string;
   studentId?: string; // If targeting a single student + their guardians (e.g. grading)
-  entityType?: 'Lecture' | 'Assignment' | 'AssignmentSubmission';
+  entityType?: 'Lecture' | 'Assignment' | 'AssignmentSubmission' | 'StudyMaterial';
   entityId?: string;
   emailSubject: string;
   emailBodyHtml: string;

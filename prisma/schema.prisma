@@ -200,6 +200,7 @@ model Branch {
   receiptSequences ReceiptSequence[]
   enquiries ContactMessage[] @relation("BranchEnquiries")
   preferredEnquiries ContactMessage[] @relation("PreferredBranchEnquiries")
+  materials StudyMaterial[]
 }
 
 model User {
@@ -269,6 +270,10 @@ model User {
   createdReportPeriods ReportPeriod[]          @relation(name: "ReportPeriodCreatedBy")
   studentRemarks       ReportRemark[]          @relation(name: "ReportRemarkStudent")
   updatedRemarks       ReportRemark[]          @relation(name: "ReportRemarkUpdatedBy")
+  createdMaterials     StudyMaterial[]         @relation(name: "CreatedMaterials")
+  updatedMaterials     StudyMaterial[]         @relation(name: "UpdatedMaterials")
+  uploadedMaterialAttachments MaterialAttachment[] @relation(name: "UploadedMaterialAttachments")
+  materialAccesses     MaterialAccess[]
 
 
   @@index([branchId])
@@ -333,6 +338,7 @@ model Subject {
   batches     Batch[]
   lectures    Lecture[]
   assignments Assignment[]
+  materials   StudyMaterial[]
 }
 
 model Chapter {
@@ -343,6 +349,7 @@ model Chapter {
   tests     Test[]
   resources Resource[]
   lectures  Lecture[]
+  materials StudyMaterial[]
 
   @@index([subjectId])
 }
@@ -383,6 +390,7 @@ model Batch {
   lectures         Lecture[]
   assignments      Assignment[]
   reportPeriods    ReportPeriod[]
+  materials        StudyMaterial[]
   archivedAt       DateTime?
 
 
@@ -641,6 +649,7 @@ model Resource {
   uploadedById String
   uploadedBy   User     @relation(name: "UploadedResources", fields: [uploadedById], references: [id])
   createdAt    DateTime @default(now())
+  migratedMaterial StudyMaterial?
 
   @@index([batchId])
   @@index([chapterId])
@@ -817,7 +826,7 @@ model CenterSettings {
   feeDueDay              Int      @default(10)
   receiptHeader          String?
   receiptFooter          String?
-  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true,\"attendanceAlerts\":true}")
+  features               Json     @default("{\"publicSite\":true,\"aiAssistant\":true,\"blog\":true,\"reviews\":true,\"testimonials\":true,\"newsletter\":false,\"showPoweredBy\":true,\"lectures\":true,\"assignments\":true,\"onlineClasses\":true,\"attendanceAlerts\":true,\"materials\":true}")
   attendancePolicy       Json     @default("{\"alertOnLate\":false,\"lowThresholdPercent\":75,\"editWindowDays\":7}")
   homepage               Json     @default("{\"heroBadge\":\"\",\"heroPoints\":[],\"heroTitle\":\"\",\"heroSubtitle\":\"\",\"heroImageUrl\":null,\"announcement\":{\"enabled\":false,\"text\":\"\",\"linkLabel\":\"\",\"linkUrl\":\"\"},\"highlights\":[],\"whyChooseUs\":[],\"admissionSteps\":[],\"showFees\":true,\"showPhotoGallery\":true}")
   officeHours            String?
@@ -859,6 +868,7 @@ model Lecture {
   updatedAt      DateTime        @updatedAt
   attachments    Attachment[]
   assignments    Assignment[]
+  materials      StudyMaterial[]
 
   @@unique([routineSlotId, startsAt])
   @@index([batchId, startsAt])
@@ -1119,6 +1129,87 @@ model ReportRemark {
   @@index([periodId])
   @@index([studentId])
 }
+
+enum StudyMaterialType {
+  PREPARATION
+  NOTES
+  SLIDES
+  PRACTICE
+  QUESTIONS
+  REFERENCE
+  RECORDING
+  OTHER
+}
+
+model StudyMaterial {
+  id               String               @id @default(cuid())
+  branchId         String
+  branch           Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  batchId          String
+  batch            Batch                @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  subjectId        String
+  subject          Subject              @relation(fields: [subjectId], references: [id])
+  chapterId        String?
+  chapter          Chapter?             @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+  lectureId        String?
+  lecture          Lecture?             @relation(fields: [lectureId], references: [id], onDelete: SetNull)
+  title            String               @db.VarChar(120)
+  description      String?              @db.VarChar(500)
+  type             StudyMaterialType
+  isPublished      Boolean              @default(false)
+  availableFrom    DateTime?
+  sortOrder        Int                  @default(0)
+  legacyResourceId String?              @unique
+  legacyResource   Resource?            @relation(fields: [legacyResourceId], references: [id], onDelete: SetNull)
+  createdById      String
+  createdBy        User                 @relation(name: "CreatedMaterials", fields: [createdById], references: [id])
+  updatedById      String?
+  updatedBy        User?                @relation(name: "UpdatedMaterials", fields: [updatedById], references: [id])
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  attachments      MaterialAttachment[]
+  accessLogs       MaterialAccess[]
+
+  @@index([batchId, chapterId])
+  @@index([batchId, isPublished, availableFrom])
+  @@index([branchId])
+}
+
+model MaterialAttachment {
+  id           String         @id @default(cuid())
+  materialId   String
+  material     StudyMaterial  @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  kind         AttachmentKind
+  title        String
+  url          String?
+  publicId     String?
+  resourceType String?
+  format       String?
+  bytes        Int?
+  originalName String?
+  uploadedById String
+  uploadedBy   User           @relation(name: "UploadedMaterialAttachments", fields: [uploadedById], references: [id])
+  createdAt    DateTime       @default(now())
+
+  @@index([materialId])
+  @@index([uploadedById])
+}
+
+model MaterialAccess {
+  id            String        @id @default(cuid())
+  materialId    String
+  material      StudyMaterial @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  studentId     String
+  student       User          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  firstAccessAt DateTime      @default(now())
+  lastAccessAt  DateTime      @default(now())
+  accessCount   Int           @default(1)
+
+  @@unique([materialId, studentId])
+  @@index([materialId])
+  @@index([studentId])
+}
+
 
 
 

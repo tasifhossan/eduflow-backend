@@ -64,6 +64,9 @@ interface FixturesA {
   practiceSessionId: string;
   guardianLinkId: string;
   reviewId: string;
+  chapterId: string;
+  materialId: string;
+  materialAttachmentId: string;
 }
 
 interface FixturesB {
@@ -192,6 +195,32 @@ export async function cleanAllMatrixFixtures() {
     });
 
     await prisma.resource.deleteMany({
+      where: {
+        OR: [
+          { title: { startsWith: 'MATRIX-' } },
+          { batch: { name: { startsWith: 'MATRIX-' } } },
+        ],
+      },
+    });
+
+    // 2.5. Study materials & attachments & access logs
+    await prisma.materialAccess.deleteMany({
+      where: {
+        OR: [
+          { material: { title: { startsWith: 'MATRIX-' } } },
+          { student: { email: { startsWith: 'matrix.' } } },
+        ],
+      },
+    });
+    await prisma.materialAttachment.deleteMany({
+      where: {
+        OR: [
+          { material: { title: { startsWith: 'MATRIX-' } } },
+          { title: { startsWith: 'MATRIX-' } },
+        ],
+      },
+    });
+    await prisma.studyMaterial.deleteMany({
       where: {
         OR: [
           { title: { startsWith: 'MATRIX-' } },
@@ -381,6 +410,16 @@ export async function cleanAllMatrixFixtures() {
           { email: { startsWith: 'matrix.' } },
           { name: { startsWith: 'MATRIX-' } },
           { branch: { name: { startsWith: 'MATRIX-' } } },
+        ],
+      },
+    });
+
+    // 15.5 Chapters
+    await prisma.chapter.deleteMany({
+      where: {
+        OR: [
+          { name: { startsWith: 'MATRIX-' } },
+          { subject: { name: { startsWith: 'MATRIX-' } } },
         ],
       },
     });
@@ -897,6 +936,39 @@ async function setupIsolationFixtures(): Promise<{
     },
   });
 
+  const chapterA = await prisma.chapter.create({
+    data: {
+      name: `MATRIX- Chapter A ${Date.now()}`,
+      subjectId: subjectA.id,
+    },
+  });
+
+  const materialA = await prisma.studyMaterial.create({
+    data: {
+      branchId: branchA.id,
+      batchId: batch1.id,
+      subjectId: subjectA.id,
+      chapterId: chapterA.id,
+      title: 'MATRIX- Study Material Isolation',
+      type: 'NOTES',
+      isPublished: true,
+      createdById: teacherA1.id,
+      attachments: {
+        create: [
+          {
+            kind: 'LINK',
+            title: 'MATRIX- Isolation Link',
+            url: 'https://example.com/notes.pdf',
+            uploadedById: teacherA1.id,
+          },
+        ],
+      },
+    },
+    include: {
+      attachments: true,
+    },
+  });
+
   const fixturesA: FixturesA = {
     branchId: branchA.id,
     branchName: branchA.name,
@@ -948,6 +1020,9 @@ async function setupIsolationFixtures(): Promise<{
     practiceSessionId: practiceSession.id,
     guardianLinkId: guardianLink1.id,
     reviewId: review.id,
+    chapterId: chapterA.id,
+    materialId: materialA.id,
+    materialAttachmentId: materialA.attachments[0].id,
   };
 
   const fixturesB: FixturesB = {
@@ -995,6 +1070,7 @@ async function computeFixturesChecksum(f: FixturesA): Promise<string> {
   const resources = await prisma.resource.findMany({ where: { batch: { branchId: f.branchId } }, orderBy: { id: 'asc' } });
   const adjustments = await prisma.feeAdjustment.findMany({ where: { branchId: f.branchId }, orderBy: { id: 'asc' } });
   const practiceSessions = await prisma.practiceSession.findMany({ where: { batch: { branchId: f.branchId } }, orderBy: { id: 'asc' } });
+  const studyMaterials = await prisma.studyMaterial.findMany({ where: { branchId: f.branchId }, orderBy: { id: 'asc' } });
 
   hash.update(JSON.stringify({
     users: users.map(u => ({ id: u.id, role: u.role, branchId: u.branchId, isActive: u.isActive })),
@@ -1013,6 +1089,7 @@ async function computeFixturesChecksum(f: FixturesA): Promise<string> {
     resources: resources.map(res => ({ id: res.id, title: res.title })),
     adjustments: adjustments.map(adj => ({ id: adj.id, amount: String(adj.amount), status: adj.status })),
     practiceSessions: practiceSessions.map(ps => ({ id: ps.id, totalQuestions: ps.totalQuestions })),
+    studyMaterials: studyMaterials.map(sm => ({ id: sm.id, title: sm.title, isPublished: sm.isPublished })),
   }));
 
   return hash.digest('hex');
@@ -1779,6 +1856,84 @@ export async function runBranchIsolationTests(): Promise<{
         description: 'Delete attachment of foreign/unassigned batch',
         principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
       },
+      // Study Materials
+      {
+        method: 'GET',
+        path: (f) => `/api/materials/${f.materialId}`,
+        description: 'Get material of foreign/unassigned/unenrolled batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'PATCH',
+        path: (f) => `/api/materials/${f.materialId}`,
+        body: () => ({ title: 'Mutated Probe Material' }),
+        description: 'Update material of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A1', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'DELETE',
+        path: (f) => `/api/materials/${f.materialId}`,
+        description: 'Delete material of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A1', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/materials/${f.materialId}/publish`,
+        body: () => ({ notify: false }),
+        description: 'Publish material of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/materials/${f.materialId}/unpublish`,
+        body: () => ({}),
+        description: 'Unpublish material of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'POST',
+        path: (f) => `/api/materials/${f.materialId}/copy`,
+        body: (f) => ({ batchIds: [f.batch1Id] }),
+        description: 'Copy material of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/materials/${f.materialId}/access`,
+        description: 'Get access log of material in foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A1', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/attachments/${f.materialAttachmentId}/download`,
+        description: 'Download material attachment of foreign/unassigned/unenrolled batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'PUT',
+        path: (f) => `/api/batches/${f.batch1Id}/materials/order`,
+        body: (f) => ({ ids: [f.materialId] }),
+        description: 'Reorder materials of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/materials`,
+        description: 'Get batch materials of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/materials/summary`,
+        description: 'Get batch materials summary of foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
+      {
+        method: 'GET',
+        path: (f) => `/api/batches/${f.batch1Id}/materials?chapterId=${f.chapterId}&studentId=${f.student1Id}`,
+        description: 'Get batch materials with chapterId, batchId and studentId filters for foreign/unassigned batch',
+        principals: ['ADMIN_B', 'TEACHER_B', 'TEACHER_A2', 'STUDENT_B', 'STUDENT_A2', 'GUARDIAN_B', 'GUARDIAN_A2'],
+      },
       {
         method: 'PATCH',
         path: (f) => `/api/enquiries/${f.enquiryId}`,
@@ -1950,8 +2105,8 @@ export async function runBranchIsolationTests(): Promise<{
         }
 
         // Intra-branch or cross-branch access to foreign branch/unassigned batch/unlinked student
-        // MUST return 403 or 404.
-        const isForbiddenOrNotFound = status === 403 || status === 404;
+        // MUST return 403 or 404 (or 410 for retired endpoints).
+        const isForbiddenOrNotFound = status === 403 || status === 404 || status === 410;
         const isSuccessStatus = status === 200 || status === 201 || status === 204;
 
         // Check data leakage in body text
@@ -1995,6 +2150,7 @@ export async function runBranchIsolationTests(): Promise<{
       { name: 'teacherId=A', buildQuery: (f) => `teacherId=${f.teacher1Id}` },
       { name: 'subjectId=A', buildQuery: (f) => `subjectId=${f.subjectId}` },
       { name: 'enrollmentId=A', buildQuery: (f) => `enrollmentId=${f.enrollment1Id}` },
+      { name: 'chapterId=A', buildQuery: (f) => `chapterId=${f.chapterId}` },
     ];
 
     const branchACanaries = [

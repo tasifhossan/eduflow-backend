@@ -131,6 +131,7 @@ async function main() {
         assignments: true,
         onlineClasses: true,
         attendanceAlerts: true,
+        materials: true,
       },
       homepage: {
         heroBadge: '',

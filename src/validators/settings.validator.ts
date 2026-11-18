@@ -221,6 +221,7 @@ export const updateSettingsSchema = z
         assignments: z.boolean().optional(),
         onlineClasses: z.boolean().optional(),
         attendanceAlerts: z.boolean().optional(),
+        materials: z.boolean().optional(),
       })
       .partial()
       .optional(),

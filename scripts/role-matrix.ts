@@ -1218,6 +1218,7 @@ function discoverAllAuthorizedRoutes(): { endpoints: EndpointSpec[]; untestable:
             replaced = replaced.replace(/:submissionId\b/g, f.submissionId);
             replaced = replaced.replace(/:testId\b/g, f.testId);
             replaced = replaced.replace(/:branchId\b/g, f.branchId);
+            replaced = replaced.replace(/:subjectId\b/g, f.subjectId);
             replaced = replaced.replace(/:reportPeriodId\b/g, f.reportPeriodId);
             replaced = replaced.replace(/:chargeId\b/g, f.chargeId);
             replaced = replaced.replace(/:paymentId\b/g, f.paymentId);

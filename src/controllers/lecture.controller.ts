@@ -1444,7 +1444,9 @@ export async function getSyllabusProgress(req: Request, res: Response) {
       include: {
         subject: {
           include: {
-            chapters: true,
+            chapters: {
+              orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+            },
           },
         },
       },
@@ -1589,6 +1591,9 @@ export async function getSyllabusProgress(req: Request, res: Response) {
       return {
         id: c.id,
         name: c.name,
+        title: c.name,
+        order: c.position,
+        position: c.position,
         covered,
         lastCoveredAt,
       };

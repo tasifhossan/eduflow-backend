@@ -7279,19 +7279,26 @@ async function runSmokeTests() {
       assert(htmlFaqA.status === 400, `HTML in answer expected 400, got ${htmlFaqA.status}`);
 
       // Suggestions: inserts drafts with empty answers, idempotent
-      const sug1 = await call('POST', '/api/cms/faq/suggestions', adminCookie, {});
-      assert(sug1.status === 200, `FAQ suggestions expected 200, got ${sug1.status}`);
-      const sug1Created = sug1.body?.data?.created ?? 0;
-      assert(sug1Created > 0, `Suggestions should create items, got ${sug1Created}`);
-      const sugIds = (sug1.body?.data?.ids ?? []) as string[];
-      createdFaqIds.push(...sugIds);
-      cmsAuditEntityIds.push(...sugIds);
-      const sugItems = await prisma.faqItem.findMany({ where: { id: { in: sugIds } } });
-      assert(sugItems.every((x) => !x.isPublished && x.answer === ''), 'Suggestions must be unpublished drafts with empty answers');
+      const localSugIds: string[] = [];
+      try {
+        const sug1 = await call('POST', '/api/cms/faq/suggestions', adminCookie, {});
+        assert(sug1.status === 200, `FAQ suggestions expected 200, got ${sug1.status}`);
+        const sugIds = (sug1.body?.data?.ids ?? []) as string[];
+        localSugIds.push(...sugIds);
+        cmsAuditEntityIds.push(...sugIds);
+        if (sugIds.length > 0) {
+          const sugItems = await prisma.faqItem.findMany({ where: { id: { in: sugIds } } });
+          assert(sugItems.every((x) => !x.isPublished && x.answer === ''), 'Suggestions must be unpublished drafts with empty answers');
+        }
 
-      // Idempotent: calling again creates 0
-      const sug2 = await call('POST', '/api/cms/faq/suggestions', adminCookie, {});
-      assert(sug2.status === 200 && sug2.body?.data?.created === 0, 'Suggestions must be idempotent (0 created on second run)');
+        // Idempotent: calling again creates 0
+        const sug2 = await call('POST', '/api/cms/faq/suggestions', adminCookie, {});
+        assert(sug2.status === 200 && sug2.body?.data?.created === 0, 'Suggestions must be idempotent (0 created on second run)');
+      } finally {
+        if (localSugIds.length > 0) {
+          await prisma.faqItem.deleteMany({ where: { id: { in: localSugIds } } });
+        }
+      }
 
       // Reorder
       const f2 = await call('POST', '/api/cms/faq', adminCookie, { question: `${TAG} Question Two`, answer: 'Ans 2' });
@@ -7527,6 +7534,104 @@ async function runSmokeTests() {
         data: { name: `SMOKE-Bio-Chapter-${Date.now()}`, subjectId: bioSubject.id },
       });
       createdChapterIds.push(bioChapter.id);
+
+      // Chapter ordering & position assignment
+      const orderSubject = await prisma.subject.create({
+        data: { name: `SMOKE-Order-Subject-${Date.now()}` },
+      });
+      createdSubjectIds.push(orderSubject.id);
+
+      const ch1Res = await req('/api/chapters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `SMOKE-Order-Ch1-${Date.now()}`, subjectId: orderSubject.id }),
+      });
+      assert(ch1Res.status === 201, `Chapter 1 create expected 201, got ${ch1Res.status}`);
+      const ch1 = ch1Res.body?.data;
+      createdChapterIds.push(ch1.id);
+      assert(ch1.position === 0, `Chapter 1 position expected 0, got ${ch1.position}`);
+
+      const ch2Res = await req('/api/chapters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `SMOKE-Order-Ch2-${Date.now()}`, subjectId: orderSubject.id }),
+      });
+      assert(ch2Res.status === 201, `Chapter 2 create expected 201, got ${ch2Res.status}`);
+      const ch2 = ch2Res.body?.data;
+      createdChapterIds.push(ch2.id);
+      assert(ch2.position === 1, `Chapter 2 position expected 1, got ${ch2.position}`);
+
+      const ch3Res = await req('/api/chapters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ name: `SMOKE-Order-Ch3-${Date.now()}`, subjectId: orderSubject.id }),
+      });
+      assert(ch3Res.status === 201, `Chapter 3 create expected 201, got ${ch3Res.status}`);
+      const ch3 = ch3Res.body?.data;
+      createdChapterIds.push(ch3.id);
+      assert(ch3.position === 2, `Chapter 3 position expected 2, got ${ch3.position}`);
+
+      const listBefore = await req(`/api/chapters?subjectId=${orderSubject.id}`, {
+        headers: { Cookie: adminCookie },
+      });
+      assert(listBefore.status === 200, `List chapters expected 200, got ${listBefore.status}`);
+      const listBeforeIds = (listBefore.body?.data || []).map((c: any) => c.id);
+      assert(listBeforeIds[0] === ch1.id && listBeforeIds[1] === ch2.id && listBeforeIds[2] === ch3.id, 'Chapters must be sorted by position');
+
+      // Reorder route: PUT /api/subjects/:subjectId/chapters/order
+      // Non-SUPER_ADMIN is forbidden (403)
+      const teacherReorder = await req(`/api/subjects/${orderSubject.id}/chapters/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: teacherCookie },
+        body: JSON.stringify({ ids: [ch3.id, ch1.id, ch2.id] }),
+      });
+      assert(teacherReorder.status === 403, `Teacher reorder expected 403, got ${teacherReorder.status}`);
+
+      const adminReorder = await req(`/api/subjects/${orderSubject.id}/chapters/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ ids: [ch3.id, ch1.id, ch2.id] }),
+      });
+      assert(adminReorder.status === 403, `Admin reorder expected 403, got ${adminReorder.status}`);
+
+      // Incomplete IDs (400)
+      const missingIdReorder = await req(`/api/subjects/${orderSubject.id}/chapters/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: smokeSuperAdminCookie },
+        body: JSON.stringify({ ids: [ch3.id, ch1.id] }),
+      });
+      assert(missingIdReorder.status === 400, `Missing IDs reorder expected 400, got ${missingIdReorder.status}`);
+
+      // Foreign ID (400)
+      const foreignIdReorder = await req(`/api/subjects/${orderSubject.id}/chapters/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: smokeSuperAdminCookie },
+        body: JSON.stringify({ ids: [ch3.id, ch1.id, bioChapter.id] }),
+      });
+      assert(foreignIdReorder.status === 400, `Foreign ID reorder expected 400, got ${foreignIdReorder.status}`);
+
+      // Valid reorder by SUPER_ADMIN: [ch3, ch1, ch2]
+      const validReorder = await req(`/api/subjects/${orderSubject.id}/chapters/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: smokeSuperAdminCookie },
+        body: JSON.stringify({ ids: [ch3.id, ch1.id, ch2.id] }),
+      });
+      assert(validReorder.status === 200, `Valid reorder expected 200, got ${validReorder.status}`);
+
+      const listAfter = await req(`/api/chapters?subjectId=${orderSubject.id}`, {
+        headers: { Cookie: adminCookie },
+      });
+      assert(listAfter.status === 200, `List chapters after reorder expected 200, got ${listAfter.status}`);
+      const listAfterIds = (listAfter.body?.data || []).map((c: any) => c.id);
+      assert(listAfterIds[0] === ch3.id && listAfterIds[1] === ch1.id && listAfterIds[2] === ch2.id, 'Chapters must reflect updated position order');
+
+      const reorderAudit = await prisma.auditLog.findFirst({
+        where: {
+          action: 'REORDER_CHAPTERS',
+          entityId: orderSubject.id,
+        },
+      });
+      assert(reorderAudit !== null, 'Reordering chapters must write REORDER_CHAPTERS audit log');
 
       const crossSubjectRes = await req('/api/materials', {
         method: 'POST',

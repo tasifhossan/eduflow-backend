@@ -14,6 +14,10 @@ const updateChapterSchema = z.object({
   subjectId: z.string().min(1, 'Subject ID is required').optional(),
 });
 
+const reorderChaptersSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'At least one chapter ID is required'),
+});
+
 export async function getChapters(req: Request, res: Response) {
   try {
     if (!req.user) {
@@ -30,6 +34,8 @@ export async function getChapters(req: Request, res: Response) {
       select: {
         id: true,
         name: true,
+        position: true,
+        createdAt: true,
         subjectId: true,
         subject: {
           select: {
@@ -37,9 +43,10 @@ export async function getChapters(req: Request, res: Response) {
           },
         },
       },
-      orderBy: {
-        name: 'asc',
-      },
+      orderBy: [
+        { position: 'asc' },
+        { createdAt: 'asc' },
+      ],
     });
 
     return res.status(200).json({
@@ -101,14 +108,25 @@ export async function createChapter(req: Request, res: Response) {
       });
     }
 
+    // Calculate new position: max + 1
+    const maxChapter = await prisma.chapter.findFirst({
+      where: { subjectId },
+      orderBy: { position: 'desc' },
+      select: { position: true },
+    });
+    const position = maxChapter !== null && maxChapter.position !== undefined ? maxChapter.position + 1 : 0;
+
     const newChapter = await prisma.chapter.create({
       data: {
         name,
         subjectId,
+        position,
       },
       select: {
         id: true,
         name: true,
+        position: true,
+        createdAt: true,
         subjectId: true,
         subject: {
           select: {
@@ -128,7 +146,8 @@ export async function createChapter(req: Request, res: Response) {
         chapterId: newChapter.id,
         subjectId: newChapter.subjectId,
         name: newChapter.name,
-        changedFields: ['name', 'subjectId'],
+        position: newChapter.position,
+        changedFields: ['name', 'subjectId', 'position'],
       },
       ip: req.ip || null,
     });
@@ -140,6 +159,111 @@ export async function createChapter(req: Request, res: Response) {
     });
   } catch (error) {
     console.error('Create chapter error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
+export async function reorderSubjectChapters(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Authentication required',
+      });
+    }
+
+    if (req.user.role !== Role.SUPER_ADMIN) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only SUPER_ADMIN can reorder chapters',
+      });
+    }
+
+    const subjectId = req.params.subjectId as string;
+    const subject = await prisma.subject.findUnique({
+      where: { id: subjectId },
+    });
+    if (!subject) {
+      return res.status(404).json({
+        success: false,
+        message: 'Subject not found',
+      });
+    }
+
+    const parseResult = reorderChaptersSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        data: parseResult.error.flatten(),
+      });
+    }
+
+    const { ids } = parseResult.data;
+
+    // Check for duplicates
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Duplicate chapter IDs provided',
+      });
+    }
+
+    // Get all chapters for this subject
+    const subjectChapters = await prisma.chapter.findMany({
+      where: { subjectId },
+      select: { id: true },
+    });
+
+    // The ids must be exactly the subject's chapters
+    if (ids.length !== subjectChapters.length) {
+      return res.status(400).json({
+        success: false,
+        message: `Expected exactly ${subjectChapters.length} chapter IDs for this subject, got ${ids.length}`,
+      });
+    }
+
+    const existingIdSet = new Set(subjectChapters.map((c) => c.id));
+    const allValid = ids.every((id) => existingIdSet.has(id));
+    if (!allValid) {
+      return res.status(400).json({
+        success: false,
+        message: "One or more chapter IDs do not belong to this subject",
+      });
+    }
+
+    await prisma.$transaction(
+      ids.map((id, index) =>
+        prisma.chapter.update({
+          where: { id },
+          data: { position: index },
+        })
+      )
+    );
+
+    await createAuditLog({
+      actorId: req.user.userId,
+      action: 'REORDER_CHAPTERS',
+      entityType: 'Subject',
+      entityId: subjectId,
+      branchId: req.user.branchId || null,
+      metadata: {
+        subjectId,
+        count: ids.length,
+        chapterIds: ids,
+      },
+      ip: req.ip || null,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Chapters reordered successfully',
+    });
+  } catch (error) {
+    console.error('Reorder chapters error:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error',

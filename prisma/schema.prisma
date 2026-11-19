@@ -344,6 +344,8 @@ model Subject {
 model Chapter {
   id        String     @id @default(cuid())
   name      String
+  position  Int        @default(0)
+  createdAt DateTime   @default(now())
   subjectId String
   subject   Subject    @relation(fields: [subjectId], references: [id])
   tests     Test[]

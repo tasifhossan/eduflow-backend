@@ -1313,8 +1313,8 @@ export async function getBatchMaterialsSummary(req: Request, res: Response) {
     const [chapters, materials] = await Promise.all([
       prisma.chapter.findMany({
         where: { subjectId: batch.subjectId },
-        select: { id: true, name: true },
-        orderBy: { name: 'asc' },
+        select: { id: true, name: true, position: true },
+        orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
       }),
       prisma.studyMaterial.findMany({
         where: {

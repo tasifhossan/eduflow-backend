@@ -180,14 +180,14 @@ export const updateSettingsSchema = z
   .object({
     name: z.string().trim().min(2).max(100).optional(),
     shortName: z.string().trim().min(2).max(50).optional(),
-    tagline: z.string().trim().min(2).max(200).optional(),
+    tagline: z.string().trim().max(200).optional().nullable(),
     logoUrl: httpsUrlSchema,
     faviconUrl: httpsUrlSchema,
     primaryColor: hexColorSchema.optional(),
     contactEmail: z.string().trim().email().optional(),
     contactPhone: phoneSchema.optional(),
     whatsapp: phoneSchema.optional().nullable(),
-    address: z.string().trim().min(2).max(250).optional(),
+    address: z.string().trim().max(250).optional().nullable(),
     socials: z
       .object({
         facebook: httpsUrlSchema,

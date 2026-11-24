@@ -64,6 +64,13 @@ export async function updateSettings(req: Request, res: Response) {
     const currentSettings = await getCenterSettings();
     const updateData: Record<string, unknown> = { ...parseResult.data };
 
+    if (updateData.address === null) {
+      updateData.address = '';
+    }
+    if (updateData.tagline === null) {
+      updateData.tagline = '';
+    }
+
     // Deep merge features object if provided
     if (parseResult.data.features) {
       const existingFeatures = (currentSettings.features as Record<string, unknown>) || {};
